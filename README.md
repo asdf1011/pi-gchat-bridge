@@ -67,10 +67,12 @@ That's it — the bot now answers messages in any space it's installed in.
 - **Parallel across threads, independent conversations** — each
   conversation is handled independently and concurrently (event-driven async,
   no threads needed); a long reply in one thread never blocks another.
-- **Implicit stop** — sending a new message while pi is thinking aborts the
-  current run and the new message becomes the redirect. The partial reply
-  stays visible in the thread (finalized as-is) and the aborted turn stays in
-  the session (marked `aborted`), so the redirect has full context.
+- **Interleaved messages (steer)** — sending a message while pi is working
+  queues it into the *running* turn: it's delivered after the current tool
+  call finishes (tool results land first) and before the next LLM call, so
+  pi keeps its tool loop active and addresses your new message alongside the
+  original work — "tool call start, message, tool call response". Commands
+  (`/help`, `/model`, `/resume`) instead interrupt the running reply.
 - **Thread-aware replies** — replies go back into the thread you messaged in.
 - **pi extensions & skills work** — the session loads your `~/.pi/agent`
   extensions, so `/commands` and skills behave like in the TUI.

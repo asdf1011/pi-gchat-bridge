@@ -251,15 +251,10 @@ async function main(): Promise<void> {
       return "ok";
     }
 
-    if (router.isBusy(sessionKey)) {
-      // Implicit stop: a new message interrupts the running reply and becomes
-      // the redirect — no more deferring while this conversation streams.
-      console.log(`[chat] ${display}: new message while streaming — implicit stop, redirecting`);
-      await router.interrupt(sessionKey);
-    }
-
     // --- Built-in commands (handled by the bridge, not sent to pi) ---
+    // Commands are explicit control: they interrupt any running reply first.
     if (/^\/model\b/.test(text.trim())) {
+      if (router.isBusy(sessionKey)) await router.interrupt(sessionKey);
       const models = router.listModels();
       if (models.length === 0) {
         await client.sendMessage(spaceName, "No models configured.", threadName);
@@ -270,11 +265,13 @@ async function main(): Promise<void> {
       return "ok";
     }
     if (/^\/help\b/.test(text.trim())) {
+      if (router.isBusy(sessionKey)) await router.interrupt(sessionKey);
       await client.createCardMessage(spaceName, helpCard(), "Available commands: /resume, /sessions, /list, /help.", threadName);
       console.log(`[chat] ${display}: posted help card`);
       return "ok";
     }
     if (/^\/(resume|sessions|list)\b/.test(text.trim())) {
+      if (router.isBusy(sessionKey)) await router.interrupt(sessionKey);
       const sessions = await router.listSessions();
       if (sessions.length === 0) {
         await client.sendMessage(spaceName, "No sessions found yet.", threadName);
@@ -283,6 +280,18 @@ async function main(): Promise<void> {
       await client.createCardMessage(spaceName, pickerCard(sessions), "Choose a session to resume.", threadName);
       console.log(`[chat] ${display}: posted session picker (${sessions.length} sessions)`);
       return "ok";
+    }
+
+    // --- Plain message while the conversation is streaming: steer it into the
+    // running turn (interleaved) — tool calls stay active, the tool result
+    // lands, then the model addresses the new message too. ---
+    if (router.isBusy(sessionKey)) {
+      if (await router.steer(sessionKey, text)) {
+        console.log(`[chat] ${display}: steered into running turn`);
+        return "ok";
+      }
+      // Race: the session stopped streaming between the check and steer —
+      // fall through and process as a normal prompt below.
     }
 
     let markerName: string | undefined;

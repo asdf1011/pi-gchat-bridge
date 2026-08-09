@@ -272,6 +272,26 @@ export class AgentRouter {
   }
 
   /**
+   * Steer a message into the RUNNING turn (interleaved): queued now, delivered
+   * after the current assistant turn finishes its tool calls and before the
+   * next LLM call — so in-flight tool results land first, then the model
+   * addresses both the original work and the new message together. Returns
+   * false if the session wasn't streaming (caller falls back to a normal
+   * prompt).
+   */
+  async steer(sessionKey: string, text: string): Promise<boolean> {
+    const entry = this.sessions.get(sessionKey);
+    if (!entry || !entry.session.isStreaming) return false;
+    try {
+      await entry.session.steer(text);
+      return true;
+    } catch (err) {
+      console.error(`[router] ${sessionKey} steer failed:`, (err as Error).message);
+      return false;
+    }
+  }
+
+  /**
    * Implicit stop: a new message while a conversation is streaming aborts the
    * current run so the new message can redirect it. The aborted turn is KEPT
    * in the session (pi marks it stopReason "aborted" and the context builder
