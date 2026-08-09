@@ -18,6 +18,8 @@ export interface Config {
   stallTimeoutMs: number;
   /** Watchdog: scan interval. */
   watchdogIntervalMs: number;
+  /** Steer: how long to wait for an in-flight tool call before aborting to redirect (ms). */
+  steerWaitMs: number;
 }
 
 function required(name: string): string {
@@ -53,5 +55,6 @@ export function loadConfig(): Config {
     stateFile,
     stallTimeoutMs: Number(process.env.BRIDGE_STALL_TIMEOUT_MS ?? 20 * 60 * 1000),
     watchdogIntervalMs: Number(process.env.BRIDGE_WATCHDOG_INTERVAL_MS ?? 30_000),
+    steerWaitMs: Number(process.env.BRIDGE_STEER_WAIT_MS ?? 10_000),
   };
 }

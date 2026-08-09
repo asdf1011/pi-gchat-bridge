@@ -187,7 +187,13 @@ async function main(): Promise<void> {
 
   const client = new ChatClient(config.serviceAccountPath);
   const state = new StateStore(config.stateFile);
-  const router = await AgentRouter.create(config.cwd, config.sessionsDir, config.stallTimeoutMs, config.watchdogIntervalMs);
+  const router = await AgentRouter.create(
+    config.cwd,
+    config.sessionsDir,
+    config.stallTimeoutMs,
+    config.watchdogIntervalMs,
+    config.steerWaitMs,
+  );
 
   /**
    * Handle one incoming Chat message with a live, in-place streaming reply:
@@ -283,15 +289,21 @@ async function main(): Promise<void> {
     }
 
     // --- Plain message while the conversation is streaming: steer it into the
-    // running turn (interleaved) — tool calls stay active, the tool result
-    // lands, then the model addresses the new message too. ---
+    // running turn (interleaved) with a bounded tool wait. If the in-flight
+    // tool finishes within steerWaitMs its result lands and the steer is
+    // delivered right after; otherwise abort + redirect so the interjection
+    // is never stuck behind a long tool call. ---
     if (router.isBusy(sessionKey)) {
-      if (await router.steer(sessionKey, text)) {
+      const outcome = await router.redirect(sessionKey, text);
+      if (outcome === "steered") {
         console.log(`[chat] ${display}: steered into running turn`);
         return "ok";
       }
-      // Race: the session stopped streaming between the check and steer —
-      // fall through and process as a normal prompt below.
+      if (outcome === "redirected") {
+        console.log(`[chat] ${display}: tool overrun — aborted, redirecting`);
+        // Fall through: the new message becomes a normal prompt.
+      }
+      // not-busy: race — fall through to a normal prompt below.
     }
 
     let markerName: string | undefined;

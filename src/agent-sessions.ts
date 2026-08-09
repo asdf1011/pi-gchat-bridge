@@ -36,6 +36,22 @@ interface SpaceEntry {
   lastActivityAt: number;
   /** True while a watchdog reset is in progress for this session. */
   resetting: boolean;
+  /** In-flight tool calls (tool_execution_start/end deltas). */
+  toolsInFlight: number;
+  /** Steered messages awaiting delivery into the running turn. */
+  pendingSteers: { text: string; delivered: boolean }[];
+}
+
+/** Extract plain text from a pi message content (string or block array). */
+function contentText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((b): b is { type: string; text?: string } => typeof b === "object" && b !== null && "text" in b)
+      .map((b) => b.text ?? "")
+      .join("");
+  }
+  return "";
 }
 
 /**
@@ -100,6 +116,8 @@ export class AgentRouter {
     private stallTimeoutMs: number,
     /** How often the watchdog scans for stalled sessions. */
     private watchdogIntervalMs: number,
+    /** How long to wait for an in-flight tool call before aborting to redirect. */
+    private steerWaitMs: number,
   ) {}
 
   static async create(
@@ -107,8 +125,9 @@ export class AgentRouter {
     sessionsDir: string,
     stallTimeoutMs: number,
     watchdogIntervalMs: number,
+    steerWaitMs: number,
   ): Promise<AgentRouter> {
-    const router = new AgentRouter(cwd, sessionsDir, stallTimeoutMs, watchdogIntervalMs);
+    const router = new AgentRouter(cwd, sessionsDir, stallTimeoutMs, watchdogIntervalMs, steerWaitMs);
     router.modelRuntime = await ModelRuntime.create();
     if (router.stallTimeoutMs > 0 && router.watchdogIntervalMs > 0) {
       router.watchdogTimer = setInterval(() => {
@@ -163,10 +182,21 @@ export class AgentRouter {
 
     try {
       await entry.session.prompt(text);
+      let reply = this.lastAssistantText(entry.session);
+      // Guaranteed delivery: any steers that were queued but never injected
+      // into the running turn get their own follow-up prompt now, so no
+      // steered message is ever silently lost.
+      const undelivered = entry.pendingSteers.filter((s) => !s.delivered);
+      for (const steer of undelivered) {
+        steer.delivered = true;
+        await entry.session.prompt(steer.text);
+        reply = `${reply}${reply ? "\n\n" : ""}${this.lastAssistantText(entry.session)}`;
+      }
+      entry.pendingSteers = [];
+      return reply.trim() || null;
     } finally {
       unsubscribe?.();
     }
-    return this.lastAssistantText(entry.session);
   }
 
   /** Whether the session for this conversation is currently streaming (busy). */
@@ -282,13 +312,45 @@ export class AgentRouter {
   async steer(sessionKey: string, text: string): Promise<boolean> {
     const entry = this.sessions.get(sessionKey);
     if (!entry || !entry.session.isStreaming) return false;
+    // Track for guaranteed delivery (fix: steers never silently lost).
+    entry.pendingSteers.push({ text, delivered: false });
     try {
       await entry.session.steer(text);
       return true;
     } catch (err) {
       console.error(`[router] ${sessionKey} steer failed:`, (err as Error).message);
+      entry.pendingSteers.pop();
       return false;
     }
+  }
+
+  /**
+   * Deliver a message to a streaming conversation with a bounded tool wait:
+   * - if a tool call is in flight, wait up to `steerWaitMs` for it to finish
+   *   (its result lands, then the steer delivers right after)
+   * - if the tool is still running after the cap, abort and redirect instead
+   *   (implicit stop) so the interjection is never stuck behind a long tool.
+   * Returns "steered" | "redirected" | "not-busy".
+   */
+  async redirect(sessionKey: string, text: string): Promise<"steered" | "redirected" | "not-busy"> {
+    const entry = this.sessions.get(sessionKey);
+    if (!entry || !entry.session.isStreaming) return "not-busy";
+
+    if (entry.toolsInFlight > 0) {
+      const deadline = Date.now() + this.steerWaitMs;
+      while (entry.toolsInFlight > 0 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      if (entry.toolsInFlight > 0) {
+        console.log(
+          `[router] ${sessionKey} tool still running after ${this.steerWaitMs}ms — aborting to redirect`,
+        );
+        await this.interrupt(sessionKey);
+        return "redirected";
+      }
+    }
+
+    return (await this.steer(sessionKey, text)) ? "steered" : "not-busy";
   }
 
   /**
@@ -446,10 +508,23 @@ export class AgentRouter {
       file: target,
       lastActivityAt: Date.now(),
       resetting: false,
+      toolsInFlight: 0,
+      pendingSteers: [],
     };
-    // Long-lived listener: any agent event counts as activity for the watchdog.
-    entry.session.subscribe(() => {
+    // Long-lived listener: any agent event counts as activity for the watchdog;
+    // tool_execution start/end tracks in-flight tools (bounded steer wait);
+    // a user message_start matching a queued steer marks it as delivered.
+    entry.session.subscribe((event) => {
       entry.lastActivityAt = Date.now();
+      if (event.type === "tool_execution_start") {
+        entry.toolsInFlight++;
+      } else if (event.type === "tool_execution_end") {
+        entry.toolsInFlight = Math.max(0, entry.toolsInFlight - 1);
+      } else if (event.type === "message_start" && event.message?.role === "user") {
+        const text = contentText(event.message.content);
+        const pending = entry.pendingSteers.find((s) => !s.delivered && s.text === text);
+        if (pending) pending.delivered = true;
+      }
     });
     console.log(`[router] opened session for ${sessionKey} -> ${target}`);
     return entry;
