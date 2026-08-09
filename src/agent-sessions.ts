@@ -272,6 +272,32 @@ export class AgentRouter {
   }
 
   /**
+   * Implicit stop: a new message while a conversation is streaming aborts the
+   * current run so the new message can redirect it. Bounded like the watchdog
+   * (abort with a timeout, wait for streaming to clear) and drops the
+   * incomplete trailing turn so the aborted work is never re-run. If the
+   * session is genuinely wedged (abort can't clear it), falls back to the
+   * full forceReset (dispose + reopen).
+   */
+  async interrupt(sessionKey: string): Promise<void> {
+    const entry = this.sessions.get(sessionKey);
+    if (!entry || !entry.session.isStreaming) return;
+    console.log(`[router] ${sessionKey} interrupting current run (implicit stop)`);
+    await withTimeout(entry.session.abort(), 15_000);
+    const deadline = Date.now() + 10_000;
+    while (entry.session.isStreaming && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    if (entry.session.isStreaming) {
+      console.log(`[router] ${sessionKey} still streaming after abort — force-resetting`);
+      await this.forceReset(sessionKey, entry);
+      return;
+    }
+    const dropped = this.truncateIncompleteTail(entry.file);
+    console.log(`[router] ${sessionKey} interrupted (dropped ${dropped} incomplete entr${dropped === 1 ? "y" : "ies"})`);
+  }
+
+  /**
    * Scan for sessions that have been streaming with no agent activity for
    * longer than the stall threshold (a hung tool call — e.g. a network fetch
    * without a timeout — produces no events, so the session never frees up and

@@ -252,8 +252,10 @@ async function main(): Promise<void> {
     }
 
     if (router.isBusy(sessionKey)) {
-      console.log(`[chat] ${display}: busy, deferring`);
-      return "busy";
+      // Implicit stop: a new message interrupts the running reply and becomes
+      // the redirect — no more deferring while this conversation streams.
+      console.log(`[chat] ${display}: new message while streaming — implicit stop, redirecting`);
+      await router.interrupt(sessionKey);
     }
 
     // --- Built-in commands (handled by the bridge, not sent to pi) ---
