@@ -26,6 +26,11 @@ interface ChatEvent {
     sender?: { name?: string; type?: string };
     thread?: { name?: string };
   };
+  action?: {
+    actionMethodName?: string;
+    parameters?: { key: string; value: string }[];
+    formInputs?: Record<string, { input?: { stringInputs?: { value?: string[] } } }>;
+  };
 }
 
 /**
@@ -115,15 +120,19 @@ export class PubSubReceiver implements MessageReceiver {
         ) as ChatEvent;
         const incoming = this.mapEvent(event);
         if (incoming) {
+          // Dedupe by Pub/Sub messageId when present (unique per publish, so
+          // repeated clicks on the same card message each process once); fall
+          // back to the Chat message name.
+          incoming.message.messageId = receivedMessage.message?.messageId;
+          const dedupeKey = incoming.message.messageId ?? incoming.message.name;
           // At-least-once delivery: dedupe by Chat message name before handling.
-          const name = incoming.message.name;
           const spaceState = this.state.getSpaceState(incoming.space.name);
           const alreadyHandled =
-            spaceState.processed.includes(name) || this.processing.has(name);
+            spaceState.processed.includes(dedupeKey) || this.processing.has(dedupeKey);
           if (!alreadyHandled) {
             // Claim the message before the (potentially long) handler runs, so a
             // redelivered copy during the stream is skipped instead of re-run.
-            this.processing.add(name);
+            this.processing.add(dedupeKey);
             try {
               const result = await handler(incoming);
               if (result === "busy") {
@@ -132,14 +141,14 @@ export class PubSubReceiver implements MessageReceiver {
                 console.log(`[pubsub] ${incoming.space.name}: busy, leaving unacked`);
                 continue;
               }
-              this.state.markProcessed(incoming.space.name, name, incoming.message.createTime);
+              this.state.markProcessed(incoming.space.name, dedupeKey, incoming.message.createTime);
             } catch (err) {
               // Handler crashed mid-stream: release the claim and stay unacked so
               // Pub/Sub redelivers and we retry.
               console.error("[pubsub] handler failed, leaving unacked for redelivery:", err);
               continue;
             } finally {
-              this.processing.delete(name);
+              this.processing.delete(dedupeKey);
             }
           }
         }
@@ -164,10 +173,33 @@ export class PubSubReceiver implements MessageReceiver {
 
   /** Map a ChatEvent payload to an IncomingMessage, or null to ignore. */
   private mapEvent(event: ChatEvent): IncomingMessage | null {
-    if (event.type !== "MESSAGE") return null; // ignore ADDED_TO_SPACE / REMOVED / etc.
-    const message = event.message;
     const space = event.space;
-    if (!message?.name || !message.text || !space?.name) return null;
+    const message = event.message;
+    if (!space?.name || !message?.name) return null;
+
+    if (event.type === "CARD_CLICKED") {
+      // Interactive card event (dropdown/button). No text required.
+      return {
+        eventType: "CARD_CLICKED",
+        space: {
+          name: space.name,
+          displayName: space.displayName ?? undefined,
+          type: space.type as ChatSpace["type"],
+        },
+        message: {
+          name: message.name,
+          threadName: message.thread?.name,
+        },
+        action: {
+          actionMethodName: event.action?.actionMethodName,
+          parameters: event.action?.parameters,
+          formInputs: event.action?.formInputs,
+        },
+      };
+    }
+
+    if (event.type !== "MESSAGE") return null; // ignore ADDED_TO_SPACE / REMOVED / etc.
+    if (!message.text || !message.name) return null;
     if (message.sender?.type === "BOT") return null; // never echo the bot's own messages
 
     const chatMessage: ChatMessage = {
@@ -183,6 +215,6 @@ export class PubSubReceiver implements MessageReceiver {
       displayName: space.displayName ?? undefined,
       type: space.type as ChatSpace["type"],
     };
-    return { space: chatSpace, message: chatMessage };
+    return { eventType: "MESSAGE", space: chatSpace, message: chatMessage };
   }
 }

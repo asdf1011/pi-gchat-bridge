@@ -1,6 +1,6 @@
 import http from "node:http";
 
-import { AgentRouter } from "./agent-sessions.js";
+import { AgentRouter, type SessionInfo } from "./agent-sessions.js";
 import { ChatClient, MAX_MESSAGE_CHARS } from "./chat-client.js";
 import { loadConfig } from "./config.js";
 import { PubSubReceiver } from "./pubsub-receiver.js";
@@ -12,6 +12,79 @@ const THINKING_TEXT = "Thinking…";
 const PATCH_DEBOUNCE_MS = 250;
 /** Delay before posting the placeholder — quick replies never show one. */
 const MARKER_DELAY_MS = 3000;
+/** Card action method for the session picker dropdown. */
+const RESUME_ACTION = "resume_session";
+
+/** Extract the picked value from a CARD_CLICKED event (formInputs or parameters). */
+function selectedValue(incoming: IncomingMessage): string | undefined {
+  const formInputs = incoming.action?.formInputs;
+  if (formInputs) {
+    for (const key of Object.keys(formInputs)) {
+      const value = formInputs[key]?.input?.stringInputs?.value?.[0];
+      if (value) return value;
+    }
+  }
+  return incoming.action?.parameters?.find((p) => p.key === "session")?.value;
+}
+
+/** Dropdown card listing sessions; selection fires a CARD_CLICKED event. */
+function pickerCard(sessions: SessionInfo[]): unknown[] {
+  return [
+    {
+      cardId: "session-picker",
+      card: {
+        header: { title: "Resume a session" },
+        sections: [
+          {
+            widgets: [
+              {
+                selectionInput: {
+                  name: "session_picker",
+                  label: "Session",
+                  type: "DROPDOWN",
+                  items: sessions.map((s) => ({ text: s.label, value: s.file })),
+                  onChangeAction: { actionMethodName: RESUME_ACTION },
+                },
+              },
+            ],
+          },
+        ],
+      },
+    },
+  ];
+}
+
+function confirmCard(label: string): unknown[] {
+  const safe = label.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return [
+    {
+      cardId: "resume-confirm",
+      card: {
+        header: { title: "Session switched" },
+        sections: [
+          {
+            widgets: [
+              { textParagraph: { text: `Now on <b>${safe}</b>. Send a message to continue there.` } },
+            ],
+          },
+        ],
+      },
+    },
+  ];
+}
+
+function errorCard(message: string): unknown[] {
+  const safe = message.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return [
+    {
+      cardId: "resume-error",
+      card: {
+        header: { title: "Couldn't switch session" },
+        sections: [{ widgets: [{ textParagraph: { text: safe } }] }],
+      },
+    },
+  ];
+}
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -41,11 +114,50 @@ async function main(): Promise<void> {
     const display = incoming.space.displayName ?? spaceName;
     const text = incoming.message.text ?? "";
     const threadName = incoming.message.threadName;
-    console.log(`[chat] ${display}: ${text.slice(0, 120)}`);
+    console.log(
+      `[chat] ${display}: ${incoming.eventType === "CARD_CLICKED" ? `card:${incoming.action?.actionMethodName}` : text.slice(0, 120)}`,
+    );
+
+    // --- Interactive card events (dropdown selection, buttons) ---
+    if (incoming.eventType === "CARD_CLICKED") {
+      if (incoming.action?.actionMethodName === RESUME_ACTION) {
+        const picked = selectedValue(incoming);
+        if (!picked) {
+          await client
+            .updateMessageCards(incoming.message.name, errorCard("No session was selected."), "No session selected.")
+            .catch((err) => console.error("[chat] card update failed:", (err as Error).message));
+          return "ok";
+        }
+        const label = await router.switchSession(spaceName, picked);
+        if (label === null) {
+          console.log(`[chat] ${display}: busy, deferring session switch`);
+          return "busy"; // leave unacked; redelivered once the session frees up
+        }
+        await client
+          .updateMessageCards(incoming.message.name, confirmCard(label), `Resumed session ${label}.`)
+          .catch((err) => console.error("[chat] card update failed:", (err as Error).message));
+        console.log(`[chat] ${display}: resumed session ${label}`);
+        return "ok";
+      }
+      console.log(`[chat] ${display}: unhandled card action`);
+      return "ok";
+    }
 
     if (router.isBusy(spaceName)) {
       console.log(`[chat] ${display}: busy, deferring`);
       return "busy";
+    }
+
+    // --- Built-in commands (handled by the bridge, not sent to pi) ---
+    if (/^\/(resume|sessions|list)\b/.test(text.trim())) {
+      const sessions = router.listSessions();
+      if (sessions.length === 0) {
+        await client.sendMessage(spaceName, "No sessions found yet.", threadName);
+        return "ok";
+      }
+      await client.createCardMessage(spaceName, pickerCard(sessions), "Choose a session to resume.", threadName);
+      console.log(`[chat] ${display}: posted session picker (${sessions.length} sessions)`);
+      return "ok";
     }
 
     let markerName: string | undefined;

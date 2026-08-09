@@ -29,6 +29,33 @@ export class ChatClient {
     return data.name;
   }
 
+  /** Post a card message (cardsV2); returns the created message's resource name. */
+  async createCardMessage(
+    spaceName: string,
+    cardsV2: unknown[],
+    fallbackText: string,
+    threadName?: string,
+  ): Promise<string> {
+    const body = threadName
+      ? { cardsV2, fallbackText, thread: { name: threadName } }
+      : { cardsV2, fallbackText };
+    const url = threadName
+      ? `${CHAT_API_BASE}/${spaceName}/messages?messageReplyOption=REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD`
+      : `${CHAT_API_BASE}/${spaceName}/messages`;
+    const data = (await this.auth.request("POST", url, JSON.stringify(body))) as { name?: string };
+    if (!data.name) throw new Error("createCardMessage: response missing message name");
+    return data.name;
+  }
+
+  /** Replace the cards of an existing bot message (used to update pickers). */
+  async updateMessageCards(messageName: string, cardsV2: unknown[], fallbackText: string): Promise<void> {
+    await this.auth.request(
+      "PATCH",
+      `${CHAT_API_BASE}/${messageName}?updateMask=cardsV2,fallbackText`,
+      JSON.stringify({ cardsV2, fallbackText }),
+    );
+  }
+
   /** Replace the text of an existing bot message (used for streaming replies). */
   async updateMessage(messageName: string, text: string): Promise<void> {
     await this.auth.request(

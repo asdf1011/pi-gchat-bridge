@@ -32,6 +32,14 @@ interface SpaceEntry {
   session: AgentSession;
 }
 
+/** A session offered in the resume picker. */
+export interface SessionInfo {
+  /** Display label (derived from the file name). */
+  label: string;
+  /** Absolute path to the session JSONL. */
+  file: string;
+}
+
 /**
  * Routes incoming Chat messages to a per-space pi AgentSession.
  *
@@ -101,6 +109,39 @@ export class AgentRouter {
     return this.sessions.get(spaceName)?.session.isStreaming ?? false;
   }
 
+  /** List session JSONL files available in the sessions dir. */
+  listSessions(): SessionInfo[] {
+    if (!fs.existsSync(this.sessionsDir)) return [];
+    return fs
+      .readdirSync(this.sessionsDir)
+      .filter((f) => f.endsWith(".jsonl"))
+      .sort((a, b) => fs.statSync(path.join(this.sessionsDir, b)).mtimeMs - fs.statSync(path.join(this.sessionsDir, a)).mtimeMs)
+      .map((f) => ({
+        label: f.replace(/\.jsonl$/, ""),
+        file: path.join(this.sessionsDir, f),
+      }));
+  }
+
+  /**
+   * Resume a different session file for a space: tear down the current
+   * session and open the target JSONL (created if missing). Returns the
+   * label of the session now active, or null if busy.
+   */
+  async switchSession(spaceName: string, file: string): Promise<string | null> {
+    const entry = this.sessions.get(spaceName);
+    if (entry?.session.isStreaming) {
+      console.log(`[router] ${spaceName} busy, refusing session switch`);
+      return null;
+    }
+    const label = path.basename(file).replace(/\.jsonl$/, "");
+    const opened = await this.openOrCreateSession(spaceName, file);
+    const prev = this.sessions.get(spaceName);
+    this.sessions.set(spaceName, opened);
+    prev?.session.dispose();
+    console.log(`[router] ${spaceName} switched to session ${label} -> ${file}`);
+    return label;
+  }
+
   dispose(): void {
     for (const { session } of this.sessions.values()) {
       try {
@@ -112,17 +153,17 @@ export class AgentRouter {
     this.sessions.clear();
   }
 
-  private async openOrCreateSession(spaceName: string): Promise<SpaceEntry> {
-    const file = this.sessionFileFor(spaceName);
-    if (!fs.existsSync(file)) {
-      fs.writeFileSync(file, SESSION_HEADER(this.cwd) + "\n");
+  private async openOrCreateSession(spaceName: string, file?: string): Promise<SpaceEntry> {
+    const target = file ?? this.sessionFileFor(spaceName);
+    if (!fs.existsSync(target)) {
+      fs.writeFileSync(target, SESSION_HEADER(this.cwd) + "\n");
     }
     const { session } = await createAgentSession({
       cwd: this.cwd,
       modelRuntime: this.modelRuntime,
-      sessionManager: SessionManager.open(file),
+      sessionManager: SessionManager.open(target),
     });
-    console.log(`[router] opened session for ${spaceName} -> ${file}`);
+    console.log(`[router] opened session for ${spaceName} -> ${target}`);
     return { session };
   }
 
