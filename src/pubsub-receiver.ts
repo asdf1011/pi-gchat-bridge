@@ -98,79 +98,95 @@ export class PubSubReceiver implements MessageReceiver {
   private async pullOnce(handler: (message: IncomingMessage) => Promise<HandleResult>): Promise<void> {
     if (!this.running || this.pulling) return;
     this.pulling = true;
+    let received: ReceivedMessage[] = [];
     try {
-      await this.pullAndHandle(handler);
+      const data = (await this.auth.request(
+        "POST",
+        `${PUBSUB_API}/${this.subscription}:pull`,
+        JSON.stringify({ maxMessages: 10 }),
+      )) as { receivedMessages?: ReceivedMessage[] };
+      received = data.receivedMessages ?? [];
+    } catch (err) {
+      console.error("[pubsub] pull failed:", (err as Error).message);
     } finally {
+      // Release immediately: handlers below run CONCURRENTLY, and the next
+      // pull (1s later) may start while they are still streaming. Dedupe
+      // claims keep redeliveries safe.
       this.pulling = false;
+    }
+
+    // Parallel dispatch: each message is handled independently and acked on
+    // its own, so a long reply in one thread never blocks another thread.
+    for (const receivedMessage of received) {
+      void this.handleOne(receivedMessage, handler);
     }
   }
 
-  private async pullAndHandle(handler: (message: IncomingMessage) => Promise<HandleResult>): Promise<void> {
-    const data = (await this.auth.request(
-      "POST",
-      `${PUBSUB_API}/${this.subscription}:pull`,
-      JSON.stringify({ maxMessages: 10 }),
-    )) as { receivedMessages?: ReceivedMessage[] };
-
-    const received = data.receivedMessages ?? [];
-    if (received.length === 0) return;
-
-    const ackIds: string[] = [];
-    for (const receivedMessage of received) {
-      try {
-        const event = JSON.parse(
-          Buffer.from(receivedMessage.message?.data ?? "", "base64").toString("utf8"),
-        ) as ChatEvent;
-        const incoming = this.mapEvent(event);
-        if (incoming) {
-          // Dedupe by Pub/Sub messageId when present (unique per publish, so
-          // repeated clicks on the same card message each process once); fall
-          // back to the Chat message name.
-          incoming.message.messageId = receivedMessage.message?.messageId;
-          const dedupeKey = incoming.message.messageId ?? incoming.message.name;
-          // At-least-once delivery: dedupe by Chat message name before handling.
-          const spaceState = this.state.getSpaceState(incoming.space.name);
-          const alreadyHandled =
-            spaceState.processed.includes(dedupeKey) || this.processing.has(dedupeKey);
-          if (!alreadyHandled) {
-            // Claim the message before the (potentially long) handler runs, so a
-            // redelivered copy during the stream is skipped instead of re-run.
-            this.processing.add(dedupeKey);
-            try {
-              const result = await handler(incoming);
-              if (result === "busy") {
-                // Session is busy: leave the message unacked so Pub/Sub redelivers
-                // it later (acts as a serial queue). Don't mark processed either.
-                console.log(`[pubsub] ${incoming.space.name}: busy, leaving unacked`);
-                continue;
-              }
-              this.state.markProcessed(incoming.space.name, dedupeKey, incoming.message.createTime);
-            } catch (err) {
-              // Handler crashed mid-stream: release the claim and stay unacked so
-              // Pub/Sub redelivers and we retry.
-              console.error("[pubsub] handler failed, leaving unacked for redelivery:", err);
-              continue;
-            } finally {
-              this.processing.delete(dedupeKey);
-            }
-          }
-        }
-        ackIds.push(receivedMessage.ackId); // ack on success (or non-message events)
-      } catch (err) {
-        console.error("[pubsub] event failed, leaving unacked for redelivery:", err);
+  /** Handle one Pub/Sub message: dedupe, claim, run the handler, ack or leave unacked. */
+  private async handleOne(
+    receivedMessage: ReceivedMessage,
+    handler: (message: IncomingMessage) => Promise<HandleResult>,
+  ): Promise<void> {
+    try {
+      const event = JSON.parse(
+        Buffer.from(receivedMessage.message?.data ?? "", "base64").toString("utf8"),
+      ) as ChatEvent;
+      const incoming = this.mapEvent(event);
+      if (!incoming) {
+        await this.ack([receivedMessage.ackId]);
+        return;
       }
+
+      // Dedupe by Pub/Sub messageId when present (unique per publish, so
+      // repeated clicks on the same card message each process once); fall
+      // back to the Chat message name.
+      incoming.message.messageId = receivedMessage.message?.messageId;
+      const dedupeKey = incoming.message.messageId ?? incoming.message.name;
+      const spaceState = this.state.getSpaceState(incoming.space.name);
+      // NOTE: check + claim are synchronous (no await between), so concurrent
+      // handleOne calls can't both claim the same message.
+      const alreadyHandled =
+        spaceState.processed.includes(dedupeKey) || this.processing.has(dedupeKey);
+      if (alreadyHandled) {
+        await this.ack([receivedMessage.ackId]);
+        return;
+      }
+      this.processing.add(dedupeKey);
+      try {
+        const result = await handler(incoming);
+        if (result === "busy") {
+          // Session is busy: leave the message unacked so Pub/Sub redelivers
+          // it later (acts as the per-thread queue). Don't mark processed.
+          console.log(`[pubsub] ${incoming.space.name}: busy, leaving unacked`);
+          return;
+        }
+        this.state.markProcessed(incoming.space.name, dedupeKey, incoming.message.createTime);
+        // Persist before acking so a redelivered message stays deduped even if
+        // the ack below fails or the process restarts.
+        this.state.save();
+        await this.ack([receivedMessage.ackId]);
+      } catch (err) {
+        // Handler crashed mid-stream: release the claim and stay unacked so
+        // Pub/Sub redelivers and we retry.
+        console.error("[pubsub] handler failed, leaving unacked for redelivery:", err);
+      } finally {
+        this.processing.delete(dedupeKey);
+      }
+    } catch (err) {
+      console.error("[pubsub] event failed, leaving unacked for redelivery:", err);
     }
+  }
 
-    // Persist dedupe state even if the ack below fails, so a redelivered
-    // message stays deduped across restarts.
-    this.state.save();
-
-    if (ackIds.length > 0) {
+  private async ack(ackIds: string[]): Promise<void> {
+    if (ackIds.length === 0) return;
+    try {
       await this.auth.request(
         "POST",
         `${PUBSUB_API}/${this.subscription}:acknowledge`,
         JSON.stringify({ ackIds }),
       );
+    } catch (err) {
+      console.error("[pubsub] ack failed:", (err as Error).message);
     }
   }
 

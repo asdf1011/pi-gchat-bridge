@@ -199,6 +199,9 @@ async function main(): Promise<void> {
     const display = incoming.space.displayName ?? spaceName;
     const text = incoming.message.text ?? "";
     const threadName = incoming.message.threadName;
+    // Conversations are keyed per thread, so parallel threads never block
+    // each other (space is the fallback for non-threaded DMs).
+    const sessionKey = AgentRouter.keyFor(spaceName, threadName);
     console.log(
       `[chat] ${display}: ${incoming.eventType === "CARD_CLICKED" ? `card:${incoming.action?.actionMethodName}` : text.slice(0, 120)}`,
     );
@@ -214,7 +217,7 @@ async function main(): Promise<void> {
           return "ok";
         }
         const [provider, modelId] = picked.split("|");
-        const result = await router.switchModel(spaceName, provider ?? "", modelId ?? "");
+        const result = await router.switchModel(sessionKey, provider ?? "", modelId ?? "");
         if (result.error === "busy") {
           console.log(`[chat] ${display}: busy, deferring model switch`);
           return "busy"; // leave unacked; retried once the session frees up
@@ -233,7 +236,7 @@ async function main(): Promise<void> {
             .catch((err) => console.error("[chat] card update failed:", (err as Error).message));
           return "ok";
         }
-        const label = await router.switchSession(spaceName, picked);
+        const label = await router.switchSession(sessionKey, picked);
         if (label === null) {
           console.log(`[chat] ${display}: busy, deferring session switch`);
           return "busy"; // leave unacked; redelivered once the session frees up
@@ -248,7 +251,7 @@ async function main(): Promise<void> {
       return "ok";
     }
 
-    if (router.isBusy(spaceName)) {
+    if (router.isBusy(sessionKey)) {
       console.log(`[chat] ${display}: busy, deferring`);
       return "busy";
     }
@@ -310,7 +313,7 @@ async function main(): Promise<void> {
         ensureMarker().catch((err) => console.error("[chat] marker failed:", (err as Error).message));
       }, MARKER_DELAY_MS);
 
-      const reply = await router.handleMessage(spaceName, text, (delta) => {
+      const reply = await router.handleMessage(sessionKey, spaceName, text, (delta) => {
         streamed += delta;
         if (streamed.length > MAX_MESSAGE_CHARS) return; // stop patching past the cap
         if (!patchTimer) patchTimer = setTimeout(() => void patchNow(), PATCH_DEBOUNCE_MS);

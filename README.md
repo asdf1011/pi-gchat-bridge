@@ -61,10 +61,14 @@ That's it — the bot now answers messages in any space it's installed in.
 - **Live streaming replies** — a "Thinking…" placeholder is posted, then
   **edited in place** as pi generates the answer (debounced patches; > 4000-char
   replies spill into follow-up messages).
-- **One pi session per space** — conversations persist across bridge restarts
-  (JSONL files under `sessions/`, keyed by space name).
-- **Serial processing** — while pi is working, further messages are left
-  unacked and redelivered in order when it finishes (Pub/Sub acts as the queue).
+- **One pi session per thread** — conversations persist across bridge
+  restarts (JSONL files under `sessions/`, keyed by thread; non-threaded DMs
+  key by space). Threads are fully independent conversations.
+- **Parallel across threads, serial within one** — each conversation is
+  handled independently and concurrently (event-driven async, no threads
+  needed); a long reply in one thread never blocks another. Messages in the
+  same thread stay in order: a busy session leaves them unacked and Pub/Sub
+  redelivers when it frees up (per-thread queue).
 - **Thread-aware replies** — replies go back into the thread you messaged in.
 - **pi extensions & skills work** — the session loads your `~/.pi/agent`
   extensions, so `/commands` and skills behave like in the TUI.
@@ -137,7 +141,7 @@ may be a platform fallback needed.
 - [x] Docker deployment with restart policy + healthcheck
 - [x] Streaming replies (live in-place editing)
 - [ ] Allowed-users filter (whitelist who can message the bot)
-- [ ] Parallel processing: per-thread sessions + concurrent dispatch (currently fully serial — one pi run at a time, same-space threads share one session)
+- [x] Parallel processing: per-thread sessions + concurrent dispatch (threads are independent; serial within a thread)
 
 ## Security notes
 
