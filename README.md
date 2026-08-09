@@ -137,6 +137,7 @@ may be a platform fallback needed.
 - [x] Docker deployment with restart policy + healthcheck
 - [x] Streaming replies (live in-place editing)
 - [ ] Allowed-users filter (whitelist who can message the bot)
+- [ ] Parallel processing: per-thread sessions + concurrent dispatch (currently fully serial — one pi run at a time, same-space threads share one session)
 
 ## Security notes
 
