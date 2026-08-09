@@ -22,10 +22,13 @@ interface ChatEvent {
   message?: {
     name?: string;
     text?: string;
+    argumentText?: string;
     createTime?: string;
     sender?: { name?: string; type?: string };
     thread?: { name?: string };
+    slashCommand?: { commandId?: string; commandName?: string };
   };
+  appCommandMetadata?: { type?: string; commandId?: string };
   action?: {
     actionMethodName?: string;
     parameters?: { key: string; value: string }[];
@@ -176,6 +179,32 @@ export class PubSubReceiver implements MessageReceiver {
     const space = event.space;
     const message = event.message;
     if (!space?.name || !message?.name) return null;
+
+    if (event.type === "APP_COMMAND") {
+      // A registered Chat app command (slash command from the "/" menu).
+      // Synthesize the command text so the same bridge command routing applies.
+      const slash = message.slashCommand;
+      const text =
+        message.text ||
+        (slash?.commandName
+          ? `/${slash.commandName}${message.argumentText ? ` ${message.argumentText}` : ""}`
+          : "");
+      if (!text) return null;
+      return {
+        eventType: "APP_COMMAND",
+        space: {
+          name: space.name,
+          displayName: space.displayName ?? undefined,
+          type: space.type as ChatSpace["type"],
+        },
+        message: {
+          name: message.name,
+          text,
+          threadName: message.thread?.name,
+          senderType: "HUMAN",
+        },
+      };
+    }
 
     if (event.type === "CARD_CLICKED") {
       // Interactive card event (dropdown/button). No text required.
