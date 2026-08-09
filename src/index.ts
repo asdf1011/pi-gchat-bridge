@@ -1,6 +1,6 @@
 import http from "node:http";
 
-import { AgentRouter, type SessionInfo } from "./agent-sessions.js";
+import { AgentRouter, type ModelInfo, type SessionInfo } from "./agent-sessions.js";
 import { ChatClient, MAX_MESSAGE_CHARS } from "./chat-client.js";
 import { loadConfig } from "./config.js";
 import { PubSubReceiver } from "./pubsub-receiver.js";
@@ -14,6 +14,8 @@ const PATCH_DEBOUNCE_MS = 250;
 const MARKER_DELAY_MS = 3000;
 /** Card action method for the session picker dropdown. */
 const RESUME_ACTION = "resume_session";
+/** Card action method for the model picker dropdown. */
+const MODEL_ACTION = "switch_model";
 
 /** Extract the picked value from a CARD_CLICKED event (formInputs or parameters). */
 function selectedValue(incoming: IncomingMessage): string | undefined {
@@ -86,6 +88,60 @@ function errorCard(message: string): unknown[] {
   ];
 }
 
+function modelPickerCard(models: ModelInfo[]): unknown[] {
+  return [
+    {
+      cardId: "model-picker",
+      card: {
+        header: { title: "Switch backend model" },
+        sections: [
+          {
+            widgets: [
+              {
+                selectionInput: {
+                  name: "model_picker",
+                  label: "Model",
+                  type: "DROPDOWN",
+                  items: models.map((m) => ({
+                    text: m.label,
+                    value: `${m.provider}|${m.id}`,
+                  })),
+                  onChangeAction: { function: MODEL_ACTION },
+                },
+              },
+            ],
+          },
+        ],
+      },
+    },
+  ];
+}
+
+function modelConfirmCard(result: { ok: boolean; label: string; error?: string }): unknown[] {
+  const safe = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return [
+    {
+      cardId: "model-confirm",
+      card: {
+        header: { title: result.ok ? "Model switched" : "Couldn't switch model" },
+        sections: [
+          {
+            widgets: [
+              {
+                textParagraph: {
+                  text: result.ok
+                    ? `Now on <b>${safe(result.label)}</b>.`
+                    : `${safe(result.error ?? "Unknown error")}`,
+                },
+              },
+            ],
+          },
+        ],
+      },
+    },
+  ];
+}
+
 function helpCard(): unknown[] {
   const items = [
     ["<b>/resume</b>", "Resume a session (dropdown picker)"],
@@ -149,6 +205,26 @@ async function main(): Promise<void> {
 
     // --- Interactive card events (dropdown selection, buttons) ---
     if (incoming.eventType === "CARD_CLICKED") {
+      if (incoming.action?.actionMethodName === MODEL_ACTION) {
+        const picked = selectedValue(incoming);
+        if (!picked) {
+          await client
+            .updateMessageCards(incoming.message.name, modelConfirmCard({ ok: false, label: "", error: "No model was selected." }), "No model selected.")
+            .catch((err) => console.error("[chat] card update failed:", (err as Error).message));
+          return "ok";
+        }
+        const [provider, modelId] = picked.split("|");
+        const result = await router.switchModel(spaceName, provider ?? "", modelId ?? "");
+        if (result.error === "busy") {
+          console.log(`[chat] ${display}: busy, deferring model switch`);
+          return "busy"; // leave unacked; retried once the session frees up
+        }
+        await client
+          .updateMessageCards(incoming.message.name, modelConfirmCard(result), `Model switch: ${result.ok ? result.label : result.error}`)
+          .catch((err) => console.error("[chat] card update failed:", (err as Error).message));
+        console.log(`[chat] ${display}: model switch ${result.ok ? "-> " + result.label : "failed: " + result.error}`);
+        return "ok";
+      }
       if (incoming.action?.actionMethodName === RESUME_ACTION) {
         const picked = selectedValue(incoming);
         if (!picked) {
@@ -178,6 +254,16 @@ async function main(): Promise<void> {
     }
 
     // --- Built-in commands (handled by the bridge, not sent to pi) ---
+    if (/^\/model\b/.test(text.trim())) {
+      const models = router.listModels();
+      if (models.length === 0) {
+        await client.sendMessage(spaceName, "No models configured.", threadName);
+        return "ok";
+      }
+      await client.createCardMessage(spaceName, modelPickerCard(models), "Choose a backend model.", threadName);
+      console.log(`[chat] ${display}: posted model picker (${models.length} models)`);
+      return "ok";
+    }
     if (/^\/help\b/.test(text.trim())) {
       await client.createCardMessage(spaceName, helpCard(), "Available commands: /resume, /sessions, /list, /help.", threadName);
       console.log(`[chat] ${display}: posted help card`);

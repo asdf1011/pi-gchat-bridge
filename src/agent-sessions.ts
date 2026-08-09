@@ -42,6 +42,20 @@ export interface SessionInfo {
   mtimeMs: number;
 }
 
+/** A model offered in the model picker. */
+export interface ModelInfo {
+  provider: string;
+  id: string;
+  label: string;
+}
+
+/** Result of a model switch. */
+export interface SwitchModelResult {
+  ok: boolean;
+  label: string;
+  error?: string;
+}
+
 /**
  * Routes incoming Chat messages to a per-space pi AgentSession.
  *
@@ -147,6 +161,44 @@ export class AgentRouter {
     }
 
     return [...byPath.values()].sort((a, b) => b.mtimeMs - a.mtimeMs);
+  }
+
+  /**
+   * List usable models (auth-filtered availability snapshot — no network).
+   * Returns [] if no provider auth is configured; switch-time auth is checked
+   * again by setModel().
+   */
+  listModels(): ModelInfo[] {
+    if (!this.modelRuntime) return [];
+    return this.modelRuntime
+      .getAvailableSnapshot()
+      .map((m) => ({
+        provider: m.provider ?? "",
+        id: m.id,
+        label: `${m.name ?? m.id}${m.provider ? ` (${m.provider})` : ""}`,
+      }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }
+
+  /**
+   * Switch the active model for a space's session. Fails (without touching
+   * the session) if the session is busy or the model needs auth we don't have.
+   */
+  async switchModel(spaceName: string, providerId: string, modelId: string): Promise<SwitchModelResult> {
+    const entry = this.sessions.get(spaceName);
+    if (!entry) return { ok: false, label: modelId, error: "No active session for this space" };
+    if (entry.session.isStreaming) {
+      return { ok: false, label: modelId, error: "busy" };
+    }
+    if (!this.modelRuntime) return { ok: false, label: modelId, error: "No model runtime" };
+    const model = this.modelRuntime.getModel(providerId, modelId);
+    if (!model) return { ok: false, label: modelId, error: `Unknown model ${providerId}/${modelId}` };
+    try {
+      await entry.session.setModel(model);
+      return { ok: true, label: `${model.name ?? model.id}${providerId ? ` (${providerId})` : ""}` };
+    } catch (err) {
+      return { ok: false, label: modelId, error: (err as Error).message };
+    }
   }
 
   /**
