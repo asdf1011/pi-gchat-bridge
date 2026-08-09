@@ -11,7 +11,7 @@ import type { IncomingMessage } from "./types.js";
 const THINKING_TEXT = "Thinking…";
 const PATCH_DEBOUNCE_MS = 250;
 /** Delay before posting the placeholder — quick replies never show one. */
-const MARKER_DELAY_MS = 1500;
+const MARKER_DELAY_MS = 3000;
 
 async function main(): Promise<void> {
   const config = loadConfig();
