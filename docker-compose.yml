@@ -1,0 +1,31 @@
+services:
+  pi-chat-bridge:
+    build: .
+    image: pi-chat-bridge:latest
+    container_name: pi-chat-bridge
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PI_CWD: /workspace
+      BRIDGE_SESSIONS_DIR: /app/data/sessions
+      BRIDGE_STATE_FILE: /app/data/state.json
+      PORT: 8080
+    volumes:
+      # Persistent bridge data: pi sessions + message dedupe state
+      - ./data:/app/data
+      # Service account key, mounted at the exact path .env references
+      - ./chat-bot-key.json:/workspace/pi-chat-bridge/chat-bot-key.json:ro
+      # pi's global config: provider credentials (auth.json), extensions, skills
+      # (copy your ~/.pi/agent here once — see README)
+      - ./pi-agent:/root/.pi/agent
+      # Where pi's tools operate — put your project files here
+      - ./workspace:/workspace
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    # Optional: expose the health endpoint on the host
+    # ports:
+    #   - "8080:8080"

@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+*-key.json
+state.json
+sessions/
+data/
+workspace/
+pi-agent/
+*.log
