@@ -43,7 +43,7 @@ function pickerCard(sessions: SessionInfo[]): unknown[] {
                   label: "Session",
                   type: "DROPDOWN",
                   items: sessions.map((s) => ({ text: s.label, value: s.file })),
-                  onChangeAction: { actionMethodName: RESUME_ACTION },
+                  onChangeAction: { function: RESUME_ACTION },
                 },
               },
             ],
@@ -150,7 +150,7 @@ async function main(): Promise<void> {
 
     // --- Built-in commands (handled by the bridge, not sent to pi) ---
     if (/^\/(resume|sessions|list)\b/.test(text.trim())) {
-      const sessions = router.listSessions();
+      const sessions = await router.listSessions();
       if (sessions.length === 0) {
         await client.sendMessage(spaceName, "No sessions found yet.", threadName);
         return "ok";

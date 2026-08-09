@@ -38,6 +38,8 @@ export interface SessionInfo {
   label: string;
   /** Absolute path to the session JSONL. */
   file: string;
+  /** For sorting (most recently modified first). */
+  mtimeMs: number;
 }
 
 /**
@@ -109,17 +111,42 @@ export class AgentRouter {
     return this.sessions.get(spaceName)?.session.isStreaming ?? false;
   }
 
-  /** List session JSONL files available in the sessions dir. */
-  listSessions(): SessionInfo[] {
-    if (!fs.existsSync(this.sessionsDir)) return [];
-    return fs
-      .readdirSync(this.sessionsDir)
-      .filter((f) => f.endsWith(".jsonl"))
-      .sort((a, b) => fs.statSync(path.join(this.sessionsDir, b)).mtimeMs - fs.statSync(path.join(this.sessionsDir, a)).mtimeMs)
-      .map((f) => ({
-        label: f.replace(/\.jsonl$/, ""),
-        file: path.join(this.sessionsDir, f),
-      }));
+  /**
+   * List session JSONL files available for the resume picker: the bridge's
+   * own per-space store plus pi's global session store (what the TUI /resume
+   * shows), so sessions from other projects/spaces appear too.
+   */
+  async listSessions(): Promise<SessionInfo[]> {
+    const byPath = new Map<string, SessionInfo>();
+
+    // 1. Bridge per-space sessions (custom store under BRIDGE_SESSIONS_DIR).
+    if (fs.existsSync(this.sessionsDir)) {
+      for (const f of fs.readdirSync(this.sessionsDir).filter((x) => x.endsWith(".jsonl"))) {
+        const file = path.join(this.sessionsDir, f);
+        try {
+          byPath.set(file, { label: f.replace(/\.jsonl$/, ""), file, mtimeMs: fs.statSync(file).mtimeMs });
+        } catch {
+          // race: file deleted mid-scan
+        }
+      }
+    }
+
+    // 2. pi's global sessions (TUI store) — all projects, so the picker shows
+    //    every session, not just this space's.
+    try {
+      const all = await SessionManager.listAll();
+      for (const s of all) {
+        const base =
+          s.name ??
+          (s.firstMessage ? s.firstMessage.slice(0, 40) : path.basename(s.path, ".jsonl"));
+        const label = s.cwd && s.cwd !== this.cwd ? `${base} · ${s.cwd}` : base;
+        byPath.set(s.path, { label, file: s.path, mtimeMs: s.modified.getTime() });
+      }
+    } catch (err) {
+      console.error("[router] SessionManager.listAll failed:", (err as Error).message);
+    }
+
+    return [...byPath.values()].sort((a, b) => b.mtimeMs - a.mtimeMs);
   }
 
   /**
