@@ -41,6 +41,15 @@ export class PubSubReceiver implements MessageReceiver {
   private auth: ServiceAccountAuth;
   private running = false;
   private timer: NodeJS.Timeout | undefined;
+  /**
+   * Message names currently being handled. Closes the dedupe window: without
+   * this, a redelivered copy of a message that is still streaming (not yet
+   * marked processed, not yet acked) passes the `processed` check and gets
+   * processed twice.
+   */
+  private processing = new Set<string>();
+  /** True while a pull+handle cycle is running; prevents overlapping pulls. */
+  private pulling = false;
 
   constructor(
     serviceAccountPath: string,
@@ -79,7 +88,16 @@ export class PubSubReceiver implements MessageReceiver {
   }
 
   private async pullOnce(handler: (message: IncomingMessage) => Promise<HandleResult>): Promise<void> {
-    if (!this.running) return;
+    if (!this.running || this.pulling) return;
+    this.pulling = true;
+    try {
+      await this.pullAndHandle(handler);
+    } finally {
+      this.pulling = false;
+    }
+  }
+
+  private async pullAndHandle(handler: (message: IncomingMessage) => Promise<HandleResult>): Promise<void> {
     const data = (await this.auth.request(
       "POST",
       `${PUBSUB_API}/${this.subscription}:pull`,
@@ -98,16 +116,31 @@ export class PubSubReceiver implements MessageReceiver {
         const incoming = this.mapEvent(event);
         if (incoming) {
           // At-least-once delivery: dedupe by Chat message name before handling.
+          const name = incoming.message.name;
           const spaceState = this.state.getSpaceState(incoming.space.name);
-          if (!spaceState.processed.includes(incoming.message.name)) {
-            const result = await handler(incoming);
-            if (result === "busy") {
-              // Session is busy: leave the message unacked so Pub/Sub redelivers
-              // it later (acts as a serial queue). Don't mark processed either.
-              console.log(`[pubsub] ${incoming.space.name}: busy, leaving unacked`);
+          const alreadyHandled =
+            spaceState.processed.includes(name) || this.processing.has(name);
+          if (!alreadyHandled) {
+            // Claim the message before the (potentially long) handler runs, so a
+            // redelivered copy during the stream is skipped instead of re-run.
+            this.processing.add(name);
+            try {
+              const result = await handler(incoming);
+              if (result === "busy") {
+                // Session is busy: leave the message unacked so Pub/Sub redelivers
+                // it later (acts as a serial queue). Don't mark processed either.
+                console.log(`[pubsub] ${incoming.space.name}: busy, leaving unacked`);
+                continue;
+              }
+              this.state.markProcessed(incoming.space.name, name, incoming.message.createTime);
+            } catch (err) {
+              // Handler crashed mid-stream: release the claim and stay unacked so
+              // Pub/Sub redelivers and we retry.
+              console.error("[pubsub] handler failed, leaving unacked for redelivery:", err);
               continue;
+            } finally {
+              this.processing.delete(name);
             }
-            this.state.markProcessed(incoming.space.name, incoming.message.name, incoming.message.createTime);
           }
         }
         ackIds.push(receivedMessage.ackId); // ack on success (or non-message events)
