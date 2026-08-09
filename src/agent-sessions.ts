@@ -30,6 +30,23 @@ const SESSION_HEADER = (cwd: string): string =>
 
 interface SpaceEntry {
   session: AgentSession;
+  /** Absolute path to the session JSONL (needed to reopen after a watchdog reset). */
+  file: string;
+  /** Last time any agent event fired (watchdog stall detection). */
+  lastActivityAt: number;
+  /** True while a watchdog reset is in progress for this session. */
+  resetting: boolean;
+}
+
+/**
+ * Resolve with the promise's value, or `undefined` after `ms` — so a wedged
+ * abort (e.g. an uninterruptible tool child) can never block recovery.
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  return Promise.race([
+    promise,
+    new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), ms)),
+  ]);
 }
 
 /** A session offered in the resume picker. */
@@ -74,15 +91,35 @@ export class AgentRouter {
   /** In-flight session creations, keyed by session key (dedupes races). */
   private creating = new Map<string, Promise<SpaceEntry>>();
   private modelRuntime: ModelRuntime | undefined;
+  private watchdogTimer: NodeJS.Timeout | undefined;
 
   private constructor(
     private cwd: string,
     private sessionsDir: string,
+    /** Max streaming time with zero agent events before a session is force-reset (0 = disabled). */
+    private stallTimeoutMs: number,
+    /** How often the watchdog scans for stalled sessions. */
+    private watchdogIntervalMs: number,
   ) {}
 
-  static async create(cwd: string, sessionsDir: string): Promise<AgentRouter> {
-    const router = new AgentRouter(cwd, sessionsDir);
+  static async create(
+    cwd: string,
+    sessionsDir: string,
+    stallTimeoutMs: number,
+    watchdogIntervalMs: number,
+  ): Promise<AgentRouter> {
+    const router = new AgentRouter(cwd, sessionsDir, stallTimeoutMs, watchdogIntervalMs);
     router.modelRuntime = await ModelRuntime.create();
+    if (router.stallTimeoutMs > 0 && router.watchdogIntervalMs > 0) {
+      router.watchdogTimer = setInterval(() => {
+        void router.watchdogTick().catch((err) =>
+          console.error("[watchdog] tick failed:", (err as Error).message),
+        );
+      }, router.watchdogIntervalMs);
+      console.log(`[router] watchdog enabled: stall=${router.stallTimeoutMs}ms interval=${router.watchdogIntervalMs}ms`);
+    } else {
+      console.log("[router] watchdog disabled");
+    }
     return router;
   }
 
@@ -234,7 +271,90 @@ export class AgentRouter {
     return label;
   }
 
+  /**
+   * Scan for sessions that have been streaming with no agent activity for
+   * longer than the stall threshold (a hung tool call — e.g. a network fetch
+   * without a timeout — produces no events, so the session never frees up and
+   * every message in that conversation is deferred as "busy" forever).
+   */
+  private async watchdogTick(): Promise<void> {
+    const now = Date.now();
+    for (const [key, entry] of [...this.sessions.entries()]) {
+      if (entry.resetting || !entry.session.isStreaming) continue;
+      const stalledMs = now - entry.lastActivityAt;
+      if (stalledMs < this.stallTimeoutMs) continue;
+      console.log(
+        `[watchdog] ${key} stalled ${Math.round(stalledMs / 1000)}s without agent activity — force-resetting`,
+      );
+      try {
+        await this.forceReset(key, entry);
+      } catch (err) {
+        console.error(`[watchdog] reset of ${key} failed:`, (err as Error).message);
+      }
+    }
+  }
+
+  /**
+   * Recover a wedged session: abort the stuck run, drop the incomplete
+   * trailing turn (so a re-open can't re-run the hung tool call), then tear
+   * down and reopen the session from the same JSONL file. Deferred "busy"
+   * messages are redelivered by Pub/Sub and land on the fresh session.
+   */
+  private async forceReset(key: string, entry: SpaceEntry): Promise<void> {
+    entry.resetting = true;
+    try {
+      // 1. Abort the stuck run — this kills the tool's process tree. Bounded
+      //    so a wedged abort can't block recovery.
+      await withTimeout(entry.session.abort(), 15_000);
+      // 2. Remove any trailing assistant turn(s) that never completed (have
+      //    unanswered tool calls) from the file.
+      const dropped = this.truncateIncompleteTail(entry.file);
+      // 3. Replace the wedged in-memory session with a fresh one on the file.
+      entry.session.dispose();
+      this.sessions.delete(key);
+      const reopened = await this.openOrCreateSession(key, key, entry.file);
+      this.sessions.set(key, reopened);
+      console.log(`[watchdog] ${key} reset (dropped ${dropped} incomplete entr${dropped === 1 ? "y" : "ies"}), session reopened`);
+    } finally {
+      entry.resetting = false;
+    }
+  }
+
+  /**
+   * Rewrite the session file, dropping trailing message entries whose
+   * assistant turn never completed (assistant messages with unanswered tool
+   * calls). Returns the number of entries dropped, 0 if already clean.
+   */
+  private truncateIncompleteTail(file: string | undefined): number {
+    if (!file || !fs.existsSync(file)) return 0;
+    const lines = fs.readFileSync(file, "utf8").split("\n").filter((l) => l.trim().length > 0);
+    let lastCompleted = -1;
+    for (let i = 0; i < lines.length; i++) {
+      try {
+        const entry = JSON.parse(lines[i]) as {
+          type?: string;
+          message?: { role?: string; content?: Array<{ type?: string }> };
+        };
+        if (entry.type !== "message") continue;
+        const message = entry.message ?? {};
+        if (message.role === "assistant" && !(message.content ?? []).some((b) => b.type === "toolCall")) {
+          lastCompleted = i;
+        }
+      } catch {
+        // Unparsable line — leave the file untouched rather than risk damage.
+        return 0;
+      }
+    }
+    if (lastCompleted < 0) return 0;
+    const dropped = lines.length - lastCompleted - 1;
+    if (dropped > 0) {
+      fs.writeFileSync(file, lines.slice(0, lastCompleted + 1).join("\n") + "\n");
+    }
+    return dropped;
+  }
+
   dispose(): void {
+    if (this.watchdogTimer) clearInterval(this.watchdogTimer);
     for (const { session } of this.sessions.values()) {
       try {
         session.dispose();
@@ -280,8 +400,18 @@ export class AgentRouter {
       modelRuntime: this.modelRuntime,
       sessionManager: SessionManager.open(target),
     });
+    const entry: SpaceEntry = {
+      session,
+      file: target,
+      lastActivityAt: Date.now(),
+      resetting: false,
+    };
+    // Long-lived listener: any agent event counts as activity for the watchdog.
+    entry.session.subscribe(() => {
+      entry.lastActivityAt = Date.now();
+    });
     console.log(`[router] opened session for ${sessionKey} -> ${target}`);
-    return { session };
+    return entry;
   }
 
   private sessionFileFor(sessionKey: string): string {

@@ -187,7 +187,7 @@ async function main(): Promise<void> {
 
   const client = new ChatClient(config.serviceAccountPath);
   const state = new StateStore(config.stateFile);
-  const router = await AgentRouter.create(config.cwd, config.sessionsDir);
+  const router = await AgentRouter.create(config.cwd, config.sessionsDir, config.stallTimeoutMs, config.watchdogIntervalMs);
 
   /**
    * Handle one incoming Chat message with a live, in-place streaming reply:

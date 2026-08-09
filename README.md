@@ -134,6 +134,19 @@ may be a platform fallback needed.
 | `BRIDGE_SESSIONS_DIR` | `./sessions` | Per-space pi session files |
 | `BRIDGE_STATE_FILE` | `./state.json` | Message dedupe state |
 | `PORT` | `8080` | Health endpoint (0 disables) |
+| `BRIDGE_STALL_TIMEOUT_MS` | `1200000` (20 min) | Watchdog: force-reset a session streaming with no agent activity for this long (0 disables) |
+| `BRIDGE_WATCHDOG_INTERVAL_MS` | `30000` | Watchdog scan interval |
+
+### Stuck-session watchdog
+
+If a session's tool call hangs (e.g. the agent runs a network fetch without a
+timeout), the session streams forever and every message in that conversation is
+deferred as "busy" — exactly what happened with the 22:43 `PY3n26MpvnI` hang.
+The watchdog checks each streaming session for agent activity (any emitted
+event) and, after `BRIDGE_STALL_TIMEOUT_MS` of silence, aborts the stuck run,
+drops the incomplete trailing turn from the session file (so the hung tool call
+is never re-run), and reopens the session. Deferred "busy" messages are then
+redelivered by Pub/Sub to the fresh session.
 
 ## Roadmap
 

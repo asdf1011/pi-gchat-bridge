@@ -14,6 +14,10 @@ export interface Config {
   cwd: string;
   sessionsDir: string;
   stateFile: string;
+  /** Watchdog: force-reset sessions streaming with no activity for this long (0 = disabled). */
+  stallTimeoutMs: number;
+  /** Watchdog: scan interval. */
+  watchdogIntervalMs: number;
 }
 
 function required(name: string): string {
@@ -47,5 +51,7 @@ export function loadConfig(): Config {
     cwd,
     sessionsDir,
     stateFile,
+    stallTimeoutMs: Number(process.env.BRIDGE_STALL_TIMEOUT_MS ?? 20 * 60 * 1000),
+    watchdogIntervalMs: Number(process.env.BRIDGE_WATCHDOG_INTERVAL_MS ?? 30_000),
   };
 }
