@@ -64,11 +64,13 @@ That's it — the bot now answers messages in any space it's installed in.
 - **One pi session per thread** — conversations persist across bridge
   restarts (JSONL files under `sessions/`, keyed by thread; non-threaded DMs
   key by space). Threads are fully independent conversations.
-- **Parallel across threads, serial within one** — each conversation is
-  handled independently and concurrently (event-driven async, no threads
-  needed); a long reply in one thread never blocks another. Messages in the
-  same thread stay in order: a busy session leaves them unacked and Pub/Sub
-  redelivers when it frees up (per-thread queue).
+- **Parallel across threads, independent conversations** — each
+  conversation is handled independently and concurrently (event-driven async,
+  no threads needed); a long reply in one thread never blocks another.
+- **Implicit stop** — sending a new message while pi is thinking aborts the
+  current run and the new message becomes the redirect. The partial reply
+  stays visible in the thread (finalized as-is) and the aborted turn stays in
+  the session (marked `aborted`), so the redirect has full context.
 - **Thread-aware replies** — replies go back into the thread you messaged in.
 - **pi extensions & skills work** — the session loads your `~/.pi/agent`
   extensions, so `/commands` and skills behave like in the TUI.

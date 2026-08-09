@@ -358,9 +358,13 @@ async function main(): Promise<void> {
       console.log(`[chat] ${display}: replied (${final.length} chars)`);
       return "ok";
     } catch (err) {
-      console.error(`[chat] ${display}: handler error:`, (err as Error).message);
+      const aborted = (err as Error)?.name === "AbortError";
+      console.error(`[chat] ${display}: handler ${aborted ? "interrupted (implicit stop)" : "error"}:`, (err as Error).message);
       if (markerTimer) clearTimeout(markerTimer);
-      if (markerName) {
+      if (aborted && streamed.trim()) {
+        // Implicit stop: keep the partial reply visible in the placeholder.
+        await patchNow().catch((e) => console.error("[chat] final partial patch failed:", (e as Error).message));
+      } else if (markerName) {
         await client.deleteMessage(markerName).catch(() => {});
       }
       return "ok"; // ack so a poison message doesn't redeliver forever
