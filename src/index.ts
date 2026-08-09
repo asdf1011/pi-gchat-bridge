@@ -86,6 +86,35 @@ function errorCard(message: string): unknown[] {
   ];
 }
 
+function helpCard(): unknown[] {
+  const items = [
+    ["<b>/resume</b>", "Resume a session (dropdown picker)"],
+    ["<b>/sessions</b>", "Same as /resume"],
+    ["<b>/list</b>", "Same as /resume"],
+    ["<b>/help</b>", "This card"],
+    ["<b>anything else</b>", "Chats with pi (tools, skills, images)"],
+  ];
+  return [
+    {
+      cardId: "help",
+      card: {
+        header: { title: "Commands" },
+        sections: [
+          {
+            widgets: [
+              {
+                textParagraph: {
+                  text: items.map(([cmd, desc]) => `${cmd} — ${desc}`).join("<br>"),
+                },
+              },
+            ],
+          },
+        ],
+      },
+    },
+  ];
+}
+
 async function main(): Promise<void> {
   const config = loadConfig();
   console.log(`[bridge] cwd=${config.cwd} pull=${config.pullIntervalMs}ms`);
@@ -149,6 +178,11 @@ async function main(): Promise<void> {
     }
 
     // --- Built-in commands (handled by the bridge, not sent to pi) ---
+    if (/^\/help\b/.test(text.trim())) {
+      await client.createCardMessage(spaceName, helpCard(), "Available commands: /resume, /sessions, /list, /help.", threadName);
+      console.log(`[chat] ${display}: posted help card`);
+      return "ok";
+    }
     if (/^\/(resume|sessions|list)\b/.test(text.trim())) {
       const sessions = await router.listSessions();
       if (sessions.length === 0) {
