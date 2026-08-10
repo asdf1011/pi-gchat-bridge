@@ -358,6 +358,60 @@ export class AgentRouter {
   }
 
   /**
+   * Get the current display name of the conversation's session (the latest
+   * `session_info` entry), or undefined when none is set / no session exists.
+   */
+  async getSessionName(sessionKey: string): Promise<string | undefined> {
+    const file = this.sessions.get(sessionKey)?.file;
+    if (!file || !fs.existsSync(file)) return undefined;
+    let name: string | undefined;
+    try {
+      const rl = readline.createInterface({
+        input: fs.createReadStream(file, { encoding: "utf8" }),
+        crlfDelay: Infinity,
+      });
+      for await (const line of rl) {
+        if (!line.trim()) continue;
+        try {
+          const parsed = JSON.parse(line) as { type?: string; name?: string };
+          // Later session_info entries overwrite earlier ones (pi does the same).
+          if (parsed.type === "session_info" && typeof parsed.name === "string") {
+            name = parsed.name.trim() || undefined;
+          }
+        } catch {
+          // skip unparsable lines
+        }
+      }
+    } catch {
+      // unreadable file
+    }
+    return name;
+  }
+
+  /**
+   * Set a display name for the conversation's session (shown in the session
+   * picker instead of the first message). Returns the name, or null when the
+   * conversation has no session yet (send a message first).
+   */
+  setSessionName(sessionKey: string, name: string): string | null {
+    const entry = this.sessions.get(sessionKey);
+    if (!entry) return null;
+    entry.session.setSessionName(name);
+    return name;
+  }
+
+  /**
+   * Session stats for a conversation (aggregated over the WHOLE session file,
+   * including compacted history — i.e. what was actually billed), or null when
+   * the conversation has no session yet.
+   */
+  sessionStats(sessionKey: string): import("@earendil-works/pi-coding-agent").SessionStats | null {
+    const entry = this.sessions.get(sessionKey);
+    if (!entry) return null;
+    return entry.session.getSessionStats();
+  }
+
+  /**
    * Steer a message into the RUNNING turn (interleaved): queued now, delivered
    * after the current assistant turn finishes its tool calls and before the
    * next LLM call — so in-flight tool results land first, then the model

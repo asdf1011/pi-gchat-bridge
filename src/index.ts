@@ -56,8 +56,13 @@ function pickerCard(sessions: SessionInfo[]): unknown[] {
   ];
 }
 
+/** Escape text for use inside Chat card/message HTML (e.g. user-supplied names). */
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 function confirmCard(label: string): unknown[] {
-  const safe = label.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const safe = escapeHtml(label);
   return [
     {
       cardId: "resume-confirm",
@@ -83,6 +88,31 @@ function errorCard(message: string): unknown[] {
       card: {
         header: { title: "Couldn't switch session" },
         sections: [{ widgets: [{ textParagraph: { text: safe } }] }],
+      },
+    },
+  ];
+}
+
+function sessionStatsCard(stats: import("@earendil-works/pi-coding-agent").SessionStats, name?: string): unknown[] {
+  const t = stats.tokens;
+  const lines = [
+    name ? `<b>${escapeHtml(name)}</b>` : "",
+    `File: <b>${escapeHtml(stats.sessionFile?.split("/").pop() ?? "(in-memory)")}</b>`,
+    `Messages: ${stats.totalMessages} (${stats.userMessages} user · ${stats.assistantMessages} assistant · ${stats.toolResults} tool results · ${stats.toolCalls} tool calls)`,
+    `Tokens: ${t.total.toLocaleString()} total (${t.input.toLocaleString()} in · ${t.output.toLocaleString()} out · ${t.cacheRead.toLocaleString()} cache read)`,
+    `Cost: <b>$${stats.cost.toFixed(4)}</b>`,
+    stats.contextUsage ? `Context now: ${stats.contextUsage.tokens?.toLocaleString() ?? "unknown"} tokens (${stats.contextUsage.percent?.toFixed(0) ?? "?"}% of ${stats.contextUsage.contextWindow.toLocaleString()})` : "",
+  ].filter(Boolean);
+  return [
+    {
+      cardId: "session-stats",
+      card: {
+        header: { title: "Session" },
+        sections: [
+          {
+            widgets: [{ textParagraph: { text: lines.join("<br>") } }],
+          },
+        ],
       },
     },
   ];
@@ -147,6 +177,8 @@ function helpCard(): unknown[] {
     ["<b>/resume</b>", "Resume a session (dropdown picker)"],
     ["<b>/sessions</b>", "Same as /resume"],
     ["<b>/list</b>", "Same as /resume"],
+    ["<b>/name</b>", "Show or set this conversation's session name"],
+    ["<b>/session</b>", "Show this conversation's session stats (tokens, cost)"],
     ["<b>/help</b>", "This card"],
     ["<b>anything else</b>", "Chats with pi (tools, skills, images)"],
   ];
@@ -268,6 +300,46 @@ async function main(): Promise<void> {
       }
       await client.createCardMessage(spaceName, modelPickerCard(models), "Choose a backend model.", threadName);
       console.log(`[chat] ${display}: posted model picker (${models.length} models)`);
+      return "ok";
+    }
+    if (/^\/session\b/.test(text.trim())) {
+      if (router.isBusy(sessionKey)) await router.interrupt(sessionKey);
+      const stats = router.sessionStats(sessionKey);
+      if (!stats) {
+        await client.sendMessage(spaceName, "No session for this conversation yet — send a message first.", threadName);
+        return "ok";
+      }
+      const name = await router.getSessionName(sessionKey);
+      await client.createCardMessage(spaceName, sessionStatsCard(stats, name), "Session stats.", threadName);
+      console.log(`[chat] ${display}: posted session stats (${stats.totalMessages} messages, $${stats.cost.toFixed(4)})`);
+      return "ok";
+    }
+    if (/^\/name\b/.test(text.trim())) {
+      if (router.isBusy(sessionKey)) await router.interrupt(sessionKey);
+      const arg = text.trim().replace(/^\/name\s*/, "").trim();
+      if (!arg) {
+        const current = await router.getSessionName(sessionKey);
+        await client.sendMessage(
+          spaceName,
+          current
+            ? `This conversation's session is named: <b>${escapeHtml(current)}</b>`
+            : "This conversation has no session name yet. Use <b>/name &lt;name&gt;</b> to set one.",
+          threadName,
+        );
+        console.log(`[chat] ${display}: queried session name (${current ?? "none"})`);
+        return "ok";
+      }
+      const set = router.setSessionName(sessionKey, arg);
+      if (set === null) {
+        await client.sendMessage(
+          spaceName,
+          "No session for this conversation yet — send a message first, then use /name.",
+          threadName,
+        );
+        return "ok";
+      }
+      await client.sendMessage(spaceName, `Session named: <b>${escapeHtml(arg)}</b>`, threadName);
+      console.log(`[chat] ${display}: named session -> ${arg}`);
       return "ok";
     }
     if (/^\/help\b/.test(text.trim())) {
