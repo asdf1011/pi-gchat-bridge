@@ -310,6 +310,10 @@ async function main(): Promise<void> {
     let markerTimer: NodeJS.Timeout | undefined;
     let streamed = "";
     let patchTimer: NodeJS.Timeout | undefined;
+    /** Serialized placeholder updates: only one PATCH in flight at a time, applied in
+     *  order, so a stale snapshot can never land after the final text (an out-of-order
+     *  PATCH race could otherwise permanently truncate the stored message). */
+    let patchChain: Promise<void> = Promise.resolve();
 
     /** Create the placeholder on demand (called by the delay timer). */
     const ensureMarker = async (): Promise<void> => {
@@ -317,16 +321,21 @@ async function main(): Promise<void> {
       markerName = await client.createMessage(spaceName, THINKING_TEXT, threadName);
     };
 
-    const patchNow = async (): Promise<void> => {
-      patchTimer = undefined;
-      const capped = streamed.slice(0, MAX_MESSAGE_CHARS);
-      if (capped && markerName) {
-        try {
-          await client.updateMessage(markerName, capped);
-        } catch (err) {
-          console.error("[chat] patch failed:", (err as Error).message);
+    const patchNow = (): Promise<void> => {
+      patchChain = patchChain.then(async () => {
+        patchTimer = undefined;
+        // Read the LATEST text when the queued task runs, so intermediate
+        // snapshots coalesce and the final patch always carries the final text.
+        const capped = streamed.slice(0, MAX_MESSAGE_CHARS);
+        if (capped && markerName) {
+          try {
+            await client.updateMessage(markerName, capped);
+          } catch (err) {
+            console.error("[chat] patch failed:", (err as Error).message);
+          }
         }
-      }
+      });
+      return patchChain;
     };
 
     try {
