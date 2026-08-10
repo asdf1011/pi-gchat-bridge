@@ -7,6 +7,7 @@ import {
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import readline from "node:readline";
 
 /** Minimal structural view of pi messages, so we don't depend on exact exports. */
 interface PiBlock {
@@ -52,6 +53,60 @@ function contentText(content: unknown): string {
       .join("");
   }
   return "";
+}
+
+/** Collapse whitespace and trim to a display-friendly length. */
+function truncate(text: string, max = 60): string {
+  const t = text.trim().replace(/\s+/g, " ");
+  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+}
+
+/**
+ * Best available display label for a session file, read straight from the
+ * JSONL (pi persists all of these):
+ *   1. user-set display name (session_info entries, set via /name)
+ *   2. compaction summary (pi's LLM-generated summary of the conversation)
+ *   3. first user message text
+ *   4. fallback: file name (e.g. `spaces_<id>`) — only when the file has
+ *      none of the above (e.g. empty/image-only sessions)
+ *
+ * Streams the file so large sessions don't get fully buffered in memory.
+ */
+async function summarizeSessionFile(file: string): Promise<string> {
+  let name: string | undefined;
+  let firstUserText = "";
+  let compactionSummary = "";
+  try {
+    const rl = readline.createInterface({
+      input: fs.createReadStream(file, { encoding: "utf8" }),
+      crlfDelay: Infinity,
+    });
+    for await (const line of rl) {
+      if (!line.trim()) continue;
+      let entry: { type?: string; name?: string; summary?: string; message?: PiMessage };
+      try {
+        entry = JSON.parse(line);
+      } catch {
+        continue; // unparsable line — skip it, don't give up on the file
+      }
+      if (entry.type === "session_info" && typeof entry.name === "string" && entry.name.trim()) {
+        name = entry.name.trim();
+      } else if (entry.type === "message" && entry.message?.role === "user" && !firstUserText) {
+        firstUserText = contentText(entry.message.content).trim();
+      } else if (entry.type === "compaction" && typeof entry.summary === "string" && entry.summary.trim() && !compactionSummary) {
+        compactionSummary = entry.summary.trim();
+      }
+      if (name && firstUserText && compactionSummary) break; // all sources found, stop early
+    }
+  } catch {
+    // unreadable file — fall through to the file-name fallback
+  }
+  return (
+    name ??
+    (compactionSummary ? truncate(compactionSummary) :
+      firstUserText ? truncate(firstUserText) :
+      path.basename(file, ".jsonl"))
+  );
 }
 
 /**
@@ -217,7 +272,8 @@ export class AgentRouter {
       for (const f of fs.readdirSync(this.sessionsDir).filter((x) => x.endsWith(".jsonl"))) {
         const file = path.join(this.sessionsDir, f);
         try {
-          byPath.set(file, { label: f.replace(/\.jsonl$/, ""), file, mtimeMs: fs.statSync(file).mtimeMs });
+          const label = await summarizeSessionFile(file);
+          byPath.set(file, { label, file, mtimeMs: fs.statSync(file).mtimeMs });
         } catch {
           // race: file deleted mid-scan
         }
@@ -231,7 +287,7 @@ export class AgentRouter {
       for (const s of all) {
         const base =
           s.name ??
-          (s.firstMessage ? s.firstMessage.slice(0, 40) : path.basename(s.path, ".jsonl"));
+          (s.firstMessage ? truncate(s.firstMessage, 40) : path.basename(s.path, ".jsonl"));
         const label = s.cwd && s.cwd !== this.cwd ? `${base} · ${s.cwd}` : base;
         byPath.set(s.path, { label, file: s.path, mtimeMs: s.modified.getTime() });
       }
