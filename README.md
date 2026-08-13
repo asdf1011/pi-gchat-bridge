@@ -81,14 +81,13 @@ That's it — the bot now answers messages in any space it's installed in.
 ## Session model & persistence
 
 - **`/resume`, `/sessions`, `/list`** — manually adopt *any* session file
-  (bridge store or pi's global store) into the current thread. This is an
-  **import, not a live link**: the binding is in-memory only and is lost on
-  bridge restart (the thread reverts to its derived-path file). After
-  resuming, continuing the source session elsewhere (e.g. in the TUI) forks
-  the conversation — those messages never appear in Chat. To make an adopted
-  session restart-proof, copy it onto the thread's derived path instead of
-  sharing or symlinking it (shared files reintroduce the multi-writer hazards
-  above).
+  (bridge store or pi's global store) into the current thread. The binding
+  (conversation → session file) is **persisted in `state.json`**, so it
+  survives bridge restarts. Resuming a conversation's own derived file
+  reverts it to the default. The adopted session must still exist on disk —
+  the binding stores a path, not a copy. After resuming, continuing the
+  source session elsewhere (e.g. in the TUI) forks the conversation — those
+  messages never appear in Chat.
 
 ## Configuration
 

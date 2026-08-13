@@ -11,6 +11,8 @@ interface SpaceState {
 
 interface StateFile {
   spaces: Record<string, SpaceState>;
+  /** Persistent /resume overrides: conversation sessionKey -> session file path. */
+  resumeMap: Record<string, string>;
 }
 
 const MAX_PROCESSED_PER_SPACE = 1000;
@@ -25,9 +27,9 @@ export class StateStore {
   private load(): StateFile {
     try {
       const parsed = JSON.parse(fs.readFileSync(this.file, "utf8")) as StateFile;
-      return { spaces: parsed.spaces ?? {} };
+      return { spaces: parsed.spaces ?? {}, resumeMap: parsed.resumeMap ?? {} };
     } catch {
-      return { spaces: {} };
+      return { spaces: {}, resumeMap: {} };
     }
   }
 
@@ -48,6 +50,19 @@ export class StateStore {
     if (createTime && (!st.lastCreateTime || createTime > st.lastCreateTime)) {
       st.lastCreateTime = createTime;
     }
+  }
+
+  /** Durable /resume override for a conversation (undefined = use derived path). */
+  getResumeTarget(sessionKey: string): string | undefined {
+    return this.state.resumeMap[sessionKey];
+  }
+
+  setResumeTarget(sessionKey: string, file: string): void {
+    this.state.resumeMap[sessionKey] = file;
+  }
+
+  clearResumeTarget(sessionKey: string): void {
+    delete this.state.resumeMap[sessionKey];
   }
 
   save(): void {

@@ -8,6 +8,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
+import type { StateStore } from "./state.js";
 
 /** Minimal structural view of pi messages, so we don't depend on exact exports. */
 interface PiBlock {
@@ -173,6 +174,8 @@ export class AgentRouter {
     private watchdogIntervalMs: number,
     /** How long to wait for an in-flight tool call before aborting to redirect. */
     private steerWaitMs: number,
+    /** Durable store: message dedupe state + persistent /resume overrides. */
+    private stateStore: StateStore,
   ) {}
 
   static async create(
@@ -181,8 +184,9 @@ export class AgentRouter {
     stallTimeoutMs: number,
     watchdogIntervalMs: number,
     steerWaitMs: number,
+    stateStore: StateStore,
   ): Promise<AgentRouter> {
-    const router = new AgentRouter(cwd, sessionsDir, stallTimeoutMs, watchdogIntervalMs, steerWaitMs);
+    const router = new AgentRouter(cwd, sessionsDir, stallTimeoutMs, watchdogIntervalMs, steerWaitMs, stateStore);
     router.modelRuntime = await ModelRuntime.create();
     if (router.stallTimeoutMs > 0 && router.watchdogIntervalMs > 0) {
       router.watchdogTimer = setInterval(() => {
@@ -360,6 +364,15 @@ export class AgentRouter {
     const prev = this.sessions.get(sessionKey);
     this.sessions.set(sessionKey, opened);
     prev?.session.dispose();
+    // Persist the override so the binding survives restarts. Resuming a
+    // conversation's own derived file reverts it to the default instead.
+    const derived = this.sessionFileFor(sessionKey);
+    if (file === derived) {
+      this.stateStore.clearResumeTarget(sessionKey);
+    } else {
+      this.stateStore.setResumeTarget(sessionKey, file);
+    }
+    this.stateStore.save();
     console.log(`[router] ${sessionKey} switched to session ${label} -> ${file}`);
     return label;
   }
@@ -603,7 +616,19 @@ export class AgentRouter {
   }
 
   private async doOpen(sessionKey: string, spaceName: string, file?: string): Promise<SpaceEntry> {
-    const target = file ?? this.sessionFileFor(sessionKey);
+    let target = file ?? this.sessionFileFor(sessionKey);
+    if (file === undefined) {
+      // Persistent /resume override: the conversation points at a different
+      // session file. Stale overrides (file deleted) fall back to the derived
+      // path and are cleared.
+      const resumed = this.stateStore.getResumeTarget(sessionKey);
+      if (resumed && fs.existsSync(resumed)) {
+        target = resumed;
+      } else if (resumed) {
+        this.stateStore.clearResumeTarget(sessionKey);
+        this.stateStore.save();
+      }
+    }
     const legacy = this.sessionFileFor(spaceName);
     // One-time migration: the pre-parallel bridge kept one session per SPACE.
     // The first thread to open after upgrade inherits that file so history
