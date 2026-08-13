@@ -53,7 +53,7 @@ fi
 if [ -x "$PROJECT_DIR/../cron/start-cron.sh" ]; then
   "$PROJECT_DIR/../cron/start-cron.sh"
 else
-  log "WARNING: /workspace/cron/start-cron.sh not found - cron not started"
+  log "WARNING: $PROJECT_DIR/../cron/start-cron.sh not found - cron not started"
 fi
 
 log "pi-gchat-bridge starting (log: $LOG_FILE)"
