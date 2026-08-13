@@ -40,7 +40,7 @@ fi
 # Restore pi's global config (~/.pi/agent: provider creds, extensions, skills)
 # from the persistent snapshot if the container was recreated (ephemeral layer
 # is wiped on recreate, only survives plain restarts).
-SNAPSHOT_DIR="$PROJECT_DIR/pi-agent"
+SNAPSHOT_DIR="${PROJECT_DIR}/../pi-agent"
 if [ -d "$SNAPSHOT_DIR" ] && [ ! -f "$HOME/.pi/agent/models.json" ]; then
   log "restoring pi config from $SNAPSHOT_DIR"
   mkdir -p "$HOME/.pi/agent"
