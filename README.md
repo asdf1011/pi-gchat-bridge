@@ -6,28 +6,12 @@ bot and it runs pi — with tools, skills, and per-space conversation history.
 *pi* is a coding agent that runs on your machine with a session model, tools
 and skills — see [pi.dev](https://pi.dev).
 
-```
-Google Chat (you)
-    │  message
-    ▼
-Chat app (bot) ──event──▶  Pub/Sub topic ──▶  pull subscription
-                                              │
-                                              ▼
-                              bridge ──▶  pi AgentSession (SDK, in-process)
-                                              │  streamed reply
-                                              └──▶  Chat API: live message patch
-```
-
 ## How messages arrive
 
 Chat events are delivered via a **Cloud Pub/Sub pull subscription** — no public
 endpoint, no tunnel, works for DMs *and* spaces. The bridge pulls events,
 hands them to pi, and replies by posting a placeholder message that is **edited
 in place** as pi streams, so you watch the answer appear live.
-
-(Architecture note: bots can't list messages via the Chat API without
-admin-approved restricted scopes, and DMs are unsupported there entirely —
-events via Pub/Sub are the supported path.)
 
 ## One-time setup (Google Cloud Console)
 
@@ -92,33 +76,6 @@ That's it — the bot now answers messages in any space it's installed in.
 
 ## Session model & persistence
 
-- **Deterministic mapping, no registry.** Each Chat thread maps to one pi
-  session file by a pure naming rule: `spaces/<space>/threads/<thread>` →
-  `sessions/spaces_<space>_threads_<thread>.jsonl` (non-alphanumerics become
-  `_`); non-threaded DMs key by space instead. No mapping state is kept — the
-  filename *is* the state, re-derivable from the thread name in every event.
-- **Lazy open & adoption.** Sessions are opened lazily on first message in a
-  thread (nothing loads at startup). If the derived file exists, the bridge
-  adopts its history; if not, it creates a fresh one. The in-memory session
-  cache is disposable — losing it only costs a re-open of the same file.
-- **Survives restarts by filename.** A conversation persists across bridge
-  restarts iff its history sits at the derived path. External tooling can hand
-  a conversation to the bridge by writing that file itself — e.g. a cron job
-  that runs a pi session to do work (analysis, summaries), then lets replies
-  in the thread continue that session with full context. For app-created
-  threads, the app can choose a `threadKey` (stored by Google on the thread,
-  echoed back in events) and the session keys by `space/threadKey` — so the
-  session file path is known **before** the thread exists and the analysis can
-  run first, with the finished result posted into a fully prefilled
-  conversation. For threads the app didn't create (no `threadKey`), the key
-  falls back to the server-generated thread name, then the space.
-- **Single-consumer discipline.** The bridge is event-driven: only Chat
-  messages trigger posts, and only the bridge (or the cron pattern above)
-  writes thread session files. If another process also writes a session file
-  the bridge has open, its new messages will **not** appear in Google Chat,
-  and full-file rewrites (compaction / migration) truncate from the writer's
-  in-memory state — silently dropping the other writer's messages. Keep one
-  live writer per session file at a time.
 - **`/resume`, `/sessions`, `/list`** — manually adopt *any* session file
   (bridge store or pi's global store) into the current thread. This is an
   **import, not a live link**: the binding is in-memory only and is lost on
