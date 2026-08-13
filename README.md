@@ -63,7 +63,9 @@ That's it — the bot now answers messages in any space it's installed in.
   replies spill into follow-up messages).
 - **One pi session per thread** — conversations persist across bridge
   restarts (JSONL files under `sessions/`, keyed by thread; non-threaded DMs
-  key by space). Threads are fully independent conversations.
+  key by space). Threads are fully independent conversations. See
+  [Session model & persistence](#session-model--persistence) for how sessions
+  are named, adopted, and kept across restarts.
 - **Parallel across threads, independent conversations** — each
   conversation is handled independently and concurrently (event-driven async,
   no threads needed); a long reply in one thread never blocks another.
@@ -77,6 +79,45 @@ That's it — the bot now answers messages in any space it's installed in.
 - **pi extensions & skills work** — the session loads your `~/.pi/agent`
   extensions, so `/commands` and skills behave like in the TUI.
 - **Bot messages are ignored** — no echo loops.
+
+## Session model & persistence
+
+- **Deterministic mapping, no registry.** Each Chat thread maps to one pi
+  session file by a pure naming rule: `spaces/<space>/threads/<thread>` →
+  `sessions/spaces_<space>_threads_<thread>.jsonl` (non-alphanumerics become
+  `_`); non-threaded DMs key by space instead. No mapping state is kept — the
+  filename *is* the state, re-derivable from the thread name in every event.
+- **Lazy open & adoption.** Sessions are opened lazily on first message in a
+  thread (nothing loads at startup). If the derived file exists, the bridge
+  adopts its history; if not, it creates a fresh one. The in-memory session
+  cache is disposable — losing it only costs a re-open of the same file.
+- **Survives restarts by filename.** A conversation persists across bridge
+  restarts iff its history sits at the derived path. External tooling can hand
+  a conversation to the bridge by writing that file itself — e.g. a cron job
+  that runs a pi session to do work (analysis, summaries), then lets replies
+  in the thread continue that session with full context. For app-created
+  threads, the app can choose a `threadKey` (stored by Google on the thread,
+  echoed back in events) and the session keys by `space/threadKey` — so the
+  session file path is known **before** the thread exists and the analysis can
+  run first, with the finished result posted into a fully prefilled
+  conversation. For threads the app didn't create (no `threadKey`), the key
+  falls back to the server-generated thread name, then the space.
+- **Single-consumer discipline.** The bridge is event-driven: only Chat
+  messages trigger posts, and only the bridge (or the cron pattern above)
+  writes thread session files. If another process also writes a session file
+  the bridge has open, its new messages will **not** appear in Google Chat,
+  and full-file rewrites (compaction / migration) truncate from the writer's
+  in-memory state — silently dropping the other writer's messages. Keep one
+  live writer per session file at a time.
+- **`/resume`, `/sessions`, `/list`** — manually adopt *any* session file
+  (bridge store or pi's global store) into the current thread. This is an
+  **import, not a live link**: the binding is in-memory only and is lost on
+  bridge restart (the thread reverts to its derived-path file). After
+  resuming, continuing the source session elsewhere (e.g. in the TUI) forks
+  the conversation — those messages never appear in Chat. To make an adopted
+  session restart-proof, copy it onto the thread's derived path instead of
+  sharing or symlinking it (shared files reintroduce the multi-writer hazards
+  above).
 
 ## Run with Docker (Synology / any Docker host)
 

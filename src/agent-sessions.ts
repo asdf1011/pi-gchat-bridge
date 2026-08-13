@@ -197,9 +197,16 @@ export class AgentRouter {
     return router;
   }
 
-  /** Stable per-conversation key: the thread when threaded, else the space. */
-  static keyFor(spaceName: string, threadName?: string): string {
-    return threadName ?? spaceName;
+  /**
+   * Stable per-conversation key, in priority order:
+   *   1. threadKey — the app-chosen identifier stored on threads the app
+   *      creates (Google echoes it back in events). Space-prefixed so the same
+   *      key in different spaces can't collide.
+   *   2. thread name — for threads the app didn't create (no threadKey).
+   *   3. space — fallback for non-threaded DMs.
+   */
+  static keyFor(spaceName: string, threadName?: string, threadKey?: string): string {
+    return threadKey ? `${spaceName}/${threadKey}` : (threadName ?? spaceName);
   }
 
   /**

@@ -25,7 +25,7 @@ interface ChatEvent {
     argumentText?: string;
     createTime?: string;
     sender?: { name?: string; type?: string };
-    thread?: { name?: string };
+    thread?: { name?: string; threadKey?: string };
     slashCommand?: { commandId?: string; commandName?: string };
   };
   appCommandMetadata?: { type?: string; commandId?: string };
@@ -217,6 +217,7 @@ export class PubSubReceiver implements MessageReceiver {
           name: message.name,
           text,
           threadName: message.thread?.name,
+          threadKey: message.thread?.threadKey,
           senderType: "HUMAN",
         },
       };
@@ -234,6 +235,7 @@ export class PubSubReceiver implements MessageReceiver {
         message: {
           name: message.name,
           threadName: message.thread?.name,
+          threadKey: message.thread?.threadKey,
         },
         action: {
           actionMethodName: event.action?.actionMethodName,
@@ -254,6 +256,7 @@ export class PubSubReceiver implements MessageReceiver {
       senderName: message.sender?.name,
       senderType: message.sender?.type as ChatMessage["senderType"],
       threadName: message.thread?.name,
+      threadKey: message.thread?.threadKey,
     };
     const chatSpace: ChatSpace = {
       name: space.name,

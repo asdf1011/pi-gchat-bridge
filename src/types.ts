@@ -23,6 +23,11 @@ export interface ChatMessage {
   createTime?: string;
   /** e.g. "spaces/AAAA/threads/CCCC" — replies go back into this thread */
   threadName?: string;
+  /** App-chosen thread identifier (set when the app creates the thread).
+   *  Stable, stored by Google on the thread, and echoed back in events — used
+   *  as the session key so the conversation identity is decoupled from the
+   *  server-generated thread name. */
+  threadKey?: string;
 }
 
 /** FormAction payload carried by CARD_CLICKED interaction events. */

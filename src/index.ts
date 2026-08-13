@@ -237,9 +237,11 @@ async function main(): Promise<void> {
     const display = incoming.space.displayName ?? spaceName;
     const text = incoming.message.text ?? "";
     const threadName = incoming.message.threadName;
-    // Conversations are keyed per thread, so parallel threads never block
-    // each other (space is the fallback for non-threaded DMs).
-    const sessionKey = AgentRouter.keyFor(spaceName, threadName);
+    const threadKey = incoming.message.threadKey;
+    // Conversations are keyed per thread (app-chosen threadKey wins when
+    // present), so parallel threads never block each other (space is the
+    // fallback for non-threaded DMs).
+    const sessionKey = AgentRouter.keyFor(spaceName, threadName, threadKey);
     console.log(
       `[chat] ${display}: ${incoming.eventType === "CARD_CLICKED" ? `card:${incoming.action?.actionMethodName}` : text.slice(0, 120)}`,
     );
