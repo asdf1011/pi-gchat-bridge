@@ -47,6 +47,15 @@ if [ -d "$SNAPSHOT_DIR" ] && [ ! -f "$HOME/.pi/agent/models.json" ]; then
   cp -rn "$SNAPSHOT_DIR/." "$HOME/.pi/agent/"
 fi
 
+# --- Startup services: cron (daily scheduled checks) ---
+# Delegate to the self-contained cron service (installs cron, restores gmcli
+# credentials + crontab from its persistent snapshots, starts the daemon).
+if [ -x "$PROJECT_DIR/../cron/start-cron.sh" ]; then
+  "$PROJECT_DIR/../cron/start-cron.sh"
+else
+  log "WARNING: /workspace/cron/start-cron.sh not found - cron not started"
+fi
+
 log "pi-chat-bridge starting (log: $LOG_FILE)"
 while true; do
   node dist/index.js >> "$LOG_FILE" 2>&1 &
