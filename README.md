@@ -6,6 +6,10 @@ bot and it runs pi — with tools, skills, and per-space conversation history.
 *pi* is a coding agent that runs on your machine with a session model, tools
 and skills — see [pi.dev](https://pi.dev).
 
+**Requires a Google Workspace account.** Custom Chat apps (bots) are only
+available to Workspace organizations — personal Gmail accounts can use Chat
+itself but can't install third-party Chat apps like this bridge.
+
 ## How messages arrive
 
 Chat events are delivered via a **Cloud Pub/Sub pull subscription** — no public
