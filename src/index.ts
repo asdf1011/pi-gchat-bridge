@@ -17,6 +17,16 @@ const RESUME_ACTION = "resume_session";
 /** Card action method for the model picker dropdown. */
 const MODEL_ACTION = "switch_model";
 
+/**
+ * Live streaming markers per conversation: the running turn's handler registers
+ * its placeholder here so a steering message (a separate handler invocation)
+ * can relocate the placeholder BELOW the steering message. Google Chat orders
+ * thread messages by creation time, so without relocation the reply — which
+ * now covers the steer — would render above the steering text. Entries are
+ * removed when the owning handler finishes.
+ */
+const markers = new Map<string, { owner: object; relocate: () => Promise<void> }>();
+
 /** Extract the picked value from a CARD_CLICKED event (formInputs or parameters). */
 function selectedValue(incoming: IncomingMessage): string | undefined {
   const formInputs = incoming.action?.formInputs;
@@ -371,6 +381,12 @@ async function main(): Promise<void> {
       const outcome = await router.redirect(sessionKey, text);
       if (outcome === "steered") {
         console.log(`[chat] ${display}: steered into running turn`);
+        // The reply now covers the steer too, so move its placeholder below the
+        // steering message — otherwise the response renders above the steer.
+        await markers
+          .get(sessionKey)
+          ?.relocate()
+          .catch((err) => console.error("[chat] marker relocate failed:", (err as Error).message));
         return "ok";
       }
       if (outcome === "redirected") {
@@ -388,6 +404,40 @@ async function main(): Promise<void> {
      *  order, so a stale snapshot can never land after the final text (an out-of-order
      *  PATCH race could otherwise permanently truncate the stored message). */
     let patchChain: Promise<void> = Promise.resolve();
+    /** Serialized placeholder relocations (a steer moves the streaming reply
+     *  below the steering message; see `relocateMarker`). */
+    let relocateChain: Promise<void> = Promise.resolve();
+    /** Identity token so a stale handler can't unregister a newer one's marker. */
+    const owner = {};
+
+    /**
+     * Move the streaming placeholder below a steering message: delete the old
+     * one (created before the steer, so it renders ABOVE the steer text) and
+     * create a fresh one carrying the streamed text so far. Google Chat orders
+     * thread messages by creation time, so without this the reply to a
+     * steered-in message would appear before the steering message itself.
+     */
+    const relocateMarker = (): Promise<void> => {
+      relocateChain = relocateChain.then(async () => {
+        await patchChain; // settle queued patches before deleting the old marker
+        const old = markerName;
+        if (!old) return; // no placeholder yet — the one created later lands after the steer anyway
+        markerName = undefined; // meanwhile patchNow() becomes a no-op
+        await client.deleteMessage(old).catch(() => {});
+        markerName = await client.createMessage(spaceName, THINKING_TEXT, threadName);
+        const capped = streamed.slice(0, MAX_MESSAGE_CHARS);
+        if (capped) {
+          try {
+            await client.updateMessage(markerName, capped);
+          } catch (err) {
+            console.error("[chat] relocate carry-over failed:", (err as Error).message);
+          }
+        }
+      });
+      return relocateChain;
+    };
+    // Register so a steering message (a separate handler) can relocate this marker.
+    markers.set(sessionKey, { owner, relocate: relocateMarker });
 
     /** Create the placeholder on demand (called by the delay timer). */
     const ensureMarker = async (): Promise<void> => {
@@ -472,6 +522,9 @@ async function main(): Promise<void> {
         await client.deleteMessage(markerName).catch(() => {});
       }
       return "ok"; // ack so a poison message doesn't redeliver forever
+    } finally {
+      // Only the handler that owns the current marker may unregister it.
+      if (markers.get(sessionKey)?.owner === owner) markers.delete(sessionKey);
     }
   };
 
