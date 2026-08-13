@@ -3,6 +3,9 @@
 Bridge between **Google Chat** and the **pi coding agent**. Message a Google Chat
 bot and it runs pi — with tools, skills, and per-space conversation history.
 
+*pi* is a coding agent that runs on your machine with a session model, tools
+and skills — see [pi.dev](https://pi.dev).
+
 ```
 Google Chat (you)
     │  message
@@ -46,6 +49,9 @@ events via Pub/Sub are the supported path.)
 
 ## Local setup
 
+**Prerequisites:** pi installed with provider API keys configured in
+`~/.pi/agent`, and Node.js ≥ 22.19.
+
 ```bash
 cd pi-chat-bridge
 npm install
@@ -79,6 +85,10 @@ That's it — the bot now answers messages in any space it's installed in.
 - **pi extensions & skills work** — the session loads your `~/.pi/agent`
   extensions, so `/commands` and skills behave like in the TUI.
 - **Bot messages are ignored** — no echo loops.
+
+> Only ONE bridge may run at a time — stop any other instance before starting
+> another, or both will pull the same Pub/Sub subscription and race
+> (duplicate replies).
 
 ## Session model & persistence
 
@@ -119,18 +129,6 @@ That's it — the bot now answers messages in any space it's installed in.
   sharing or symlinking it (shared files reintroduce the multi-writer hazards
   above).
 
-## Deployment (Docker)
-
-Container deployment is environment-specific, so it lives **outside this repo**
-at `/workspace/docker` (see the README there): `build.sh` builds the bridge
-image from this repo, `docker-compose.yml` runs it with a restart policy,
-healthcheck and persistent mounts. The repo's `.dockerignore` stays here —
-docker only reads it from the build-context root.
-
-> Only ONE bridge may run at a time — stop any non-Docker instance before
-> starting the container, or both will pull the same Pub/Sub subscription and
-> race (duplicate replies).
-
 ## Configuration
 
 | Env var | Default | Meaning |
@@ -159,7 +157,6 @@ redelivered by Pub/Sub to the fresh session.
 ## Roadmap
 
 - [x] Pub/Sub receiver (DMs + spaces, no public endpoint)
-- [x] Docker deployment with restart policy + healthcheck
 - [x] Streaming replies (live in-place editing)
 - [ ] Allowed-users filter (whitelist who can message the bot)
 - [x] Parallel processing: per-thread sessions + concurrent dispatch (threads are independent; serial within a thread)
@@ -171,3 +168,29 @@ redelivered by Pub/Sub to the fresh session.
 - pi sessions in the bridge get the **full default toolset** (`read`, `bash`,
   `edit`, `write`) against `PI_CWD`. Anyone who can message the bot can run
   commands — keep the app limited to your org / specific people.
+
+## Known limitations
+
+These are platform-level constraints (verified Aug 2026) — the bridge can't
+work around them without external pieces:
+
+- **Markdown tables don't render.** Google Chat text messages support only a
+  small formatting subset (bold, italic, strikethrough, monospace, lists,
+  links) — GFM pipe tables show up as literal text. The closest rendering is
+  an aligned monospace fenced block, but there's no way to get a true table
+  (bold headers, cell borders) in a plain message. Cards have no table widget
+  either.
+
+- **Bots can't upload media attachments.** The `attachments:upload`
+  (`media.upload`) endpoint rejects service-account auth outright
+  ("This method doesn't support app authentication with a service account")
+  — even with `chat.messages` claimed on the service-account token. It
+  requires **user delegation**: user OAuth (`chat.messages` scope, one-time
+  consent) or Workspace **domain-wide delegation** (service account
+  impersonating a user). Either way the attachment message is attributed to
+  the delegated user, not the bot, so inline images from pi aren't possible
+  with the current `chat.bot`-only setup.
+
+- **No typing/thinking indicators.** The Chat API currently has no support
+  for typing or thinking indicators for bots — the bridge fakes liveness with
+  the delayed "Thinking…" placeholder instead.
