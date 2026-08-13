@@ -92,7 +92,6 @@ That's it — the bot now answers messages in any space it's installed in.
 |---|---|---|
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | — (required) | Path to service account key |
 | `PUBSUB_SUBSCRIPTION` | — (required) | `projects/.../subscriptions/...` |
-| `PULL_INTERVAL_MS` | `1000` | Pub/Sub pull cadence |
 | `PI_CWD` | bridge dir | Working dir for pi tools |
 | `BRIDGE_SESSIONS_DIR` | `./sessions` | Per-space pi session files |
 | `BRIDGE_STATE_FILE` | `./state.json` | Message dedupe state |

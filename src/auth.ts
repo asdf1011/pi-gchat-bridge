@@ -36,6 +36,8 @@ export class ServiceAccountAuth {
     method: "GET" | "POST" | "PATCH" | "DELETE",
     url: string,
     body?: string,
+    /** Abort the request after this many ms (e.g. a long-lived pull). */
+    timeoutMs?: number,
   ): Promise<unknown> {
     const token = await this.getAccessToken();
     const res = await fetch(url, {
@@ -45,6 +47,7 @@ export class ServiceAccountAuth {
         "Content-Type": "application/json",
       },
       body,
+      signal: timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined,
     });
     if (!res.ok) {
       const detail = await res.text().catch(() => "");

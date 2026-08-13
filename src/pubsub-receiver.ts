@@ -5,6 +5,10 @@ import type { ChatMessage, ChatSpace, IncomingMessage } from "./types.js";
 
 const PUBSUB_API = "https://pubsub.googleapis.com/v1";
 const PUBSUB_SCOPE = "https://www.googleapis.com/auth/pubsub";
+/** How long a single blocking pull may wait for messages before re-issuing. */
+const PULL_TIMEOUT_MS = 60_000;
+/** Brief pause after a pull returns empty (timeout/error) before re-issuing. */
+const PULL_RETRY_MS = 1_000;
 
 interface ReceivedMessage {
   ackId: string;
@@ -48,7 +52,6 @@ export class PubSubReceiver implements MessageReceiver {
   readonly name = "pubsub";
   private auth: ServiceAccountAuth;
   private running = false;
-  private timer: NodeJS.Timeout | undefined;
   /**
    * Message names currently being handled. Closes the dedupe window: without
    * this, a redelivered copy of a message that is still streaming (not yet
@@ -64,7 +67,6 @@ export class PubSubReceiver implements MessageReceiver {
     /** Full subscription name: projects/{project}/subscriptions/{subscription} */
     private subscription: string,
     private state: StateStore,
-    private intervalMs: number,
   ) {
     this.auth = new ServiceAccountAuth(serviceAccountPath, [PUBSUB_SCOPE]);
   }
@@ -75,43 +77,64 @@ export class PubSubReceiver implements MessageReceiver {
     }
     // Health check: a pull round-trip (GET on the subscription needs the
     // Viewer role in some setups; pull only needs Subscriber's consume).
+    // returnImmediately keeps this probe fast — it only checks auth/reachability.
     await this.auth.request(
       "POST",
       `${PUBSUB_API}/${this.subscription}:pull`,
-      JSON.stringify({ maxMessages: 1 }),
+      JSON.stringify({ maxMessages: 1, returnImmediately: true }),
+      PULL_TIMEOUT_MS,
     );
     console.log(`[pubsub] connected to ${this.subscription}`);
 
     this.running = true;
-    await this.pullOnce(handler); // immediate first pull
-    this.timer = setInterval(() => {
-      this.pullOnce(handler).catch((err) => console.error("[pubsub] pull failed:", err.message));
-    }, this.intervalMs);
+    // Long-lived pull loop: one blocking pull in flight at a time. Pub/Sub
+    // holds the request open until a message arrives (returnImmediately is
+    // false), so messages are delivered immediately — no polling interval.
+    // When a pull returns (messages, or the idle timeout), the next pull is
+    // issued right away.
+    void this.pullLoop(handler).catch((err) =>
+      console.error("[pubsub] pull loop failed:", (err as Error).message),
+    );
+  }
+
+  /** Blocking pull loop: re-issue the next pull as soon as the previous one returns. */
+  private async pullLoop(handler: (message: IncomingMessage) => Promise<HandleResult>): Promise<void> {
+    while (this.running) {
+      const received = await this.pullOnce(handler);
+      if (!this.running) break;
+      if (received === 0) {
+        // Empty only happens on timeout/error — brief pause so a persistent
+        // failure can't spin the loop into a hot retry.
+        await new Promise((r) => setTimeout(r, PULL_RETRY_MS));
+      }
+    }
   }
 
   async stop(): Promise<void> {
-    this.running = false;
-    if (this.timer) clearInterval(this.timer);
+    this.running = false; // pullLoop exits after the current pull returns
     this.state.save();
   }
 
-  private async pullOnce(handler: (message: IncomingMessage) => Promise<HandleResult>): Promise<void> {
-    if (!this.running || this.pulling) return;
+  private async pullOnce(handler: (message: IncomingMessage) => Promise<HandleResult>): Promise<number> {
+    if (!this.running || this.pulling) return 0;
     this.pulling = true;
     let received: ReceivedMessage[] = [];
     try {
       const data = (await this.auth.request(
         "POST",
         `${PUBSUB_API}/${this.subscription}:pull`,
-        JSON.stringify({ maxMessages: 10 }),
+        // returnImmediately=false: block until a message is available, so
+        // there's no polling — new messages arrive the moment they're published.
+        JSON.stringify({ maxMessages: 10, returnImmediately: false }),
+        PULL_TIMEOUT_MS,
       )) as { receivedMessages?: ReceivedMessage[] };
       received = data.receivedMessages ?? [];
     } catch (err) {
       console.error("[pubsub] pull failed:", (err as Error).message);
     } finally {
       // Release immediately: handlers below run CONCURRENTLY, and the next
-      // pull (1s later) may start while they are still streaming. Dedupe
-      // claims keep redeliveries safe.
+      // pull may start while they are still streaming. Dedupe claims keep
+      // redeliveries safe.
       this.pulling = false;
     }
 
@@ -120,6 +143,7 @@ export class PubSubReceiver implements MessageReceiver {
     for (const receivedMessage of received) {
       void this.handleOne(receivedMessage, handler);
     }
+    return received.length;
   }
 
   /** Handle one Pub/Sub message: dedupe, claim, run the handler, ack or leave unacked. */

@@ -5,8 +5,6 @@ import path from "node:path";
 export interface Config {
   /** Path to the service account JSON key (the Chat app's bot identity). */
   serviceAccountPath: string;
-  /** How often to pull for Pub/Sub events (ms). */
-  pullIntervalMs: number;
   pubsubSubscription: string;
   /** HTTP health endpoint port (0 disables). */
   healthPort: number;
@@ -47,7 +45,6 @@ export function loadConfig(): Config {
 
   return {
     serviceAccountPath,
-    pullIntervalMs: Number(process.env.PULL_INTERVAL_MS ?? 1000),
     pubsubSubscription: process.env.PUBSUB_SUBSCRIPTION ?? "",
     healthPort: Number(process.env.PORT ?? 8080),
     cwd,

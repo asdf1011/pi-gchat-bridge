@@ -215,7 +215,7 @@ function helpCard(): unknown[] {
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  console.log(`[bridge] cwd=${config.cwd} pull=${config.pullIntervalMs}ms`);
+  console.log(`[bridge] cwd=${config.cwd}`);
 
   if (config.healthPort > 0) {
     const server = http.createServer((_req, res) => {
@@ -532,7 +532,6 @@ async function main(): Promise<void> {
     config.serviceAccountPath,
     config.pubsubSubscription,
     state,
-    config.pullIntervalMs,
   );
 
   const shutdown = async (): Promise<void> => {
