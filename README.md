@@ -194,3 +194,8 @@ work around them without external pieces:
 - **No typing/thinking indicators.** The Chat API currently has no support
   for typing or thinking indicators for bots — the bridge fakes liveness with
   the delayed "Thinking…" placeholder instead.
+
+## Disclaimer
+
+This is a personal project. The views, code, and opinions expressed here are
+my own and do not represent those of my current or past employers.
