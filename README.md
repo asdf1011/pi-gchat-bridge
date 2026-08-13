@@ -119,54 +119,17 @@ That's it — the bot now answers messages in any space it's installed in.
   sharing or symlinking it (shared files reintroduce the multi-writer hazards
   above).
 
-## Run with Docker (Synology / any Docker host)
+## Deployment (Docker)
 
-The bridge ships with a `Dockerfile` and `docker-compose.yml`. The container
-runs `node dist/index.js` with a **healthcheck** on `:8080/healthz` and
-`restart: unless-stopped`, so it comes back automatically after reboots or
-container restarts.
-
-### One-time setup (in the project dir)
-
-```bash
-# 1. Copy pi's global config into the container mount (credentials, extensions,
-#    skills). This includes auth.json with your provider API keys:
-cp -r ~/.pi/agent ./pi-agent
-
-# 2. Create the workspace dir pi's tools will operate on:
-mkdir -p workspace
-
-# 3. Migrate existing sessions/state into the persistent data dir:
-mkdir -p data
-mv sessions data/ 2>/dev/null || true
-mv state.json data/ 2>/dev/null || true
-
-# 4. Build and start:
-docker compose up -d --build
-
-# 5. Watch logs:
-docker compose logs -f
-```
+Container deployment is environment-specific, so it lives **outside this repo**
+at `/workspace/docker` (see the README there): `build.sh` builds the bridge
+image from this repo, `docker-compose.yml` runs it with a restart policy,
+healthcheck and persistent mounts. The repo's `.dockerignore` stays here —
+docker only reads it from the build-context root.
 
 > Only ONE bridge may run at a time — stop any non-Docker instance before
 > starting the container, or both will pull the same Pub/Sub subscription and
 > race (duplicate replies).
-
-### Layout inside the container
-
-| Host path (project dir) | Container path | Purpose |
-|---|---|---|
-| `./data` | `/app/data` | pi sessions + dedupe state (persisted) |
-| `./chat-bot-key.json` | `/workspace/pi-chat-bridge/chat-bot-key.json` | bot key (matches `.env`) |
-| `./pi-agent` | `/root/.pi/agent` | pi provider creds + extensions + skills |
-| `./workspace` | `/workspace` | where pi's tools (`PI_CWD`) operate |
-
-`restart: unless-stopped` + the healthcheck mean Container Manager will restart
-the bridge automatically if it crashes or the host reboots.
-
-**Note for ARM Synology models:** the pi SDK bundles native image tooling
-(`photon-node`). If the image fails to build/start on ARM, let us know — there
-may be a platform fallback needed.
 
 ## Configuration
 
