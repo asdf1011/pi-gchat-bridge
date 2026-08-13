@@ -1,4 +1,4 @@
-# pi-chat-bridge
+# pi-gchat-bridge
 
 Bridge between **Google Chat** and the **pi coding agent**. Message a Google Chat
 bot and it runs pi — with tools, skills, and per-space conversation history.
@@ -53,7 +53,7 @@ events via Pub/Sub are the supported path.)
 `~/.pi/agent`, and Node.js ≥ 22.19.
 
 ```bash
-cd pi-chat-bridge
+cd pi-gchat-bridge
 npm install
 cp .env.example .env
 # edit .env: point GOOGLE_SERVICE_ACCOUNT_JSON at your key file

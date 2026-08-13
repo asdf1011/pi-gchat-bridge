@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# pi-chat-bridge startup script.
+# pi-gchat-bridge startup script.
 #
 # - Runs the bridge from anywhere (resolves its own project dir).
 # - Restarts the bridge automatically if it exits (crash, OOM, etc.).
@@ -56,7 +56,7 @@ else
   log "WARNING: /workspace/cron/start-cron.sh not found - cron not started"
 fi
 
-log "pi-chat-bridge starting (log: $LOG_FILE)"
+log "pi-gchat-bridge starting (log: $LOG_FILE)"
 while true; do
   node dist/index.js >> "$LOG_FILE" 2>&1 &
   NODE_PID=$!
