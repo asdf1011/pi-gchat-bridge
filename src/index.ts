@@ -85,8 +85,10 @@ function toolStatusLine(toolName: string, args: unknown): string {
   const command = typeof a.command === "string" ? a.command.trim().replace(/\s+/g, " ") : "";
   const path = typeof a.path === "string" ? a.path.trim() : "";
   const detail = (command || path).replace(/`/g, "").slice(0, 140);
+  // Legacy Chat syntax: "Running" is _italic_ (underscores), the command stays
+  // in `monospace` backticks.
   const label = command ? "Running" : `Running ${toolName}`;
-  return detail ? `${label}: \`${detail}\`` : `${label}…`;
+  return detail ? `_${label}:_ \`${detail}\`` : `_${label}_…`;
 }
 
 function confirmCard(label: string): unknown[] {
