@@ -133,13 +133,19 @@ redelivered by Pub/Sub to the fresh session.
 These are platform-level constraints (verified Aug 2026) — the bridge can't
 work around them without external pieces:
 
+- **Personal Gmail accounts can't use the bridge.** Custom Chat apps (bots)
+  are only available to Google Workspace organizations — a personal Gmail
+  account can chat with a bot but can't install or develop one, so the bridge
+  needs a Workspace account.
+
 - **Markdown tables don't render.** Since Aug 2026 the bridge sends replies
   with `markupSyntax: MARKUP_SYNTAX_MARKDOWN`, so standard Markdown (bold,
   italic, strikethrough, monospace, code fences, bulleted/nested/numbered
   lists, block quotes, links) renders properly in Chat. GFM pipe tables are
   *not* in the supported Markdown subset and still show up as literal text —
   the closest rendering is an aligned monospace fenced block, and cards have
-  no table widget either.
+  no table widget either. Tracked upstream:
+  [issue 428659965](https://issuetracker.google.com/issues/428659965).
 
 - **Streamed placeholders can't render Markdown.** `markupSyntax` is
   create-only — a text PATCH resets a message to legacy Chat syntax and the
@@ -167,11 +173,13 @@ work around them without external pieces:
   consent) or Workspace **domain-wide delegation** (service account
   impersonating a user). Either way the attachment message is attributed to
   the delegated user, not the bot, so inline images from pi aren't possible
-  with the current `chat.bot`-only setup.
+  with the current `chat.bot`-only setup. Tracked upstream:
+  [issue 447642391](https://issuetracker.google.com/issues/447642391).
 
 - **No typing/thinking indicators.** The Chat API currently has no support
   for typing or thinking indicators for bots — the bridge fakes liveness with
-  the delayed "Thinking…" placeholder instead.
+  the delayed "Thinking…" placeholder instead. Tracked upstream:
+  [issue 166140696](https://issuetracker.google.com/issues/166140696).
 
 ## Disclaimer
 
