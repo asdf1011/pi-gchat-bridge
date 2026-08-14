@@ -22,8 +22,10 @@ const MODEL_ACTION = "switch_model";
  * its placeholder here so a steering message (a separate handler invocation)
  * can relocate the placeholder BELOW the steering message. Google Chat orders
  * thread messages by creation time, so without relocation the reply — which
- * now covers the steer — would render above the steering text. Entries are
- * removed when the owning handler finishes.
+ * now covers the steer — would render above the steering text. A placeholder
+ * that already shows streamed text is kept in place (frozen) as a record of
+ * what was being said; only the continued stream moves below the steer.
+ * Entries are removed when the owning handler finishes.
  */
 const markers = new Map<string, { owner: object; relocate: () => Promise<void> }>();
 
@@ -412,19 +414,34 @@ async function main(): Promise<void> {
     const owner = {};
 
     /**
-     * Move the streaming placeholder below a steering message: delete the old
-     * one (created before the steer, so it renders ABOVE the steer text) and
-     * create a fresh one carrying the streamed text so far. Google Chat orders
-     * thread messages by creation time, so without this the reply to a
-     * steered-in message would appear before the steering message itself.
+     * Move the streaming placeholder below a steering message. Google Chat
+     * orders thread messages by creation time, so a placeholder created before
+     * the steer would render ABOVE the steering text once the reply covers it.
+     * The old placeholder is kept where it is when it already carries real
+     * text — a frozen record of what was being said when the user steered, so
+     * the thread history still shows what the answer was a response to — and
+     * a fresh one is created below the steer for the continued stream. Only a
+     * bare "Thinking…" placeholder (nothing streamed yet) is deleted.
      */
     const relocateMarker = (): Promise<void> => {
       relocateChain = relocateChain.then(async () => {
-        await patchChain; // settle queued patches before deleting the old marker
+        await patchChain; // settle queued patches before freezing the old marker
         const old = markerName;
         if (!old) return; // no placeholder yet — the one created later lands after the steer anyway
         markerName = undefined; // meanwhile patchNow() becomes a no-op
-        await client.deleteMessage(old).catch(() => {});
+        if (streamed.trim()) {
+          // Keep the partial reply where it is (above the steer) as a record
+          // of what was being said; only a bare "Thinking…" placeholder is
+          // deleted. The below-steer marker carries just the continued stream.
+          console.log(`[chat] steer: kept ${streamed.length} chars of partial reply above the steer`);
+        } else {
+          await client.deleteMessage(old).catch(() => {});
+        }
+        // Reset the accumulator so the fresh marker only ever shows text
+        // streamed AFTER the steer — the frozen message above already holds
+        // the rest, so the live view doesn't duplicate the draft. The final
+        // answer posted at the end is the complete text regardless.
+        streamed = "";
         markerName = await client.createMessage(spaceName, THINKING_TEXT, threadName);
         const capped = streamed.slice(0, MAX_MESSAGE_CHARS);
         if (capped) {
@@ -506,12 +523,16 @@ async function main(): Promise<void> {
         await patchNow();
         await client.deleteMessage(markerName).catch(() => {});
       }
-      // The first chunk IS the answer (it notifies); overflow chunks are silent
-      // so long replies don't re-notify or bump the space per 4000-char spill.
+      // The first chunk IS the answer (it notifies). Overflow chunks would
+      // ideally be silent so long replies don't re-notify per 4000-char spill,
+      // but NOTIFICATION_TYPE_SILENT 403s when combined with messageReplyOption
+      // (threaded replies — verified Aug 2026); silent only works for top-level
+      // creates, so threaded overflow posts normally.
       let rest = final;
       let first = true;
       while (rest.length > 0) {
-        await client.sendMessage(spaceName, rest.slice(0, MAX_MESSAGE_CHARS), threadName, first ? undefined : { silent: true });
+        const silent = !first && !threadName ? { silent: true } : undefined;
+        await client.sendMessage(spaceName, rest.slice(0, MAX_MESSAGE_CHARS), threadName, silent);
         rest = rest.slice(MAX_MESSAGE_CHARS);
         first = false;
       }
