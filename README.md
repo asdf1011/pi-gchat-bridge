@@ -148,6 +148,17 @@ work around them without external pieces:
   Markdown message when the reply is done, leaving a "Message deleted" stub
   in the thread.
 
+- **Threaded conversations get several notifications per reply.** In a
+  thread you'll get a ping for the "Thinking…" placeholder, another for the
+  relocated placeholder after a steering message, and one for the final
+  answer — and these can appear even when the Chat window has focus. The
+  bridge creates the placeholder silent where it can, but Google's API
+  rejects `silent` for threaded messages (403 when combined with
+  `messageReplyOption`, verified Aug 2026) and message thread placement
+  isn't patchable, so a silent message inside an existing thread isn't
+  possible. Top-level (non-threaded) conversations get exactly one
+  notification — the final answer.
+
 - **Bots can't upload media attachments.** The `attachments:upload`
   (`media.upload`) endpoint rejects service-account auth outright
   ("This method doesn't support app authentication with a service account")
