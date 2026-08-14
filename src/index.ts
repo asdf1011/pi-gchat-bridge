@@ -75,15 +75,17 @@ function escapeHtml(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-/** One-line status shown under the stream while a tool is running (e.g. the command). */
+/** One-line status shown under the stream while a tool is running (e.g. the command).
+ *  The placeholder is PATCHed, so it renders legacy Chat syntax only — backtick
+ *  monospace is the closest to a code block; the final answer renders real
+ *  Markdown. Inner backticks are stripped so the wrap can't break. */
 function toolStatusLine(toolName: string, args: unknown): string {
   const a = (args ?? {}) as Record<string, unknown>;
   const command = typeof a.command === "string" ? a.command.trim().replace(/\s+/g, " ") : "";
   const path = typeof a.path === "string" ? a.path.trim() : "";
-  const detail = command || path;
+  const detail = (command || path).replace(/`/g, "").slice(0, 140);
   const label = command ? "Running" : `Running ${toolName}`;
-  const line = detail ? `${label}: ${detail}` : `${label}…`;
-  return line.length > 160 ? `${line.slice(0, 159)}…` : line;
+  return detail ? `${label}: \`${detail}\`` : `${label}…`;
 }
 
 function confirmCard(label: string): unknown[] {
