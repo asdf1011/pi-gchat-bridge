@@ -469,7 +469,10 @@ async function main(): Promise<void> {
         // the rest, so the live view doesn't duplicate the draft. The final
         // answer posted at the end is the complete text regardless.
         streamed = "";
-        markerName = await client.createMessage(spaceName, THINKING_TEXT, threadName);
+        // Same silent policy as the initial placeholder: no notification for
+        // intermediate "Thinking…" markers, only for the final answer.
+        const silent = !threadName ? { silent: true } : undefined;
+        markerName = await client.createMessage(spaceName, THINKING_TEXT, threadName, silent);
         const capped = displayText();
         if (capped) {
           try {
@@ -484,12 +487,15 @@ async function main(): Promise<void> {
     // Register so a steering message (a separate handler) can relocate this marker.
     markers.set(sessionKey, { owner, relocate: relocateMarker });
 
-    /** Create the placeholder on demand (called by the delay timer).
-     *  Not silent: the placeholder is the "work in progress" ping — it notifies
-     *  so the user knows pi is working (the final answer notifies separately). */
+    /** Create the placeholder on demand (called by the delay timer). It is
+     *  silent where the API allows (top-level only): the user gets one
+     *  notification per reply — the final answer — not a "Thinking…" ping up
+     *  front. NOTE (verified Aug 2026): silent + threaded replies 403s, so
+     *  threaded placeholders still notify. */
     const ensureMarker = async (): Promise<void> => {
       if (markerName) return;
-      markerName = await client.createMessage(spaceName, THINKING_TEXT, threadName);
+      const silent = !threadName ? { silent: true } : undefined;
+      markerName = await client.createMessage(spaceName, THINKING_TEXT, threadName, silent);
       // A tool is already running — show its status right away.
       if (statusText) await patchNow();
     };
@@ -575,8 +581,8 @@ async function main(): Promise<void> {
       // Replace the streamed placeholder with a fresh message: `markupSyntax`
       // is create-only (any text PATCH resets the message to legacy CHAT
       // syntax — verified Aug 2026), so the placeholder can't render Markdown.
-      // Both the placeholder ("thinking") and this final create notify, so the
-      // user knows work is ongoing and then that the answer is ready.
+      // The placeholder is silent where the API allows, so this final create
+      // is the single notification that the answer is ready.
       if (markerName) {
         await patchNow();
         await client.deleteMessage(markerName).catch(() => {});
