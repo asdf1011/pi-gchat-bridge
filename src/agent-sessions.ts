@@ -219,13 +219,17 @@ export class AgentRouter {
    * redelivered later).
    *
    * If `onDelta` is provided, it is called with each streamed text delta from
-   * the assistant, so the caller can render a live reply.
+   * the assistant, so the caller can render a live reply. `onToolStart` /
+   * `onToolEnd` report when a tool starts/stops executing (with the tool name
+   * and args), so the caller can show what pi is working on.
    */
   async handleMessage(
     sessionKey: string,
     spaceName: string,
     text: string,
     onDelta?: (delta: string) => void,
+    onToolStart?: (toolName: string, args: unknown) => void,
+    onToolEnd?: () => void,
   ): Promise<string | null> {
     let entry = this.sessions.get(sessionKey);
     if (!entry) {
@@ -238,10 +242,14 @@ export class AgentRouter {
       return null;
     }
 
-    const unsubscribe = onDelta
+    const unsubscribe = onDelta || onToolStart || onToolEnd
       ? entry.session.subscribe((event) => {
           if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-            onDelta(event.assistantMessageEvent.delta);
+            onDelta?.(event.assistantMessageEvent.delta);
+          } else if (event.type === "tool_execution_start") {
+            onToolStart?.(event.toolName, event.args);
+          } else if (event.type === "tool_execution_end") {
+            onToolEnd?.();
           }
         })
       : undefined;

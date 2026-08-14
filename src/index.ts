@@ -12,6 +12,8 @@ const THINKING_TEXT = "Thinking…";
 const PATCH_DEBOUNCE_MS = 250;
 /** Delay before posting the placeholder — quick replies never show one. */
 const MARKER_DELAY_MS = 3000;
+/** Delay before showing the running tool's status line (avoids flicker for fast tools). */
+const TOOL_STATUS_DELAY_MS = 500;
 /** Card action method for the session picker dropdown. */
 const RESUME_ACTION = "resume_session";
 /** Card action method for the model picker dropdown. */
@@ -71,6 +73,17 @@ function pickerCard(sessions: SessionInfo[]): unknown[] {
 /** Escape text for use inside Chat card/message HTML (e.g. user-supplied names). */
 function escapeHtml(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/** One-line status shown under the stream while a tool is running (e.g. the command). */
+function toolStatusLine(toolName: string, args: unknown): string {
+  const a = (args ?? {}) as Record<string, unknown>;
+  const command = typeof a.command === "string" ? a.command.trim().replace(/\s+/g, " ") : "";
+  const path = typeof a.path === "string" ? a.path.trim() : "";
+  const detail = command || path;
+  const label = command ? "Running" : `Running ${toolName}`;
+  const line = detail ? `${label}: ${detail}` : `${label}…`;
+  return line.length > 160 ? `${line.slice(0, 159)}…` : line;
 }
 
 function confirmCard(label: string): unknown[] {
@@ -403,6 +416,10 @@ async function main(): Promise<void> {
     let markerTimer: NodeJS.Timeout | undefined;
     let streamed = "";
     let patchTimer: NodeJS.Timeout | undefined;
+    /** Transient status line (e.g. the command pi is running), shown under the stream. */
+    let statusText: string | undefined;
+    /** Delays showing the status line so fast tools don't flicker. */
+    let toolTimer: NodeJS.Timeout | undefined;
     /** Serialized placeholder updates: only one PATCH in flight at a time, applied in
      *  order, so a stale snapshot can never land after the final text (an out-of-order
      *  PATCH race could otherwise permanently truncate the stored message). */
@@ -412,6 +429,14 @@ async function main(): Promise<void> {
     let relocateChain: Promise<void> = Promise.resolve();
     /** Identity token so a stale handler can't unregister a newer one's marker. */
     const owner = {};
+
+    /** Text to show in the placeholder: the stream plus any transient status line. */
+    const displayText = (): string => {
+      if (!statusText) return streamed.slice(0, MAX_MESSAGE_CHARS);
+      const status = statusText.slice(0, 200);
+      const base = streamed.slice(0, Math.max(0, MAX_MESSAGE_CHARS - status.length - 2));
+      return base ? `${base}\n\n${status}` : status;
+    };
 
     /**
      * Move the streaming placeholder below a steering message. Google Chat
@@ -443,7 +468,7 @@ async function main(): Promise<void> {
         // answer posted at the end is the complete text regardless.
         streamed = "";
         markerName = await client.createMessage(spaceName, THINKING_TEXT, threadName);
-        const capped = streamed.slice(0, MAX_MESSAGE_CHARS);
+        const capped = displayText();
         if (capped) {
           try {
             await client.updateMessage(markerName, capped);
@@ -463,6 +488,8 @@ async function main(): Promise<void> {
     const ensureMarker = async (): Promise<void> => {
       if (markerName) return;
       markerName = await client.createMessage(spaceName, THINKING_TEXT, threadName);
+      // A tool is already running — show its status right away.
+      if (statusText) await patchNow();
     };
 
     const patchNow = (): Promise<void> => {
@@ -470,7 +497,7 @@ async function main(): Promise<void> {
         patchTimer = undefined;
         // Read the LATEST text when the queued task runs, so intermediate
         // snapshots coalesce and the final patch always carries the final text.
-        const capped = streamed.slice(0, MAX_MESSAGE_CHARS);
+        const capped = displayText();
         if (capped && markerName) {
           try {
             await client.updateMessage(markerName, capped);
@@ -482,6 +509,26 @@ async function main(): Promise<void> {
       return patchChain;
     };
 
+    /** Show the tool status after a short delay (fast tools shouldn't flicker). */
+    const showTool = (toolName: string, args: unknown): void => {
+      if (toolTimer) clearTimeout(toolTimer);
+      const line = toolStatusLine(toolName, args);
+      toolTimer = setTimeout(() => {
+        toolTimer = undefined;
+        statusText = line;
+        void patchNow();
+      }, TOOL_STATUS_DELAY_MS);
+    };
+    /** Clear the tool status line when the tool finishes. */
+    const clearTool = (): void => {
+      if (toolTimer) clearTimeout(toolTimer);
+      toolTimer = undefined;
+      if (statusText) {
+        statusText = undefined;
+        void patchNow();
+      }
+    };
+
     try {
       // Only show a placeholder if the reply is taking a while — feels like a
       // typing indicator for fast answers (no API exists for the real one).
@@ -489,14 +536,23 @@ async function main(): Promise<void> {
         ensureMarker().catch((err) => console.error("[chat] marker failed:", (err as Error).message));
       }, MARKER_DELAY_MS);
 
-      const reply = await router.handleMessage(sessionKey, spaceName, text, (delta) => {
-        streamed += delta;
-        if (streamed.length > MAX_MESSAGE_CHARS) return; // stop patching past the cap
-        if (!patchTimer) patchTimer = setTimeout(() => void patchNow(), PATCH_DEBOUNCE_MS);
-      });
+      const reply = await router.handleMessage(
+        sessionKey,
+        spaceName,
+        text,
+        (delta) => {
+          streamed += delta;
+          if (streamed.length > MAX_MESSAGE_CHARS) return; // stop patching past the cap
+          if (!patchTimer) patchTimer = setTimeout(() => void patchNow(), PATCH_DEBOUNCE_MS);
+        },
+        showTool,
+        clearTool,
+      );
 
       if (patchTimer) clearTimeout(patchTimer);
       if (markerTimer) clearTimeout(markerTimer);
+      if (toolTimer) clearTimeout(toolTimer);
+      statusText = undefined;
 
       if (reply === null) {
         // Session became busy between the check and the prompt — drop the marker.
@@ -542,6 +598,7 @@ async function main(): Promise<void> {
       const aborted = (err as Error)?.name === "AbortError";
       console.error(`[chat] ${display}: handler ${aborted ? "interrupted (implicit stop)" : "error"}:`, (err as Error).message);
       if (markerTimer) clearTimeout(markerTimer);
+      if (toolTimer) clearTimeout(toolTimer);
       if (aborted && streamed.trim()) {
         // Implicit stop: keep the partial reply visible, but replace the
         // streamed placeholder with a fresh message so it renders as Markdown.
