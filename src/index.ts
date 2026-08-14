@@ -335,8 +335,8 @@ async function main(): Promise<void> {
         await client.sendMessage(
           spaceName,
           current
-            ? `This conversation's session is named: <b>${escapeHtml(current)}</b>`
-            : "This conversation has no session name yet. Use <b>/name &lt;name&gt;</b> to set one.",
+            ? `This conversation's session is named: **${escapeHtml(current)}**`
+            : "This conversation has no session name yet. Use **/name &lt;name&gt;** to set one.",
           threadName,
         );
         console.log(`[chat] ${display}: queried session name (${current ?? "none"})`);
@@ -351,7 +351,7 @@ async function main(): Promise<void> {
         );
         return "ok";
       }
-      await client.sendMessage(spaceName, `Session named: <b>${escapeHtml(arg)}</b>`, threadName);
+      await client.sendMessage(spaceName, `Session named: **${escapeHtml(arg)}**`, threadName);
       console.log(`[chat] ${display}: named session -> ${arg}`);
       return "ok";
     }
@@ -440,7 +440,9 @@ async function main(): Promise<void> {
     // Register so a steering message (a separate handler) can relocate this marker.
     markers.set(sessionKey, { owner, relocate: relocateMarker });
 
-    /** Create the placeholder on demand (called by the delay timer). */
+    /** Create the placeholder on demand (called by the delay timer).
+     *  Not silent: the placeholder is the "work in progress" ping — it notifies
+     *  so the user knows pi is working (the final answer notifies separately). */
     const ensureMarker = async (): Promise<void> => {
       if (markerName) return;
       markerName = await client.createMessage(spaceName, THINKING_TEXT, threadName);
@@ -495,20 +497,23 @@ async function main(): Promise<void> {
 
       // Show the final text (in the placeholder if one exists), then post overflow.
       streamed = final;
+      // Replace the streamed placeholder with a fresh message: `markupSyntax`
+      // is create-only (any text PATCH resets the message to legacy CHAT
+      // syntax — verified Aug 2026), so the placeholder can't render Markdown.
+      // Both the placeholder ("thinking") and this final create notify, so the
+      // user knows work is ongoing and then that the answer is ready.
       if (markerName) {
         await patchNow();
-        let rest = final.slice(MAX_MESSAGE_CHARS);
-        while (rest.length > 0) {
-          await client.sendMessage(spaceName, rest.slice(0, MAX_MESSAGE_CHARS), threadName);
-          rest = rest.slice(MAX_MESSAGE_CHARS);
-        }
-      } else {
-        // No placeholder was needed — post the reply directly, split if long.
-        let rest = final;
-        while (rest.length > 0) {
-          await client.sendMessage(spaceName, rest.slice(0, MAX_MESSAGE_CHARS), threadName);
-          rest = rest.slice(MAX_MESSAGE_CHARS);
-        }
+        await client.deleteMessage(markerName).catch(() => {});
+      }
+      // The first chunk IS the answer (it notifies); overflow chunks are silent
+      // so long replies don't re-notify or bump the space per 4000-char spill.
+      let rest = final;
+      let first = true;
+      while (rest.length > 0) {
+        await client.sendMessage(spaceName, rest.slice(0, MAX_MESSAGE_CHARS), threadName, first ? undefined : { silent: true });
+        rest = rest.slice(MAX_MESSAGE_CHARS);
+        first = false;
       }
       console.log(`[chat] ${display}: replied (${final.length} chars)`);
       return "ok";
@@ -517,8 +522,18 @@ async function main(): Promise<void> {
       console.error(`[chat] ${display}: handler ${aborted ? "interrupted (implicit stop)" : "error"}:`, (err as Error).message);
       if (markerTimer) clearTimeout(markerTimer);
       if (aborted && streamed.trim()) {
-        // Implicit stop: keep the partial reply visible in the placeholder.
-        await patchNow().catch((e) => console.error("[chat] final partial patch failed:", (e as Error).message));
+        // Implicit stop: keep the partial reply visible, but replace the
+        // streamed placeholder with a fresh message so it renders as Markdown.
+        const partial = streamed.trim().slice(0, MAX_MESSAGE_CHARS);
+        if (markerName) {
+          await client.deleteMessage(markerName).catch(() => {});
+          markerName = undefined;
+        }
+        if (partial) {
+          await client.sendMessage(spaceName, partial, threadName).catch((e) =>
+            console.error("[chat] final partial post failed:", (e as Error).message),
+          );
+        }
       } else if (markerName) {
         await client.deleteMessage(markerName).catch(() => {});
       }

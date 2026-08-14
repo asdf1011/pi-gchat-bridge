@@ -52,9 +52,9 @@ That's it — the bot now answers messages in any space it's installed in.
 
 ## How it behaves
 
-- **Live streaming replies** — a "Thinking…" placeholder is posted, then
-  **edited in place** as pi generates the answer (debounced patches; > 4000-char
-  replies spill into follow-up messages).
+- **Live streaming replies** — after a short delay a "Thinking…" placeholder
+  is posted and **patched in place** as pi generates the answer, so you watch
+  the reply appear live.
 - **One pi session per thread** — conversations persist across bridge
   restarts (JSONL files under `sessions/`, keyed by thread; non-threaded DMs
   key by space). Threads are fully independent conversations. See
@@ -133,12 +133,20 @@ redelivered by Pub/Sub to the fresh session.
 These are platform-level constraints (verified Aug 2026) — the bridge can't
 work around them without external pieces:
 
-- **Markdown tables don't render.** Google Chat text messages support only a
-  small formatting subset (bold, italic, strikethrough, monospace, lists,
-  links) — GFM pipe tables show up as literal text. The closest rendering is
-  an aligned monospace fenced block, but there's no way to get a true table
-  (bold headers, cell borders) in a plain message. Cards have no table widget
-  either.
+- **Markdown tables don't render.** Since Aug 2026 the bridge sends replies
+  with `markupSyntax: MARKUP_SYNTAX_MARKDOWN`, so standard Markdown (bold,
+  italic, strikethrough, monospace, code fences, bulleted/nested/numbered
+  lists, block quotes, links) renders properly in Chat. GFM pipe tables are
+  *not* in the supported Markdown subset and still show up as literal text —
+  the closest rendering is an aligned monospace fenced block, and cards have
+  no table widget either.
+
+- **Streamed placeholders can't render Markdown.** `markupSyntax` is
+  create-only — a text PATCH resets a message to legacy Chat syntax and the
+  field isn't a valid `updateMask` path (verified Aug 2026). The live
+  "Thinking…" placeholder is therefore deleted and replaced by a fresh
+  Markdown message when the reply is done, leaving a "Message deleted" stub
+  in the thread.
 
 - **Bots can't upload media attachments.** The `attachments:upload`
   (`media.upload`) endpoint rejects service-account auth outright
