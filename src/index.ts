@@ -12,8 +12,9 @@ const THINKING_TEXT = "Thinking…";
 const PATCH_DEBOUNCE_MS = 250;
 /** Delay before posting the placeholder — quick replies never show one. */
 const MARKER_DELAY_MS = 3000;
-/** Delay before showing the running tool's status line (avoids flicker for fast tools). */
-const TOOL_STATUS_DELAY_MS = 500;
+/** Delay before showing the running tool's status line — long enough that only
+ *  non-trivial commands (compiles, tests, sleeps) show a status. */
+const TOOL_STATUS_DELAY_MS = 2000;
 /** Card action method for the session picker dropdown. */
 const RESUME_ACTION = "resume_session";
 /** Card action method for the model picker dropdown. */
