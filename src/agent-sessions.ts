@@ -1,7 +1,9 @@
 import {
   createAgentSession,
+  getAgentDir,
   ModelRuntime,
   SessionManager,
+  SettingsManager,
   type AgentSession,
 } from "@earendil-works/pi-coding-agent";
 import crypto from "node:crypto";
@@ -342,13 +344,35 @@ export class AgentRouter {
   }
 
   /**
+   * Whether the conversation has an active (in-memory) or persisted session —
+   * i.e. it's a real conversation, not a brand-new one. Used to decide between
+   * "switch this conversation" (/model) and "change the default model".
+   */
+  hasSession(sessionKey: string): boolean {
+    if (this.sessions.has(sessionKey)) return true;
+    if (fs.existsSync(this.sessionFileFor(sessionKey))) return true;
+    const resumed = this.stateStore.getResumeTarget(sessionKey);
+    return resumed ? fs.existsSync(resumed) : false;
+  }
+
+  /**
    * Switch the active model for a conversation's session. Fails (without
    * touching the session) if the session is busy or the model needs auth we
    * don't have.
+   *
+   * This is a PER-CONVERSATION switch: pi's `setModel()` also flips the global
+   * default (settings.json) for new conversations, so the previous default is
+   * snapshotted and restored around the call.
    */
   async switchModel(sessionKey: string, providerId: string, modelId: string): Promise<SwitchModelResult> {
-    const entry = this.sessions.get(sessionKey);
-    if (!entry) return { ok: false, label: modelId, error: "No active session for this conversation" };
+    let entry = this.sessions.get(sessionKey);
+    if (!entry) {
+      // Card events can arrive without a preceding message (e.g. /model right
+      // after a bridge restart) — open the conversation's session file so the
+      // switch works instead of failing with "no active session".
+      entry = await this.openOrCreateSession(sessionKey, sessionKey);
+      this.sessions.set(sessionKey, entry);
+    }
     if (entry.session.isStreaming) {
       return { ok: false, label: modelId, error: "busy" };
     }
@@ -356,7 +380,87 @@ export class AgentRouter {
     const model = this.modelRuntime.getModel(providerId, modelId);
     if (!model) return { ok: false, label: modelId, error: `Unknown model ${providerId}/${modelId}` };
     try {
+      const settings = SettingsManager.create(this.cwd, getAgentDir(), { projectTrusted: false });
+      const prevProvider = settings.getDefaultProvider();
+      const prevModel = settings.getDefaultModel();
       await entry.session.setModel(model);
+      // Restore the global default (setModel flips it) — a per-conversation
+      // switch must not change what NEW conversations start with.
+      if (prevProvider && prevModel) {
+        settings.setDefaultModelAndProvider(prevProvider, prevModel);
+      }
+      return { ok: true, label: `${model.name ?? model.id}${providerId ? ` (${providerId})` : ""}` };
+    } catch (err) {
+      return { ok: false, label: modelId, error: (err as Error).message };
+    }
+  }
+
+  /**
+   * Display label for the model currently on a conversation's session (the
+   * last `model_change` entry). Reads the session file so it's correct even
+   * when the session isn't open in memory (e.g. right after a restart).
+   */
+  async currentModel(sessionKey: string): Promise<string | undefined> {
+    const entry = this.sessions.get(sessionKey);
+    if (entry?.session.model) {
+      const m = entry.session.model;
+      return `${m.name ?? m.id}${m.provider ? ` (${m.provider})` : ""}`;
+    }
+    const file = this.sessionFileFor(sessionKey);
+    if (!fs.existsSync(file)) return undefined;
+    let provider: string | undefined;
+    let modelId: string | undefined;
+    try {
+      const rl = readline.createInterface({
+        input: fs.createReadStream(file, { encoding: "utf8" }),
+        crlfDelay: Infinity,
+      });
+      for await (const line of rl) {
+        if (!line.trim()) continue;
+        try {
+          const parsed = JSON.parse(line) as { type?: string; provider?: string; modelId?: string };
+          // Later entries overwrite earlier ones (pi appends chronologically).
+          if (parsed.type === "model_change" && parsed.provider && parsed.modelId) {
+            provider = parsed.provider;
+            modelId = parsed.modelId;
+          }
+        } catch {
+          // skip unparsable lines
+        }
+      }
+    } catch {
+      // unreadable file
+    }
+    if (!provider || !modelId) return undefined;
+    const model = this.modelRuntime?.getModel(provider, modelId);
+    return `${model?.name ?? modelId}${provider ? ` (${provider})` : ""}`;
+  }
+
+  /** Display label for the global default model (settings.json). */
+  defaultModel(): string | undefined {
+    const settings = SettingsManager.create(this.cwd, getAgentDir(), { projectTrusted: false });
+    const provider = settings.getDefaultProvider();
+    const modelId = settings.getDefaultModel();
+    if (!provider || !modelId) return undefined;
+    const model = this.modelRuntime?.getModel(provider, modelId);
+    return `${model?.name ?? modelId}${provider ? ` (${provider})` : ""}`;
+  }
+
+  /**
+   * Change the GLOBAL default model (settings.json) — affects only NEW
+   * conversations. Existing conversations keep their current model until
+   * switched explicitly with /model in that conversation.
+   */
+  async setDefaultModel(providerId: string, modelId: string): Promise<SwitchModelResult> {
+    if (!this.modelRuntime) return { ok: false, label: modelId, error: "No model runtime" };
+    const model = this.modelRuntime.getModel(providerId, modelId);
+    if (!model) return { ok: false, label: modelId, error: `Unknown model ${providerId}/${modelId}` };
+    if (!this.modelRuntime.hasConfiguredAuth(providerId)) {
+      return { ok: false, label: modelId, error: `No auth configured for ${providerId}` };
+    }
+    try {
+      const settings = SettingsManager.create(this.cwd, getAgentDir(), { projectTrusted: false });
+      settings.setDefaultModelAndProvider(providerId, modelId);
       return { ok: true, label: `${model.name ?? model.id}${providerId ? ` (${providerId})` : ""}` };
     } catch (err) {
       return { ok: false, label: modelId, error: (err as Error).message };

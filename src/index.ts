@@ -19,6 +19,8 @@ const TOOL_STATUS_DELAY_MS = 2000;
 const RESUME_ACTION = "resume_session";
 /** Card action method for the model picker dropdown. */
 const MODEL_ACTION = "switch_model";
+/** Card action method for the default-model picker button. */
+const SET_DEFAULT_MODEL_ACTION = "set_default_model";
 
 /**
  * Live streaming markers per conversation: the running turn's handler registers
@@ -32,20 +34,30 @@ const MODEL_ACTION = "switch_model";
  */
 const markers = new Map<string, { owner: object; relocate: () => Promise<void> }>();
 
-/** Extract the picked value from a CARD_CLICKED event (formInputs or parameters). */
+/** Extract the picked value from a CARD_CLICKED event's form inputs.
+ *  Selection values only arrive when a BUTTON submits the form — a dropdown's
+ *  onChangeAction fires an event with no value. Widget values appear either as
+ *  `input.selectionInput.selectedValues[]` / `input.stringInputs.value[]`
+ *  (action.formInputs, legacy) or flattened under common.formInputs (new). */
 function selectedValue(incoming: IncomingMessage): string | undefined {
   const formInputs = incoming.action?.formInputs;
   if (formInputs) {
     for (const key of Object.keys(formInputs)) {
-      const value = formInputs[key]?.input?.stringInputs?.value?.[0];
+      const widget = formInputs[key];
+      const input = widget?.input ?? widget;
+      const value =
+        input?.selectionInput?.selectedValues?.[0] ??
+        input?.stringInputs?.value?.[0];
       if (value) return value;
     }
   }
-  return incoming.action?.parameters?.find((p) => p.key === "session")?.value;
+  return undefined;
 }
 
-/** Dropdown card listing sessions; selection fires a CARD_CLICKED event. */
-function pickerCard(sessions: SessionInfo[]): unknown[] {
+/** Dropdown + submit button card listing sessions; the button's click carries
+ *  the dropdown value in formInputs (dropdown onChangeAction events carry none)
+ *  and the session key it was created for (card events omit thread info). */
+function pickerCard(sessions: SessionInfo[], sessionKey: string): unknown[] {
   return [
     {
       cardId: "session-picker",
@@ -60,7 +72,21 @@ function pickerCard(sessions: SessionInfo[]): unknown[] {
                   label: "Session",
                   type: "DROPDOWN",
                   items: sessions.map((s) => ({ text: s.label, value: s.file })),
-                  onChangeAction: { function: RESUME_ACTION },
+                },
+              },
+              {
+                buttonList: {
+                  buttons: [
+                    {
+                      text: "Resume session",
+                      onClick: {
+                        action: {
+                          function: RESUME_ACTION,
+                          parameters: [{ key: "session", value: sessionKey }],
+                        },
+                      },
+                    },
+                  ],
                 },
               },
             ],
@@ -148,7 +174,8 @@ function sessionStatsCard(stats: import("@earendil-works/pi-coding-agent").Sessi
   ];
 }
 
-function modelPickerCard(models: ModelInfo[]): unknown[] {
+function modelPickerCard(models: ModelInfo[], sessionKey: string, current?: string): unknown[] {
+  const currentNote = current ? ` (currently <b>${escapeHtml(current)}</b>)` : "";
   return [
     {
       cardId: "model-picker",
@@ -158,6 +185,11 @@ function modelPickerCard(models: ModelInfo[]): unknown[] {
           {
             widgets: [
               {
+                textParagraph: {
+                  text: `Switches the model for <b>this conversation only</b>${currentNote}.`,
+                },
+              },
+              {
                 selectionInput: {
                   name: "model_picker",
                   label: "Model",
@@ -166,7 +198,21 @@ function modelPickerCard(models: ModelInfo[]): unknown[] {
                     text: m.label,
                     value: `${m.provider}|${m.id}`,
                   })),
-                  onChangeAction: { function: MODEL_ACTION },
+                },
+              },
+              {
+                buttonList: {
+                  buttons: [
+                    {
+                      text: "Switch model",
+                      onClick: {
+                        action: {
+                          function: MODEL_ACTION,
+                          parameters: [{ key: "session", value: sessionKey }],
+                        },
+                      },
+                    },
+                  ],
                 },
               },
             ],
@@ -201,6 +247,77 @@ function modelConfirmCard(result: { ok: boolean; label: string; error?: string }
     },
   ];
 }
+
+/** Card to change the GLOBAL default model (for NEW conversations only). */
+function defaultModelCard(models: ModelInfo[], current?: string): unknown[] {
+  const currentNote = current ? ` (currently <b>${escapeHtml(current)}</b>)` : "";
+  return [
+    {
+      cardId: "default-model-picker",
+      card: {
+        header: { title: "Change default model" },
+        sections: [
+          {
+            widgets: [
+              {
+                textParagraph: {
+                  text: `Sets the model for <b>new</b> conversations${currentNote}. Existing conversations are <b>not</b> affected — switch those individually with <b>/model</b> in each conversation.`,
+                },
+              },
+              {
+                selectionInput: {
+                  name: "default_model_picker",
+                  label: "Default model",
+                  type: "DROPDOWN",
+                  items: models.map((m) => ({
+                    text: m.label,
+                    value: `${m.provider}|${m.id}`,
+                  })),
+                },
+              },
+              {
+                buttonList: {
+                  buttons: [
+                    {
+                      text: "Set default",
+                      onClick: { action: { function: SET_DEFAULT_MODEL_ACTION } },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      },
+    },
+  ];
+}
+
+function defaultModelConfirmCard(result: { ok: boolean; label: string; error?: string }): unknown[] {
+  const safe = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return [
+    {
+      cardId: "default-model-confirm",
+      card: {
+        header: { title: result.ok ? "Default model set" : "Couldn't set default model" },
+        sections: [
+          {
+            widgets: [
+              {
+                textParagraph: {
+                  text: result.ok
+                    ? `New conversations will use <b>${safe(result.label)}</b>. Existing conversations are unchanged — switch them with <b>/model</b> in each conversation.`
+                    : `${safe(result.error ?? "Unknown error")}`,
+                },
+              },
+            ],
+          },
+        ],
+      },
+    },
+  ];
+}
+
 
 function helpCard(): unknown[] {
   const items = [
@@ -273,6 +390,11 @@ async function main(): Promise<void> {
     // present), so parallel threads never block each other (space is the
     // fallback for non-threaded DMs).
     const sessionKey = AgentRouter.keyFor(spaceName, threadName, threadKey);
+    // CARD_CLICKED events often omit the message's thread, which would make the
+    // computed sessionKey fall back to the space. The picker card's button
+    // carries the session key it was created for — prefer it when present.
+    const actionKey =
+      incoming.action?.parameters?.find((p) => p.key === "session")?.value ?? sessionKey;
     console.log(
       `[chat] ${display} [${incoming.message.name ?? "?"}]: ${incoming.eventType === "CARD_CLICKED" ? `card:${incoming.action?.actionMethodName}` : text.slice(0, 120)}`,
     );
@@ -288,7 +410,7 @@ async function main(): Promise<void> {
           return "ok";
         }
         const [provider, modelId] = picked.split("|");
-        const result = await router.switchModel(sessionKey, provider ?? "", modelId ?? "");
+        const result = await router.switchModel(actionKey, provider ?? "", modelId ?? "");
         if (result.error === "busy") {
           console.log(`[chat] ${display}: busy, deferring model switch`);
           return "busy"; // leave unacked; retried once the session frees up
@@ -299,6 +421,22 @@ async function main(): Promise<void> {
         console.log(`[chat] ${display}: model switch ${result.ok ? "-> " + result.label : "failed: " + result.error}`);
         return "ok";
       }
+      if (incoming.action?.actionMethodName === SET_DEFAULT_MODEL_ACTION) {
+        const picked = selectedValue(incoming);
+        if (!picked) {
+          await client
+            .updateMessageCards(incoming.message.name, defaultModelConfirmCard({ ok: false, label: "", error: "No model was selected." }), "No model selected.")
+            .catch((err) => console.error("[chat] card update failed:", (err as Error).message));
+          return "ok";
+        }
+        const [provider, modelId] = picked.split("|");
+        const result = await router.setDefaultModel(provider ?? "", modelId ?? "");
+        await client
+          .updateMessageCards(incoming.message.name, defaultModelConfirmCard(result), `Default model: ${result.ok ? result.label : result.error}`)
+          .catch((err) => console.error("[chat] card update failed:", (err as Error).message));
+        console.log(`[chat] ${display}: default model ${result.ok ? "-> " + result.label : "failed: " + result.error}`);
+        return "ok";
+      }
       if (incoming.action?.actionMethodName === RESUME_ACTION) {
         const picked = selectedValue(incoming);
         if (!picked) {
@@ -307,7 +445,7 @@ async function main(): Promise<void> {
             .catch((err) => console.error("[chat] card update failed:", (err as Error).message));
           return "ok";
         }
-        const label = await router.switchSession(sessionKey, picked);
+        const label = await router.switchSession(actionKey, picked);
         if (label === null) {
           console.log(`[chat] ${display}: busy, deferring session switch`);
           return "busy"; // leave unacked; redelivered once the session frees up
@@ -331,7 +469,15 @@ async function main(): Promise<void> {
         await client.sendMessage(spaceName, "No models configured.", threadName);
         return "ok";
       }
-      await client.createCardMessage(spaceName, modelPickerCard(models), "Choose a backend model.", threadName);
+      if (!router.hasSession(sessionKey)) {
+        // No active conversation (no session yet) — /model becomes "change the
+        // default" for NEW conversations instead of switching this one.
+        await client.createCardMessage(spaceName, defaultModelCard(models, router.defaultModel()), "Change the default model for new conversations.", threadName);
+        console.log(`[chat] ${display}: posted default-model picker (${models.length} models)`);
+        return "ok";
+      }
+      const current = await router.currentModel(sessionKey);
+      await client.createCardMessage(spaceName, modelPickerCard(models, sessionKey, current), "Choose a backend model.", threadName);
       console.log(`[chat] ${display}: posted model picker (${models.length} models)`);
       return "ok";
     }
@@ -388,7 +534,7 @@ async function main(): Promise<void> {
         await client.sendMessage(spaceName, "No sessions found yet.", threadName);
         return "ok";
       }
-      await client.createCardMessage(spaceName, pickerCard(sessions), "Choose a session to resume.", threadName);
+      await client.createCardMessage(spaceName, pickerCard(sessions, sessionKey), "Choose a session to resume.", threadName);
       console.log(`[chat] ${display}: posted session picker (${sessions.length} sessions)`);
       return "ok";
     }

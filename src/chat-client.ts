@@ -167,8 +167,10 @@ export class ChatClient {
    * replaced with a fresh MARKDOWN message when done.
    *
    * `opts.silent` sends the message without a push notification and without
-   * marking the space unread (app auth, GA since May 8, 2026) — used only for
-   * the overflow chunks of long replies so they don't re-notify.
+   * marking the space unread (app auth, GA since May 8, 2026). NOTE (verified
+   * Aug 2026): silent 403s when combined with the `messageReplyOption` query
+   * param, and posting to a thread via the body alone is ignored (new thread)
+   * — so silent is only usable for top-level (non-threaded) messages.
    */
   async createMessage(
     spaceName: string,
@@ -212,11 +214,17 @@ export class ChatClient {
     return data.name;
   }
 
-  /** Replace the cards of an existing bot message (used to update pickers). */
+  /**
+   * Replace the cards of an existing bot message (used to update pickers).
+   * NOTE (verified Aug 2026): only `cardsV2` is a valid `updateMask` path —
+   * including `fallbackText` makes the whole PATCH fail with 400
+   * ("Unsupported path name in message field mask"). The body still carries
+   * `fallbackText` (ignored).
+   */
   async updateMessageCards(messageName: string, cardsV2: unknown[], fallbackText: string): Promise<void> {
     await this.auth.request(
       "PATCH",
-      `${CHAT_API_BASE}/${messageName}?updateMask=cardsV2,fallbackText`,
+      `${CHAT_API_BASE}/${messageName}?updateMask=cardsV2`,
       JSON.stringify({ cardsV2, fallbackText }),
     );
   }

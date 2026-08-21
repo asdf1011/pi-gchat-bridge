@@ -39,7 +39,11 @@ interface ChatEvent {
   action?: {
     actionMethodName?: string;
     parameters?: { key: string; value: string }[];
-    formInputs?: Record<string, { input?: { stringInputs?: { value?: string[] } } }>;
+    formInputs?: Record<string, { input?: { stringInputs?: { value?: string[] }; selectionInput?: { selectedValues?: string[] } } }>;
+  };
+  /** Newer CARD_CLICKED payloads carry form values here (button submits). */
+  common?: {
+    formInputs?: Record<string, { stringInputs?: { value?: string[] }; selectionInput?: { selectedValues?: string[] } }>;
   };
 }
 
@@ -251,7 +255,13 @@ export class PubSubReceiver implements MessageReceiver {
     }
 
     if (event.type === "CARD_CLICKED") {
-      // Interactive card event (dropdown/button). No text required.
+      // Debug: dump the raw payload (formInputs shape varies by widget/version).
+      console.log(
+        `[pubsub] CARD_CLICKED action: ${JSON.stringify(event.action)} common: ${JSON.stringify(event.common)}`,
+      );
+      // Interactive card event (dropdown/button). No text required. The widget
+      // values arrive via common.formInputs (new) or action.formInputs (legacy)
+      // — merge both so selectedValue can read either.
       return {
         eventType: "CARD_CLICKED",
         space: {
@@ -267,7 +277,10 @@ export class PubSubReceiver implements MessageReceiver {
         action: {
           actionMethodName: event.action?.actionMethodName,
           parameters: event.action?.parameters,
-          formInputs: event.action?.formInputs,
+          formInputs: {
+            ...(event.common?.formInputs ?? {}),
+            ...(event.action?.formInputs ?? {}),
+          },
         },
       };
     }
