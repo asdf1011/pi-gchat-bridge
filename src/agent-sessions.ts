@@ -20,6 +20,12 @@ interface PiMessage {
   role: string;
   content?: string | PiBlock[];
 }
+/** Minimal structural view of pi's image content blocks. */
+interface PiImage {
+  type: "image";
+  data: string;
+  mimeType: string;
+}
 
 const SESSION_HEADER = (cwd: string): string =>
   JSON.stringify({
@@ -227,6 +233,7 @@ export class AgentRouter {
     sessionKey: string,
     spaceName: string,
     text: string,
+    images?: PiImage[],
     onDelta?: (delta: string) => void,
     onToolStart?: (toolName: string, args: unknown) => void,
     onToolEnd?: () => void,
@@ -255,7 +262,7 @@ export class AgentRouter {
       : undefined;
 
     try {
-      await entry.session.prompt(text);
+      await entry.session.prompt(text, images && images.length > 0 ? { images } : undefined);
       let reply = this.lastAssistantText(entry.session);
       // Guaranteed delivery: any steers that were queued but never injected
       // into the running turn get their own follow-up prompt now, so no
@@ -447,13 +454,13 @@ export class AgentRouter {
    * false if the session wasn't streaming (caller falls back to a normal
    * prompt).
    */
-  async steer(sessionKey: string, text: string): Promise<boolean> {
+  async steer(sessionKey: string, text: string, images?: PiImage[]): Promise<boolean> {
     const entry = this.sessions.get(sessionKey);
     if (!entry || !entry.session.isStreaming) return false;
     // Track for guaranteed delivery (fix: steers never silently lost).
     entry.pendingSteers.push({ text, delivered: false });
     try {
-      await entry.session.steer(text);
+      await entry.session.steer(text, images);
       return true;
     } catch (err) {
       console.error(`[router] ${sessionKey} steer failed:`, (err as Error).message);
@@ -470,7 +477,7 @@ export class AgentRouter {
    *   (implicit stop) so the interjection is never stuck behind a long tool.
    * Returns "steered" | "redirected" | "not-busy".
    */
-  async redirect(sessionKey: string, text: string): Promise<"steered" | "redirected" | "not-busy"> {
+  async redirect(sessionKey: string, text: string, images?: PiImage[]): Promise<"steered" | "redirected" | "not-busy"> {
     const entry = this.sessions.get(sessionKey);
     if (!entry || !entry.session.isStreaming) return "not-busy";
 
@@ -488,7 +495,7 @@ export class AgentRouter {
       }
     }
 
-    return (await this.steer(sessionKey, text)) ? "steered" : "not-busy";
+    return (await this.steer(sessionKey, text, images)) ? "steered" : "not-busy";
   }
 
   /**

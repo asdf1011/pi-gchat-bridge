@@ -4,6 +4,21 @@
 
 export type ChatSpaceType = "ROOM" | "DIRECT_MESSAGE" | "GROUP_CHAT";
 
+/** Attachment metadata from a Chat event (images pasted/uploaded by the user). */
+export interface ChatAttachment {
+  /** e.g. "spaces/AAAA/messages/BBBB/attachments/CCCC" */
+  name?: string;
+  contentName?: string;
+  /** e.g. "image/png" */
+  contentType?: string;
+  /** Authenticated download URL (requires the same auth scope as the message). */
+  contentUri?: string;
+  /** "DRIVE_FILE" | "UPLOADED_CONTENT" | ... */
+  source?: string;
+  /** Media-API download reference (fallback when `contentUri` is absent). */
+  attachmentDataRef?: { resourceName?: string; attachmentUploadToken?: string };
+}
+
 export interface ChatSpace {
   /** e.g. "spaces/AAAA..." */
   name: string;
@@ -28,6 +43,15 @@ export interface ChatMessage {
    *  as the session key so the conversation identity is decoupled from the
    *  server-generated thread name. */
   threadKey?: string;
+  /** Image attachments carried by the event (past/uploaded by the sender). */
+  attachments?: ChatAttachment[];
+  /**
+   * Google's Message resource returns attachments under `attachment` (SINGULAR)
+   * — a legacy quirk of the REST API — while some event payloads use
+   * `attachments` (plural). Normalized to `attachments` by the receiver;
+   * this field exists to model the raw API response.
+   */
+  attachment?: ChatAttachment[];
 }
 
 /** FormAction payload carried by CARD_CLICKED interaction events. */

@@ -57,6 +57,24 @@ export class ServiceAccountAuth {
     return raw ? (JSON.parse(raw) as unknown) : undefined;
   }
 
+  /**
+   * Authenticated binary GET (image/attachment downloads) — returns raw bytes
+   * without JSON parsing. No Content-Type header: the payload is arbitrary.
+   */
+  async requestBuffer(url: string, timeoutMs?: number): Promise<Buffer> {
+    const token = await this.getAccessToken();
+    const res = await fetch(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${token}` },
+      signal: timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined,
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      throw new Error(`GET ${url} -> ${res.status}: ${detail.slice(0, 300)}`);
+    }
+    return Buffer.from(await res.arrayBuffer());
+  }
+
   private async getAccessToken(): Promise<string> {
     if (this.accessToken && Date.now() < this.tokenExpiry - 60_000) {
       return this.accessToken;
