@@ -58,8 +58,22 @@ export interface ChatMessage {
 export interface ChatAction {
   actionMethodName?: string;
   parameters?: { key: string; value: string }[];
-  /** Widget input values keyed by the selectionInput `name` field. */
-  formInputs?: Record<string, { input?: { stringInputs?: { value?: string[] } } }>;
+  /** Widget input values keyed by the selectionInput `name` field.
+   *  Newer events deliver these under `common.formInputs` (flattened: widget
+   *  key -> { stringInputs | selectionInput }); legacy action.formInputs nests
+   *  them under `input`. The receiver merges both; read either shape. */
+  formInputs?: Record<
+    string,
+    {
+      input?: {
+        stringInputs?: { value?: string[] };
+        /** DROPDOWN / checkbox / switch selection widgets. */
+        selectionInput?: { selectedValues?: string[] };
+      };
+      stringInputs?: { value?: string[] };
+      selectionInput?: { selectedValues?: string[] };
+    }
+  >;
 }
 
 /** A user message that the bridge should hand to pi. */

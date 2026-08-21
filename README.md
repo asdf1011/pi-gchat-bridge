@@ -91,6 +91,19 @@ That's it — the bot now answers messages in any space it's installed in.
   source session elsewhere (e.g. in the TUI) forks the conversation — those
   messages never appear in Chat.
 
+### Model switching and the default
+
+- **`/model` in a conversation** switches **only that conversation** to the
+  chosen model. The choice is written into the session file (`model_change`
+  entry), so it survives bridge restarts and other conversations are
+  unaffected. It does **not** change the global default.
+- **`/model` in a brand-new conversation** (no session yet) offers to change
+  the **default model** instead — shown with a note that it only affects
+  *new* conversations and that existing ones must be switched individually
+  with `/model` in each conversation.
+- API access needs an API key scoped to the provider's models, or the model
+  will appear in the picker but fail to be selected.
+
 ## Configuration
 
 | Env var | Default | Meaning |
