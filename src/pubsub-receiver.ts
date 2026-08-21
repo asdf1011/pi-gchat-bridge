@@ -1,7 +1,7 @@
 import { ServiceAccountAuth } from "./auth.js";
 import type { HandleResult, MessageReceiver } from "./receiver.js";
 import type { StateStore } from "./state.js";
-import type { ChatMessage, ChatSpace, IncomingMessage } from "./types.js";
+import type { ChatAttachment, ChatMessage, ChatSpace, IncomingMessage } from "./types.js";
 
 const PUBSUB_API = "https://pubsub.googleapis.com/v1";
 const PUBSUB_SCOPE = "https://www.googleapis.com/auth/pubsub";
@@ -30,6 +30,9 @@ interface ChatEvent {
     createTime?: string;
     sender?: { name?: string; type?: string };
     thread?: { name?: string; threadKey?: string };
+    attachments?: ChatAttachment[];
+    /** Singular form used by the Message resource / some event payloads. */
+    attachment?: ChatAttachment[];
     slashCommand?: { commandId?: string; commandName?: string };
   };
   appCommandMetadata?: { type?: string; commandId?: string };
@@ -270,12 +273,24 @@ export class PubSubReceiver implements MessageReceiver {
     }
 
     if (event.type !== "MESSAGE") return null; // ignore ADDED_TO_SPACE / REMOVED / etc.
-    if (!message.text || !message.name) return null;
+    if (!message.name) return null;
     if (message.sender?.type === "BOT") return null; // never echo the bot's own messages
+    // Keep ALL attachments — the event payload carries only partial metadata
+    // (its shape differs by source), so image detection happens at download
+    // time (contentType / extension / Attachment-resource fetch), not here.
+    const attachments = message.attachments ?? [];
+    // Image-only messages (pasted screenshot, no text) are valid input — don't
+    // drop them just because `text` is empty.
+    if (!message.text && attachments.length === 0) return null;
+    if (attachments.length > 0) {
+      // Debug: learn the exact attachment shape Google sends in events.
+      console.log(`[pubsub] ${space.name}: message ${message.name} has ${attachments.length} attachment(s): ${JSON.stringify(attachments)}`);
+    }
 
     const chatMessage: ChatMessage = {
       name: message.name,
-      text: message.text,
+      text: message.text ?? "",
+      attachments,
       createTime: message.createTime,
       senderName: message.sender?.name,
       senderType: message.sender?.type as ChatMessage["senderType"],

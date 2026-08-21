@@ -274,7 +274,7 @@ async function main(): Promise<void> {
     // fallback for non-threaded DMs).
     const sessionKey = AgentRouter.keyFor(spaceName, threadName, threadKey);
     console.log(
-      `[chat] ${display}: ${incoming.eventType === "CARD_CLICKED" ? `card:${incoming.action?.actionMethodName}` : text.slice(0, 120)}`,
+      `[chat] ${display} [${incoming.message.name ?? "?"}]: ${incoming.eventType === "CARD_CLICKED" ? `card:${incoming.action?.actionMethodName}` : text.slice(0, 120)}`,
     );
 
     // --- Interactive card events (dropdown selection, buttons) ---
@@ -393,13 +393,51 @@ async function main(): Promise<void> {
       return "ok";
     }
 
+    // --- Image attachments: download pasted images so they reach the LLM as
+    // multimodal input (pi's `images` content blocks, base64). Failures are
+    // non-fatal — the text still goes through. ---
+    let images: { type: "image"; data: string; mimeType: string }[] | undefined;
+    let hadAttachments = (incoming.message.attachments?.length ?? 0) > 0;
+    const tryAttachments = async (atts: import("./types.js").ChatAttachment[]): Promise<void> => {
+      for (const att of atts) {
+        const img = await client.downloadAttachment(att);
+        if (img) (images ??= []).push({ type: "image", data: img.data, mimeType: img.mimeType });
+      }
+    };
+    if (incoming.message.attachments?.length) {
+      await tryAttachments(incoming.message.attachments);
+    }
+    // Event carried no attachment data — fetch the Message resource and retry
+    // (the event payload's attachment shape differs by source; messages.get is
+    // the authoritative one).
+    if (!images?.length && incoming.message.name) {
+      const fetched = await client.fetchMessageAttachments(incoming.message.name);
+      if (fetched.length > 0) {
+        hadAttachments = true;
+        await tryAttachments(fetched);
+      }
+    }
+    if (images?.length) {
+      console.log(`[chat] ${display}: ${images.length} image(s) attached${text ? ` with text "${text.slice(0, 60)}"` : ""}`);
+    } else if (hadAttachments) {
+      console.log(`[chat] ${display}: attachments present but no image could be downloaded`);
+    }
+    // Nothing usable (no text, no image): tell the user instead of prompting
+    // the LLM with an empty message.
+    if (!text.trim() && !images?.length) {
+      await client
+        .sendMessage(spaceName, "I got your message but couldn't read the attachment — only images are supported.", threadName)
+        .catch((err) => console.error("[chat] attachment notice failed:", (err as Error).message));
+      return "ok";
+    }
+
     // --- Plain message while the conversation is streaming: steer it into the
     // running turn (interleaved) with a bounded tool wait. If the in-flight
     // tool finishes within steerWaitMs its result lands and the steer is
     // delivered right after; otherwise abort + redirect so the interjection
     // is never stuck behind a long tool call. ---
     if (router.isBusy(sessionKey)) {
-      const outcome = await router.redirect(sessionKey, text);
+      const outcome = await router.redirect(sessionKey, text, images);
       if (outcome === "steered") {
         console.log(`[chat] ${display}: steered into running turn`);
         // The reply now covers the steer too, so move its placeholder below the
@@ -551,6 +589,7 @@ async function main(): Promise<void> {
         sessionKey,
         spaceName,
         text,
+        images,
         (delta) => {
           streamed += delta;
           if (streamed.length > MAX_MESSAGE_CHARS) return; // stop patching past the cap

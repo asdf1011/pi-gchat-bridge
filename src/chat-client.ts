@@ -1,11 +1,35 @@
 import { ServiceAccountAuth } from "./auth.js";
 
-import type { IncomingMessage } from "./types.js";
+import type { ChatAttachment, IncomingMessage } from "./types.js";
 
 const CHAT_BOT_SCOPE = "https://www.googleapis.com/auth/chat.bot";
 const CHAT_API_BASE = "https://chat.googleapis.com/v1";
+/** Media download endpoint used when an attachment has no `contentUri`. */
+const MEDIA_API_BASE = "https://chat.googleapis.com/v1/media";
+/** Image extensions for attachments whose event payload lacks a contentType. */
+const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|bmp)$/i;
 /** Hard cap for a single Chat text message (API limit is 4096). */
 export const MAX_MESSAGE_CHARS = 4000;
+
+/** Infer an image MIME type from a file name extension (last-resort fallback). */
+function mimeFromName(name: string | undefined): string | undefined {
+  const ext = (name ?? "").split(".").pop()?.toLowerCase();
+  switch (ext) {
+    case "png":
+      return "image/png";
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "gif":
+      return "image/gif";
+    case "webp":
+      return "image/webp";
+    case "bmp":
+      return "image/bmp";
+    default:
+      return undefined;
+  }
+}
 /**
  * Render message `text` as standard Markdown (CommonMark-based) instead of
  * legacy Chat `*bold*` syntax. GA since Aug 7, 2026; works with app auth.
@@ -20,9 +44,112 @@ const NOTIFICATION_TYPE_SILENT = "NOTIFICATION_TYPE_SILENT";
  */
 export class ChatClient {
   private auth: ServiceAccountAuth;
+  /**
+   * Cache of downloaded attachments keyed by attachment name, so a message
+   * redelivered after a "busy" defer doesn't re-fetch the same bytes.
+   */
+  private attachmentCache = new Map<string, { data: string; mimeType: string; name?: string }>();
+  private static readonly ATTACHMENT_CACHE_MAX = 64;
+  /** Skip pasted images larger than this (raw bytes) — beyond typical
+   *  screenshots, and the LLM API would reject them anyway. */
+  private static readonly MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 
   constructor(serviceAccountPath: string) {
     this.auth = new ServiceAccountAuth(serviceAccountPath, [CHAT_BOT_SCOPE]);
+  }
+
+  /**
+   * Download an image attachment and return it as base64 + mimeType ready for
+   * pi's `images` content blocks. Returns undefined when the attachment isn't
+   * an image or can't be fetched (caller continues with text only).
+   *
+   * Follows Google's documented flow for app auth (chat.bot):
+   *   1. Metadata — the MESSAGE event carries only partial attachment data, so
+   *      when contentType or a download reference is missing, fetch the
+   *      Attachment resource (`spaces.messages.attachments.get`).
+   *   2. Download — prefer the event's `contentUri`; otherwise call
+   *      `media.download` with `attachmentDataRef.resourceName`.
+   */
+  async downloadAttachment(
+    attachment: ChatAttachment,
+  ): Promise<{ data: string; mimeType: string; name?: string } | undefined> {
+    const key = attachment.name ?? attachment.contentUri ?? attachment.contentName;
+    if (key) {
+      const cached = this.attachmentCache.get(key);
+      if (cached) return cached;
+    }
+
+    // --- Resolve full metadata when the event gave us partial data. ---
+    let meta: ChatAttachment = attachment;
+    if (meta.name && (!meta.contentType || !(meta.contentUri || meta.attachmentDataRef?.resourceName))) {
+      try {
+        const full = (await this.auth.request("GET", `${CHAT_API_BASE}/${meta.name}`, undefined, 15_000)) as ChatAttachment;
+        meta = { ...meta, ...full };
+      } catch (err) {
+        console.warn("[chat] attachment metadata fetch failed:", (err as Error).message);
+      }
+    }
+
+    // --- Is it an image? contentType wins; fall back to the file extension. ---
+    const mime = meta.contentType?.toLowerCase();
+    const isImage = mime ? mime.startsWith("image/") : IMAGE_EXT_RE.test(meta.contentName ?? "");
+    if (!isImage) {
+      console.log(`[chat] attachment ${meta.contentName ?? key ?? "?"} (${mime ?? "unknown type"}) is not an image — skipping`);
+      return undefined;
+    }
+    const finalMime = mime ?? mimeFromName(meta.contentName);
+    if (!finalMime) return undefined;
+
+    // --- Download the bytes. ---
+    const mediaRef = meta.attachmentDataRef?.resourceName;
+    const url = meta.contentUri
+      ? meta.contentUri
+      : mediaRef
+        ? `${MEDIA_API_BASE}/${encodeURIComponent(mediaRef)}?alt=media`
+        : undefined;
+    if (!url) {
+      console.warn("[chat] attachment has no contentUri or attachmentDataRef; skipping");
+      return undefined;
+    }
+    let bytes: Buffer;
+    try {
+      bytes = await this.auth.requestBuffer(url, 30_000);
+    } catch (err) {
+      console.error("[chat] attachment download failed:", (err as Error).message);
+      return undefined;
+    }
+    if (bytes.length > ChatClient.MAX_ATTACHMENT_BYTES) {
+      console.warn(`[chat] attachment ${meta.contentName ?? key ?? ""} is ${bytes.length} bytes — skipping (cap ${ChatClient.MAX_ATTACHMENT_BYTES})`);
+      return undefined;
+    }
+    const result = { data: bytes.toString("base64"), mimeType: finalMime, name: meta.contentName };
+    if (key) {
+      this.attachmentCache.set(key, result);
+      if (this.attachmentCache.size > ChatClient.ATTACHMENT_CACHE_MAX) {
+        const oldest = this.attachmentCache.keys().next().value;
+        if (oldest) this.attachmentCache.delete(oldest);
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Fallback when the event carried no usable attachment metadata: fetch the
+   * Message resource (`messages.get`, app auth) and return its attachments.
+   * Returns [] on any failure so the caller can proceed text-only.
+   */
+  async fetchMessageAttachments(messageName: string): Promise<ChatAttachment[]> {
+    try {
+      const data = (await this.auth.request("GET", `${CHAT_API_BASE}/${messageName}`, undefined, 15_000)) as {
+        attachment?: ChatAttachment[];
+        attachments?: ChatAttachment[];
+      };
+      // Google's Message resource uses `attachment` (SINGULAR) — handle both.
+      return data.attachment ?? data.attachments ?? [];
+    } catch (err) {
+      console.warn("[chat] messages.get failed:", (err as Error).message);
+      return [];
+    }
   }
 
   /**

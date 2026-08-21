@@ -3,6 +3,8 @@
 Bridge between **Google Chat** and the **pi coding agent**. Message a Google Chat
 bot and it runs pi — with tools, skills, and per-space conversation history.
 
+![The bridge answering a pasted image in Google Chat](docs/files/screenshot.png)
+
 *pi* is a coding agent that runs on your machine with a session model, tools
 and skills — see [pi.dev](https://pi.dev).
 
@@ -60,23 +62,23 @@ That's it — the bot now answers messages in any space it's installed in.
   key by space). Threads are fully independent conversations. See
   [Session model & persistence](#session-model--persistence) for how sessions
   are named, adopted, and kept across restarts.
-- **Parallel across threads, independent conversations** — each
-  conversation is handled independently and concurrently (event-driven async,
-  no threads needed); a long reply in one thread never blocks another.
 - **Interleaved messages (steer)** — sending a message while pi is working
   queues it into the *running* turn: it's delivered after the current tool
   call finishes (tool results land first) and before the next LLM call, so
   pi keeps its tool loop active and addresses your new message alongside the
   original work — "tool call start, message, tool call response". Commands
   (`/help`, `/model`, `/resume`) instead interrupt the running reply.
-- **Thread-aware replies** — replies go back into the thread you messaged in.
 - **pi extensions & skills work** — the session loads your `~/.pi/agent`
   extensions, so `/commands` and skills behave like in the TUI.
-- **Bot messages are ignored** — no echo loops.
+- **Images & text** — pasted (or uploaded) images are downloaded and passed to
+  pi as multimodal input, so a vision model can describe what you send. Images
+  can arrive with text or on their own (an image-only message is a valid
+  prompt); non-image attachments are skipped with a notice.
 
-> Only ONE bridge may run at a time — stop any other instance before starting
-> another, or both will pull the same Pub/Sub subscription and race
-> (duplicate replies).
+  > Actually describing an image needs a **multimodal model** — a text-only
+  > model won't see it (pi omits the image and the reply ignores it). The bot
+  > still **can't send** images — that's a platform limit, see
+  > [Known limitations](#known-limitations).
 
 ## Session model & persistence
 
@@ -132,6 +134,11 @@ redelivered by Pub/Sub to the fresh session.
 
 These are platform-level constraints (verified Aug 2026) — the bridge can't
 work around them without external pieces:
+
+- **Only one bridge may run at a time.** With multiple instances pulling the
+  same Pub/Sub subscription, each message is delivered only to the instance
+  that pulls it first, so replies get split across instances (each message
+  goes to just one) rather than duplicated.
 
 - **Personal Gmail accounts can't use the bridge.** Custom Chat apps (bots)
   are only available to Google Workspace organizations — a personal Gmail
