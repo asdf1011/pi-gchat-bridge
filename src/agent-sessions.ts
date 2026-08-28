@@ -151,6 +151,131 @@ export interface SwitchModelResult {
   ok: boolean;
   label: string;
   error?: string;
+  /** True when the switch created a brand-new conversation session. */
+  created?: boolean;
+}
+
+/** Aggregate token usage for a conversation, summed from its session file. */
+export interface SessionUsage {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cost: number;
+}
+
+/** Current context-window occupancy for a conversation (estimate). */
+export interface SessionContext {
+  /** Tokens in the window now; null when unknown (e.g. after compaction, before the next response). */
+  tokens: number | null;
+  /** The model's context window size. */
+  window: number;
+  /** Percent of the window used; null when tokens are unknown. */
+  percent: number | null;
+}
+
+/** Minimal shape of a session-file usage record. */
+interface FileUsage {
+  totalTokens?: number;
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  cost?: { total?: number };
+}
+/** Minimal shape of a session-file message. */
+interface FileMessage {
+  role?: string;
+  content?: string | { type?: string; text?: string; thinking?: string; name?: string; arguments?: unknown }[];
+  usage?: FileUsage;
+  stopReason?: string;
+  summary?: string;
+  command?: string;
+  output?: string;
+}
+/** Minimal shape of a session-file entry. */
+interface FileEntry {
+  type?: string;
+  message?: FileMessage;
+  usage?: FileUsage;
+}
+
+/** pi's calculateContextTokens: totalTokens, else the in/out/cache sum. */
+function contextTokensOf(usage: FileUsage): number {
+  const sum = (usage.input ?? 0) + (usage.output ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
+  return usage.totalTokens || sum || 0;
+}
+
+/** Estimate a message's token count using pi's chars/4 heuristic (conservative). */
+function estimateTokensFile(message: FileMessage): number {
+  const contentChars = (content: FileMessage["content"]): number => {
+    if (typeof content === "string") return content.length;
+    if (Array.isArray(content)) {
+      let chars = 0;
+      for (const block of content) {
+        if (block.type === "text" && block.text) chars += block.text.length;
+        else if (block.type === "image") chars += 4800; // pi's ESTIMATED_IMAGE_CHARS
+      }
+      return chars;
+    }
+    return 0;
+  };
+  let chars = 0;
+  switch (message.role) {
+    case "user":
+    case "custom":
+    case "toolResult":
+      chars = contentChars(message.content);
+      break;
+    case "assistant": {
+      const blocks = Array.isArray(message.content) ? message.content : [];
+      for (const block of blocks) {
+        if (block.type === "text" && block.text) chars += block.text.length;
+        else if (block.type === "thinking" && block.thinking) chars += block.thinking.length;
+        else if (block.type === "toolCall" && block.name) chars += block.name.length + JSON.stringify(block.arguments ?? {}).length;
+      }
+      break;
+    }
+    case "bashExecution":
+      chars = (message.command ?? "").length + (message.output ?? "").length;
+      break;
+    case "branchSummary":
+    case "compactionSummary":
+      chars = (message.summary ?? "").length;
+      break;
+    default:
+      return 0;
+  }
+  return Math.ceil(chars / 4);
+}
+
+/**
+ * pi's estimateContextTokens over a list of messages: the last valid
+ * assistant usage, plus char-based estimates for anything after it (or a full
+ * estimate when no usage exists yet).
+ */
+function estimateContextTokensFile(messages: FileMessage[]): number {
+  let lastUsageIndex = -1;
+  let usageTokens = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role === "assistant" && m.usage && m.stopReason !== "aborted" && m.stopReason !== "error") {
+      const ct = contextTokensOf(m.usage);
+      if (ct > 0) {
+        lastUsageIndex = i;
+        usageTokens = ct;
+        break;
+      }
+    }
+  }
+  if (lastUsageIndex === -1) {
+    let estimated = 0;
+    for (const m of messages) estimated += estimateTokensFile(m);
+    return estimated;
+  }
+  let trailing = 0;
+  for (let i = lastUsageIndex + 1; i < messages.length; i++) trailing += estimateTokensFile(messages[i]);
+  return usageTokens + trailing;
 }
 
 /**
@@ -330,9 +455,14 @@ export class AgentRouter {
    * List usable models (auth-filtered availability snapshot — no network).
    * Returns [] if no provider auth is configured; switch-time auth is checked
    * again by setModel().
+   *
+   * Refreshes the runtime first so edits to models.json / auth.json (new
+   * providers, models, API keys) are picked up without a bridge restart.
+   * Local-only: no network model fetching.
    */
-  listModels(): ModelInfo[] {
+  async listModels(): Promise<ModelInfo[]> {
     if (!this.modelRuntime) return [];
+    await this.modelRuntime.refresh({ allowNetwork: false });
     return this.modelRuntime
       .getAvailableSnapshot()
       .map((m) => ({
@@ -346,7 +476,7 @@ export class AgentRouter {
   /**
    * Whether the conversation has an active (in-memory) or persisted session —
    * i.e. it's a real conversation, not a brand-new one. Used to decide between
-   * "switch this conversation" (/model) and "change the default model".
+   * "switch this conversation" (/model) and "start a new conversation with it".
    */
   hasSession(sessionKey: string): boolean {
     if (this.sessions.has(sessionKey)) return true;
@@ -365,6 +495,9 @@ export class AgentRouter {
    * snapshotted and restored around the call.
    */
   async switchModel(sessionKey: string, providerId: string, modelId: string): Promise<SwitchModelResult> {
+    // A conversation with no session yet gets one created and started on the
+    // picked model — /model doubles as "start a new conversation with X".
+    const created = !this.hasSession(sessionKey);
     let entry = this.sessions.get(sessionKey);
     if (!entry) {
       // Card events can arrive without a preceding message (e.g. /model right
@@ -389,7 +522,7 @@ export class AgentRouter {
       if (prevProvider && prevModel) {
         settings.setDefaultModelAndProvider(prevProvider, prevModel);
       }
-      return { ok: true, label: `${model.name ?? model.id}${providerId ? ` (${providerId})` : ""}` };
+      return { ok: true, label: `${model.name ?? model.id}${providerId ? ` (${providerId})` : ""}`, created };
     } catch (err) {
       return { ok: false, label: modelId, error: (err as Error).message };
     }
@@ -400,14 +533,19 @@ export class AgentRouter {
    * last `model_change` entry). Reads the session file so it's correct even
    * when the session isn't open in memory (e.g. right after a restart).
    */
-  async currentModel(sessionKey: string): Promise<string | undefined> {
+  /**
+   * Provider + model id currently on a conversation's session (the last
+   * `model_change` entry). Reads the session file so it's correct even when
+   * the session isn't open in memory (e.g. right after a restart).
+   */
+  private async currentModelIds(sessionKey: string): Promise<{ provider: string; modelId: string } | undefined> {
     const entry = this.sessions.get(sessionKey);
     if (entry?.session.model) {
-      const m = entry.session.model;
-      return `${m.name ?? m.id}${m.provider ? ` (${m.provider})` : ""}`;
+      const m = entry.session.model as { id: string; provider?: string };
+      return { provider: m.provider ?? "", modelId: m.id };
     }
-    const file = this.sessionFileFor(sessionKey);
-    if (!fs.existsSync(file)) return undefined;
+    const file = this.resolvedSessionFile(sessionKey);
+    if (!file) return undefined;
     let provider: string | undefined;
     let modelId: string | undefined;
     try {
@@ -431,9 +569,14 @@ export class AgentRouter {
     } catch {
       // unreadable file
     }
-    if (!provider || !modelId) return undefined;
-    const model = this.modelRuntime?.getModel(provider, modelId);
-    return `${model?.name ?? modelId}${provider ? ` (${provider})` : ""}`;
+    return provider && modelId ? { provider, modelId } : undefined;
+  }
+
+  async currentModel(sessionKey: string): Promise<string | undefined> {
+    const ids = await this.currentModelIds(sessionKey);
+    if (!ids) return undefined;
+    const model = this.modelRuntime?.getModel(ids.provider, ids.modelId);
+    return `${model?.name ?? ids.modelId}${ids.provider ? ` (${ids.provider})` : ""}`;
   }
 
   /** Display label for the global default model (settings.json). */
@@ -548,6 +691,126 @@ export class AgentRouter {
     const entry = this.sessions.get(sessionKey);
     if (!entry) return null;
     return entry.session.getSessionStats();
+  }
+
+  /**
+   * Aggregate token usage for a conversation, summed from the session file's
+   * per-call `usage` records (assistant + toolResult messages, compaction and
+   * branch summaries) — the same entries pi's getSessionStats() counts, so
+   * totals match /session. Works whether or not the session is open in
+   * memory. Returns undefined when the conversation has no session file.
+   */
+  async sessionUsage(sessionKey: string): Promise<SessionUsage | undefined> {
+    const file = this.resolvedSessionFile(sessionKey);
+    if (!file) return undefined;
+    const usage: SessionUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+    try {
+      const rl = readline.createInterface({
+        input: fs.createReadStream(file, { encoding: "utf8" }),
+        crlfDelay: Infinity,
+      });
+      for await (const line of rl) {
+        if (!line.trim()) continue;
+        let entry: {
+          type?: string;
+          usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: { total?: number } };
+          message?: { role?: string; usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: { total?: number } } };
+        };
+        try {
+          entry = JSON.parse(line);
+        } catch {
+          continue; // unparsable line — skip
+        }
+        let u: typeof entry.usage;
+        if (entry.type === "compaction" || entry.type === "branch_summary") {
+          u = entry.usage;
+        } else if (entry.type === "message" && (entry.message?.role === "assistant" || entry.message?.role === "toolResult")) {
+          u = entry.message.usage;
+        } else {
+          continue;
+        }
+        if (!u) continue;
+        usage.input += u.input ?? 0;
+        usage.output += u.output ?? 0;
+        usage.cacheRead += u.cacheRead ?? 0;
+        usage.cacheWrite += u.cacheWrite ?? 0;
+        usage.cost += u.cost?.total ?? 0;
+      }
+    } catch {
+      // unreadable file — return what we have
+    }
+    return usage;
+  }
+
+  /**
+   * Current context-window occupancy for a conversation: an estimate of the
+   * tokens the next LLM call will see, the model's window, and percent full.
+   * Mirrors pi's getContextUsage() — the last valid assistant usage after the
+   * latest compaction, plus chars/4 estimates for trailing messages; null
+   * until the next response when compaction happened and no usage exists
+   * after it. Computed from the session file, so it works without an open
+   * session. Returns undefined when there's no session or the model's window
+   * is unknown.
+   */
+  async sessionContextUsage(sessionKey: string): Promise<SessionContext | undefined> {
+    const file = this.resolvedSessionFile(sessionKey);
+    if (!file) return undefined;
+    const ids = await this.currentModelIds(sessionKey);
+    const model = ids ? this.modelRuntime?.getModel(ids.provider, ids.modelId) : undefined;
+    const window = model?.contextWindow ?? 0;
+    if (window <= 0) return undefined;
+
+    const entries: FileEntry[] = [];
+    try {
+      const rl = readline.createInterface({
+        input: fs.createReadStream(file, { encoding: "utf8" }),
+        crlfDelay: Infinity,
+      });
+      for await (const line of rl) {
+        if (!line.trim()) continue;
+        try {
+          entries.push(JSON.parse(line) as FileEntry);
+        } catch {
+          // skip unparsable lines
+        }
+      }
+    } catch {
+      // unreadable file
+    }
+
+    let messages: FileMessage[] = entries
+      .map((e) => e.message)
+      .filter((m): m is FileMessage => m !== undefined);
+    // After a compaction, only assistant usage recorded after it is trustworthy
+    // as the current context size.
+    let compactionIndex = -1;
+    for (let i = entries.length - 1; i >= 0; i--) {
+      if (entries[i].type === "compaction") {
+        compactionIndex = i;
+        break;
+      }
+    }
+    if (compactionIndex >= 0) {
+      let hasPostCompactionUsage = false;
+      for (let i = entries.length - 1; i > compactionIndex; i--) {
+        const m = entries[i].message;
+        if (m?.role === "assistant" && m.usage && m.stopReason !== "aborted" && m.stopReason !== "error") {
+          if (contextTokensOf(m.usage) > 0) {
+            hasPostCompactionUsage = true;
+            break;
+          }
+        }
+      }
+      if (!hasPostCompactionUsage) {
+        return { tokens: null, window, percent: null };
+      }
+      messages = entries
+        .slice(compactionIndex + 1)
+        .map((e) => e.message)
+        .filter((m): m is FileMessage => m !== undefined);
+    }
+    const tokens = estimateContextTokensFile(messages);
+    return { tokens, window, percent: (tokens / window) * 100 };
   }
 
   /**
@@ -794,6 +1057,14 @@ export class AgentRouter {
   private sessionFileFor(sessionKey: string): string {
     const safe = sessionKey.replace(/[^a-zA-Z0-9]/g, "_");
     return path.join(this.sessionsDir, `${safe}.jsonl`);
+  }
+
+  /** Resolve a conversation's session file, honoring a persistent /resume override. */
+  private resolvedSessionFile(sessionKey: string): string | undefined {
+    const derived = this.sessionFileFor(sessionKey);
+    if (fs.existsSync(derived)) return derived;
+    const resumed = this.stateStore.getResumeTarget(sessionKey);
+    return resumed && fs.existsSync(resumed) ? resumed : undefined;
   }
 
   private lastAssistantText(session: AgentSession): string {

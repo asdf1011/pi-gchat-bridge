@@ -1,6 +1,6 @@
 import http from "node:http";
 
-import { AgentRouter, type ModelInfo, type SessionInfo } from "./agent-sessions.js";
+import { AgentRouter, type ModelInfo, type SessionInfo, type SwitchModelResult } from "./agent-sessions.js";
 import { ChatClient, MAX_MESSAGE_CHARS } from "./chat-client.js";
 import { loadConfig } from "./config.js";
 import { PubSubReceiver } from "./pubsub-receiver.js";
@@ -174,8 +174,55 @@ function sessionStatsCard(stats: import("@earendil-works/pi-coding-agent").Sessi
   ];
 }
 
+/** Quick status card: current model + conversation token usage. */
+function statusCard(info: {
+  model?: string;
+  defaultModel?: string;
+  context?: { tokens: number | null; window: number; percent: number | null };
+  usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number };
+}): unknown[] {
+  const lines: string[] = [];
+  if (info.model) {
+    lines.push(`Model: <b>${escapeHtml(info.model)}</b>`);
+  } else if (info.defaultModel) {
+    lines.push(`Model: <b>${escapeHtml(info.defaultModel)}</b> <i>(default — no conversation here yet)</i>`);
+    lines.push("Send a message to start a conversation with this model.");
+  } else {
+    lines.push("No model configured.");
+  }
+  if (info.context) {
+    if (info.context.tokens != null) {
+      const left = info.context.window - info.context.tokens;
+      lines.push(
+        `Context: <b>${info.context.tokens.toLocaleString()}</b> of <b>${info.context.window.toLocaleString()}</b> tokens` +
+          ` (${info.context.percent?.toFixed(1) ?? "?"}% full — ${left.toLocaleString()} left)`,
+      );
+    } else {
+      lines.push("Context: unknown until the next response (recently compacted).");
+    }
+  }
+  if (info.usage) {
+    const u = info.usage;
+    const total = u.input + u.output + u.cacheRead + u.cacheWrite;
+    lines.push(`Tokens billed: <b>${total.toLocaleString()}</b> total (${u.input.toLocaleString()} in · ${u.output.toLocaleString()} out · ${u.cacheRead.toLocaleString()} cache read)`);
+    lines.push(`Cost: <b>$${u.cost.toFixed(4)}</b>`);
+  } else if (info.model) {
+    lines.push("No token usage recorded yet.");
+  }
+  return [
+    {
+      cardId: "status",
+      card: {
+        header: { title: "Status" },
+        sections: [{ widgets: [{ textParagraph: { text: lines.join("<br>") } }] }],
+      },
+    },
+  ];
+}
+
 function modelPickerCard(models: ModelInfo[], sessionKey: string, current?: string): unknown[] {
   const currentNote = current ? ` (currently <b>${escapeHtml(current)}</b>)` : "";
+  const intro = "Switches the model for <b>this conversation only</b>.";
   return [
     {
       cardId: "model-picker",
@@ -186,7 +233,7 @@ function modelPickerCard(models: ModelInfo[], sessionKey: string, current?: stri
             widgets: [
               {
                 textParagraph: {
-                  text: `Switches the model for <b>this conversation only</b>${currentNote}.`,
+                  text: `${intro}${currentNote}`,
                 },
               },
               {
@@ -223,7 +270,7 @@ function modelPickerCard(models: ModelInfo[], sessionKey: string, current?: stri
   ];
 }
 
-function modelConfirmCard(result: { ok: boolean; label: string; error?: string }): unknown[] {
+function modelConfirmCard(result: SwitchModelResult): unknown[] {
   const safe = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   return [
     {
@@ -236,7 +283,9 @@ function modelConfirmCard(result: { ok: boolean; label: string; error?: string }
               {
                 textParagraph: {
                   text: result.ok
-                    ? `Now on <b>${safe(result.label)}</b>.`
+                    ? result.created
+                      ? `New conversation on <b>${safe(result.label)}</b>.`
+                      : `Now on <b>${safe(result.label)}</b>.`
                     : `${safe(result.error ?? "Unknown error")}`,
                 },
               },
@@ -321,6 +370,8 @@ function defaultModelConfirmCard(result: { ok: boolean; label: string; error?: s
 
 function helpCard(): unknown[] {
   const items = [
+    ["<b>/model</b>", "Switch this conversation's model (or set the default when there's no conversation here)"],
+    ["<b>/status</b>", "Show this conversation's model, context usage, and tokens"],
     ["<b>/resume</b>", "Resume a session (dropdown picker)"],
     ["<b>/sessions</b>", "Same as /resume"],
     ["<b>/list</b>", "Same as /resume"],
@@ -410,6 +461,9 @@ async function main(): Promise<void> {
           return "ok";
         }
         const [provider, modelId] = picked.split("|");
+        // /model only switches an EXISTING conversation's model (with no
+        // conversation it changes the default instead), so no new-conversation
+        // notice is posted here — the card is the confirmation.
         const result = await router.switchModel(actionKey, provider ?? "", modelId ?? "");
         if (result.error === "busy") {
           console.log(`[chat] ${display}: busy, deferring model switch`);
@@ -464,21 +518,44 @@ async function main(): Promise<void> {
     // Commands are explicit control: they interrupt any running reply first.
     if (/^\/model\b/.test(text.trim())) {
       if (router.isBusy(sessionKey)) await router.interrupt(sessionKey);
-      const models = router.listModels();
+      const models = await router.listModels();
       if (models.length === 0) {
         await client.sendMessage(spaceName, "No models configured.", threadName);
         return "ok";
       }
-      if (!router.hasSession(sessionKey)) {
-        // No active conversation (no session yet) — /model becomes "change the
-        // default" for NEW conversations instead of switching this one.
+      // With a conversation, /model switches THIS conversation's model. With no
+      // conversation yet, it just changes the global default for NEW
+      // conversations — starting one here strands the pick on a thread nobody
+      // replies in (and a reply there opens a fresh default-model session).
+      if (router.hasSession(sessionKey)) {
+        const current = await router.currentModel(sessionKey);
+        await client.createCardMessage(spaceName, modelPickerCard(models, sessionKey, current), "Choose a backend model.", threadName);
+        console.log(`[chat] ${display}: posted model picker (${models.length} models)`);
+      } else {
         await client.createCardMessage(spaceName, defaultModelCard(models, router.defaultModel()), "Change the default model for new conversations.", threadName);
-        console.log(`[chat] ${display}: posted default-model picker (${models.length} models)`);
-        return "ok";
+        console.log(`[chat] ${display}: no conversation — posted default-model picker (${models.length} models)`);
       }
-      const current = await router.currentModel(sessionKey);
-      await client.createCardMessage(spaceName, modelPickerCard(models, sessionKey, current), "Choose a backend model.", threadName);
-      console.log(`[chat] ${display}: posted model picker (${models.length} models)`);
+      return "ok";
+    }
+    if (/^\/status\b/.test(text.trim())) {
+      // Read-only: no interrupt (doesn't disturb an in-flight reply). Model,
+      // context occupancy, and token totals are all read from the session file
+      // (or the in-memory session when open), so no session needs opening.
+      const model = await router.currentModel(sessionKey);
+      const context = await router.sessionContextUsage(sessionKey);
+      const usage = await router.sessionUsage(sessionKey);
+      await client.createCardMessage(
+        spaceName,
+        statusCard({
+          model,
+          defaultModel: router.defaultModel(),
+          context,
+          usage,
+        }),
+        "Status.",
+        threadName,
+      );
+      console.log(`[chat] ${display}: posted status card`);
       return "ok";
     }
     if (/^\/session\b/.test(text.trim())) {
