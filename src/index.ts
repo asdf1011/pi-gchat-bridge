@@ -14,7 +14,7 @@ import {
   sessionStatsCard,
   statusCard,
 } from "./cards.js";
-import { ChatClient, MAX_MESSAGE_CHARS } from "./chat-client.js";
+import { ChatClient } from "./chat-client.js";
 import { loadConfig } from "./config.js";
 import {
   MARKER_DELAY_MS,
@@ -28,20 +28,9 @@ import {
 import { PubSubReceiver } from "./pubsub-receiver.js";
 import type { HandleResult, MessageReceiver } from "./receiver.js";
 import { StateStore } from "./state.js";
+import { markers, ReplyStream } from "./stream.js";
 import type { IncomingMessage } from "./types.js";
 import { logger } from "./logger.js";
-
-/**
- * Live streaming markers per conversation: the running turn's handler registers
- * its placeholder here so a steering message (a separate handler invocation)
- * can relocate the placeholder BELOW the steering message. Google Chat orders
- * thread messages by creation time, so without relocation the reply — which
- * now covers the steer — would render above the steering text. A placeholder
- * that already shows streamed text is kept in place (frozen) as a record of
- * what was being said; only the continued stream moves below the steer.
- * Entries are removed when the owning handler finishes.
- */
-const markers = new Map<string, { owner: object; relocate: () => Promise<void> }>();
 
 /** Extract the picked value from a CARD_CLICKED event's form inputs.
  *  Selection values only arrive when a BUTTON submits the form — a dropdown's
@@ -61,25 +50,6 @@ function selectedValue(incoming: IncomingMessage): string | undefined {
     }
   }
   return undefined;
-}
-
-/** Dropdown + submit button card listing sessions; the button's click carries
- *  the dropdown value in formInputs (dropdown onChangeAction events carry none)
- *  and the session key it was created for (card events omit thread info). */
-
-/** One-line status shown under the stream while a tool is running (e.g. the command).
- *  The placeholder is PATCHed, so it renders legacy Chat syntax only — backtick
- *  monospace is the closest to a code block; the final answer renders real
- *  Markdown. Inner backticks are stripped so the wrap can't break. */
-function toolStatusLine(toolName: string, args: unknown): string {
-  const a = (args ?? {}) as Record<string, unknown>;
-  const command = typeof a.command === "string" ? a.command.trim().replace(/\s+/g, " ") : "";
-  const path = typeof a.path === "string" ? a.path.trim() : "";
-  const detail = (command || path).replace(/`/g, "").slice(0, 140);
-  // Legacy Chat syntax: "Running" is _italic_ (underscores), the command stays
-  // in `monospace` backticks.
-  const label = command ? "Running" : `Running ${toolName}`;
-  return detail ? `_${label}:_ \`${detail}\`` : `_${label}_…`;
 }
 
 async function main(): Promise<void> {
@@ -359,221 +329,44 @@ async function main(): Promise<void> {
       }
       // not-busy: race — fall through to a normal prompt below.
     }
-
-    let markerName: string | undefined;
-    let markerTimer: NodeJS.Timeout | undefined;
-    let streamed = "";
-    let patchTimer: NodeJS.Timeout | undefined;
-    /** Transient status line (e.g. the command pi is running), shown under the stream. */
-    let statusText: string | undefined;
-    /** Delays showing the status line so fast tools don't flicker. */
-    let toolTimer: NodeJS.Timeout | undefined;
-    /** Serialized placeholder updates: only one PATCH in flight at a time, applied in
-     *  order, so a stale snapshot can never land after the final text (an out-of-order
-     *  PATCH race could otherwise permanently truncate the stored message). */
-    let patchChain: Promise<void> = Promise.resolve();
-    /** Serialized placeholder relocations (a steer moves the streaming reply
-     *  below the steering message; see `relocateMarker`). */
-    let relocateChain: Promise<void> = Promise.resolve();
-    /** Identity token so a stale handler can't unregister a newer one's marker. */
-    const owner = {};
-
-    /** Text to show in the placeholder: the stream plus any transient status line. */
-    const displayText = (): string => {
-      if (!statusText) return streamed.slice(0, MAX_MESSAGE_CHARS);
-      const status = statusText.slice(0, 200);
-      const base = streamed.slice(0, Math.max(0, MAX_MESSAGE_CHARS - status.length - 2));
-      return base ? `${base}\n\n${status}` : status;
-    };
-
-    /**
-     * Move the streaming placeholder below a steering message. Google Chat
-     * orders thread messages by creation time, so a placeholder created before
-     * the steer would render ABOVE the steering text once the reply covers it.
-     * The old placeholder is kept where it is when it already carries real
-     * text — a frozen record of what was being said when the user steered, so
-     * the thread history still shows what the answer was a response to — and
-     * a fresh one is created below the steer for the continued stream. Only a
-     * bare "Thinking…" placeholder (nothing streamed yet) is deleted.
-     */
-    const relocateMarker = (): Promise<void> => {
-      relocateChain = relocateChain.then(async () => {
-        await patchChain; // settle queued patches before freezing the old marker
-        const old = markerName;
-        if (!old) return; // no placeholder yet — the one created later lands after the steer anyway
-        markerName = undefined; // meanwhile patchNow() becomes a no-op
-        if (streamed.trim()) {
-          // Keep the partial reply where it is (above the steer) as a record
-          // of what was being said; only a bare "Thinking…" placeholder is
-          // deleted. The below-steer marker carries just the continued stream.
-          logger.info(`[chat] steer: kept ${streamed.length} chars of partial reply above the steer`);
-        } else {
-          await client.deleteMessage(old).catch(() => {});
-        }
-        // Reset the accumulator so the fresh marker only ever shows text
-        // streamed AFTER the steer — the frozen message above already holds
-        // the rest, so the live view doesn't duplicate the draft. The final
-        // answer posted at the end is the complete text regardless.
-        streamed = "";
-        // Same silent policy as the initial placeholder: no notification for
-        // intermediate "Thinking…" markers, only for the final answer.
-        const silent = !threadName ? { silent: true } : undefined;
-        markerName = await client.createMessage(spaceName, THINKING_TEXT, threadName, silent);
-        const capped = displayText();
-        if (capped) {
-          try {
-            await client.updateMessage(markerName, capped);
-          } catch (err) {
-            logger.error("[chat] relocate carry-over failed:", (err as Error).message);
-          }
-        }
-      });
-      return relocateChain;
-    };
-    // Register so a steering message (a separate handler) can relocate this marker.
-    markers.set(sessionKey, { owner, relocate: relocateMarker });
-
-    /** Create the placeholder on demand (called by the delay timer). It is
-     *  silent where the API allows (top-level only): the user gets one
-     *  notification per reply — the final answer — not a "Thinking…" ping up
-     *  front. NOTE (verified Aug 2026): silent + threaded replies 403s, so
-     *  threaded placeholders still notify. */
-    const ensureMarker = async (): Promise<void> => {
-      if (markerName) return;
-      const silent = !threadName ? { silent: true } : undefined;
-      markerName = await client.createMessage(spaceName, THINKING_TEXT, threadName, silent);
-      // A tool is already running — show its status right away.
-      if (statusText) await patchNow();
-    };
-
-    const patchNow = (): Promise<void> => {
-      patchChain = patchChain.then(async () => {
-        patchTimer = undefined;
-        // Read the LATEST text when the queued task runs, so intermediate
-        // snapshots coalesce and the final patch always carries the final text.
-        const capped = displayText();
-        if (capped && markerName) {
-          try {
-            await client.updateMessage(markerName, capped);
-          } catch (err) {
-            logger.error("[chat] patch failed:", (err as Error).message);
-          }
-        }
-      });
-      return patchChain;
-    };
-
-    /** Show the tool status after a short delay (fast tools shouldn't flicker). */
-    const showTool = (toolName: string, args: unknown): void => {
-      if (toolTimer) clearTimeout(toolTimer);
-      const line = toolStatusLine(toolName, args);
-      toolTimer = setTimeout(() => {
-        toolTimer = undefined;
-        statusText = line;
-        void patchNow();
-      }, TOOL_STATUS_DELAY_MS);
-    };
-    /** Clear the tool status line when the tool finishes. */
-    const clearTool = (): void => {
-      if (toolTimer) clearTimeout(toolTimer);
-      toolTimer = undefined;
-      if (statusText) {
-        statusText = undefined;
-        void patchNow();
-      }
-    };
+    const stream = new ReplyStream(client, spaceName, threadName, display);
+    stream.register(sessionKey);
 
     try {
-      // Only show a placeholder if the reply is taking a while — feels like a
-      // typing indicator for fast answers (no API exists for the real one).
-      markerTimer = setTimeout(() => {
-        ensureMarker().catch((err) => logger.error("[chat] marker failed:", (err as Error).message));
-      }, MARKER_DELAY_MS);
-
       const reply = await router.handleMessage(
         sessionKey,
         spaceName,
         text,
         images,
-        (delta) => {
-          streamed += delta;
-          if (streamed.length > MAX_MESSAGE_CHARS) return; // stop patching past the cap
-          if (!patchTimer) patchTimer = setTimeout(() => void patchNow(), PATCH_DEBOUNCE_MS);
-        },
-        showTool,
-        clearTool,
+        (delta) => stream.onDelta(delta),
+        (toolName, args) => stream.showTool(toolName, args),
+        () => stream.clearTool(),
       );
-
-      if (patchTimer) clearTimeout(patchTimer);
-      if (markerTimer) clearTimeout(markerTimer);
-      if (toolTimer) clearTimeout(toolTimer);
-      statusText = undefined;
 
       if (reply === null) {
         // Session became busy between the check and the prompt — drop the marker.
-        if (markerName) await client.deleteMessage(markerName).catch(() => {});
+        await stream.abandon();
         logger.info(`[chat] ${display}: busy, deferred`);
         return "busy";
       }
 
       const final = reply.trim();
       if (!final) {
-        if (markerName) await client.deleteMessage(markerName).catch(() => {});
+        await stream.abandon();
         logger.info(`[chat] ${display}: empty reply, marker removed`);
         return "ok";
       }
 
-      // Show the final text (in the placeholder if one exists), then post overflow.
-      streamed = final;
-      // Replace the streamed placeholder with a fresh message: `markupSyntax`
-      // is create-only (any text PATCH resets the message to legacy CHAT
-      // syntax — verified Aug 2026), so the placeholder can't render Markdown.
-      // The placeholder is silent where the API allows, so this final create
-      // is the single notification that the answer is ready.
-      if (markerName) {
-        await patchNow();
-        await client.deleteMessage(markerName).catch(() => {});
-      }
-      // The first chunk IS the answer (it notifies). Overflow chunks would
-      // ideally be silent so long replies don't re-notify per 4000-char spill,
-      // but NOTIFICATION_TYPE_SILENT 403s when combined with messageReplyOption
-      // (threaded replies — verified Aug 2026); silent only works for top-level
-      // creates, so threaded overflow posts normally.
-      let rest = final;
-      let first = true;
-      while (rest.length > 0) {
-        const silent = !first && !threadName ? { silent: true } : undefined;
-        await client.sendMessage(spaceName, rest.slice(0, MAX_MESSAGE_CHARS), threadName, silent);
-        rest = rest.slice(MAX_MESSAGE_CHARS);
-        first = false;
-      }
-      logger.info(`[chat] ${display}: replied (${final.length} chars)`);
+      await stream.finish(final);
       return "ok";
     } catch (err) {
       const aborted = (err as Error)?.name === "AbortError";
       logger.error(`[chat] ${display}: handler ${aborted ? "interrupted (implicit stop)" : "error"}:`, (err as Error).message);
-      if (markerTimer) clearTimeout(markerTimer);
-      if (toolTimer) clearTimeout(toolTimer);
-      if (aborted && streamed.trim()) {
-        // Implicit stop: keep the partial reply visible, but replace the
-        // streamed placeholder with a fresh message so it renders as Markdown.
-        const partial = streamed.trim().slice(0, MAX_MESSAGE_CHARS);
-        if (markerName) {
-          await client.deleteMessage(markerName).catch(() => {});
-          markerName = undefined;
-        }
-        if (partial) {
-          await client.sendMessage(spaceName, partial, threadName).catch((e) =>
-            logger.error("[chat] final partial post failed:", (e as Error).message),
-          );
-        }
-      } else if (markerName) {
-        await client.deleteMessage(markerName).catch(() => {});
-      }
+      await stream.onError(aborted);
       return "ok"; // ack so a poison message doesn't redeliver forever
     } finally {
       // Only the handler that owns the current marker may unregister it.
-      if (markers.get(sessionKey)?.owner === owner) markers.delete(sessionKey);
+      stream.unregister(sessionKey);
     }
   };
 
