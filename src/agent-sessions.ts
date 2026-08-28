@@ -347,6 +347,13 @@ export class AgentRouter {
       // switch must not change what NEW conversations start with.
       if (prevProvider && prevModel) {
         settings.setDefaultModelAndProvider(prevProvider, prevModel);
+      } else {
+        // No previous default: setDefaultModelAndProvider can't "unset", so
+        // the pick unavoidably becomes the global default too. Logged so the
+        // surprising side effect isn't silent.
+        logger.warn(
+          `[router] ${sessionKey}: no global default model was set — ${providerId}/${modelId} is now also the default for NEW conversations`,
+        );
       }
       return { ok: true, label: `${model.name ?? model.id}${providerId ? ` (${providerId})` : ""}`, created };
     } catch (err) {
