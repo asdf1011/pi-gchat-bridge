@@ -120,6 +120,16 @@ That's it — the bot now answers messages in any space it's installed in.
 | `ALLOWED_SPACES` | — | Comma-separated spaces (name or ID) the bridge responds in; empty = all |
 | `ALLOWED_USERS` | — | Comma-separated users (name or ID) allowed to trigger pi; empty = anyone |
 
+## Testing
+
+```bash
+npm test
+```
+
+Runs the unit test suite (Node's built-in runner via tsx) against the pure
+logic: session-key derivation, allow-list matching, the session-file reader,
+and the token/context estimation that re-derives pi's counts.
+
 ### Stuck-session watchdog
 
 If a session's tool call hangs (e.g. the agent runs a network fetch without a

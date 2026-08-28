@@ -54,7 +54,7 @@ interface SpaceEntry {
 }
 
 /** Extract plain text from a pi message content (string or block array). */
-function contentText(content: unknown): string {
+export function contentText(content: unknown): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
     return content
@@ -66,7 +66,7 @@ function contentText(content: unknown): string {
 }
 
 /** Collapse whitespace and trim to a display-friendly length. */
-function truncate(text: string, max = 60): string {
+export function truncate(text: string, max = 60): string {
   const t = text.trim().replace(/\s+/g, " ");
   return t.length > max ? `${t.slice(0, max - 1)}…` : t;
 }
@@ -76,7 +76,7 @@ function truncate(text: string, max = 60): string {
  * parsed entry. Unparsable lines are skipped, so a partially-written or
  * corrupted file never aborts the read. `fn` may return `true` to stop early.
  */
-async function readSessionEntries(file: string, fn: (entry: unknown) => boolean | void): Promise<void> {
+export async function readSessionEntries(file: string, fn: (entry: unknown) => boolean | void): Promise<void> {
   const rl = readline.createInterface({
     input: fs.createReadStream(file, { encoding: "utf8" }),
     crlfDelay: Infinity,
@@ -212,13 +212,13 @@ interface FileEntry {
 }
 
 /** pi's calculateContextTokens: totalTokens, else the in/out/cache sum. */
-function contextTokensOf(usage: FileUsage): number {
+export function contextTokensOf(usage: FileUsage): number {
   const sum = (usage.input ?? 0) + (usage.output ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
   return usage.totalTokens || sum || 0;
 }
 
 /** Estimate a message's token count using pi's chars/4 heuristic (conservative). */
-function estimateTokensFile(message: FileMessage): number {
+export function estimateTokensFile(message: FileMessage): number {
   const contentChars = (content: FileMessage["content"]): number => {
     if (typeof content === "string") return content.length;
     if (Array.isArray(content)) {
@@ -265,7 +265,7 @@ function estimateTokensFile(message: FileMessage): number {
  * assistant usage, plus char-based estimates for anything after it (or a full
  * estimate when no usage exists yet).
  */
-function estimateContextTokensFile(messages: FileMessage[]): number {
+export function estimateContextTokensFile(messages: FileMessage[]): number {
   let lastUsageIndex = -1;
   let usageTokens = 0;
   for (let i = messages.length - 1; i >= 0; i--) {
