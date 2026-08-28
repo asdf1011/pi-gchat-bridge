@@ -64,6 +64,9 @@ export class StateStore {
   save(): void {
     // Write-then-rename: a crash mid-write can't leave a truncated state.json
     // (whose load() failure would silently reset dedupe + /resume state).
+    // Trade-offs (both negligible at this call rate): if renameSync itself
+    // fails the .tmp file is left behind, and each save does two syscalls
+    // instead of one.
     const tmp = `${this.file}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(this.state, null, 2));
     fs.renameSync(tmp, this.file);
