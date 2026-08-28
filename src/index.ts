@@ -133,7 +133,7 @@ function confirmCard(label: string): unknown[] {
 }
 
 function errorCard(message: string): unknown[] {
-  const safe = message.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const safe = escapeHtml(message);
   return [
     {
       cardId: "resume-error",
@@ -267,7 +267,7 @@ function modelPickerCard(models: ModelInfo[], sessionKey: string, current?: stri
 }
 
 function modelConfirmCard(result: SwitchModelResult): unknown[] {
-  const safe = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const safe = escapeHtml;
   return [
     {
       cardId: "model-confirm",
@@ -339,7 +339,7 @@ function defaultModelCard(models: ModelInfo[], current?: string): unknown[] {
 }
 
 function defaultModelConfirmCard(result: { ok: boolean; label: string; error?: string }): unknown[] {
-  const safe = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const safe = escapeHtml;
   return [
     {
       cardId: "default-model-confirm",

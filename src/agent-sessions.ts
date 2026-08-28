@@ -72,6 +72,28 @@ function truncate(text: string, max = 60): string {
 }
 
 /**
+ * Stream a session file's newline-delimited JSON, invoking `fn` with each
+ * parsed entry. Unparsable lines are skipped, so a partially-written or
+ * corrupted file never aborts the read. `fn` may return `true` to stop early.
+ */
+async function readSessionEntries(file: string, fn: (entry: unknown) => boolean | void): Promise<void> {
+  const rl = readline.createInterface({
+    input: fs.createReadStream(file, { encoding: "utf8" }),
+    crlfDelay: Infinity,
+  });
+  for await (const line of rl) {
+    if (!line.trim()) continue;
+    let entry: unknown;
+    try {
+      entry = JSON.parse(line) as unknown;
+    } catch {
+      continue; // unparsable line — skip it, don't give up on the file
+    }
+    if (fn(entry) === true) break;
+  }
+}
+
+/**
  * Best available display label for a session file, read straight from the
  * JSONL (pi persists all of these):
  *   1. user-set display name (session_info entries, set via /name)
@@ -79,26 +101,14 @@ function truncate(text: string, max = 60): string {
  *   3. first user message text
  *   4. fallback: file name (e.g. `spaces_<id>`) — only when the file has
  *      none of the above (e.g. empty/image-only sessions)
- *
- * Streams the file so large sessions don't get fully buffered in memory.
  */
 async function summarizeSessionFile(file: string): Promise<string> {
   let name: string | undefined;
   let firstUserText = "";
   let compactionSummary = "";
   try {
-    const rl = readline.createInterface({
-      input: fs.createReadStream(file, { encoding: "utf8" }),
-      crlfDelay: Infinity,
-    });
-    for await (const line of rl) {
-      if (!line.trim()) continue;
-      let entry: { type?: string; name?: string; summary?: string; message?: PiMessage };
-      try {
-        entry = JSON.parse(line);
-      } catch {
-        continue; // unparsable line — skip it, don't give up on the file
-      }
+    await readSessionEntries(file, (raw) => {
+      const entry = raw as { type?: string; name?: string; summary?: string; message?: PiMessage };
       if (entry.type === "session_info" && typeof entry.name === "string" && entry.name.trim()) {
         name = entry.name.trim();
       } else if (entry.type === "message" && entry.message?.role === "user" && !firstUserText) {
@@ -106,8 +116,8 @@ async function summarizeSessionFile(file: string): Promise<string> {
       } else if (entry.type === "compaction" && typeof entry.summary === "string" && entry.summary.trim() && !compactionSummary) {
         compactionSummary = entry.summary.trim();
       }
-      if (name && firstUserText && compactionSummary) break; // all sources found, stop early
-    }
+      return !!(name && firstUserText && compactionSummary); // all sources found, stop early
+    });
   } catch {
     // unreadable file — fall through to the file-name fallback
   }
@@ -550,23 +560,15 @@ export class AgentRouter {
     let provider: string | undefined;
     let modelId: string | undefined;
     try {
-      const rl = readline.createInterface({
-        input: fs.createReadStream(file, { encoding: "utf8" }),
-        crlfDelay: Infinity,
-      });
-      for await (const line of rl) {
-        if (!line.trim()) continue;
-        try {
-          const parsed = JSON.parse(line) as { type?: string; provider?: string; modelId?: string };
-          // Later entries overwrite earlier ones (pi appends chronologically).
-          if (parsed.type === "model_change" && parsed.provider && parsed.modelId) {
-            provider = parsed.provider;
-            modelId = parsed.modelId;
-          }
-        } catch {
-          // skip unparsable lines
+      await readSessionEntries(file, (raw) => {
+        const parsed = raw as { type?: string; provider?: string; modelId?: string };
+        // Later entries overwrite earlier ones (pi appends chronologically).
+        if (parsed.type === "model_change" && parsed.provider && parsed.modelId) {
+          provider = parsed.provider;
+          modelId = parsed.modelId;
         }
-      }
+        return false;
+      });
     } catch {
       // unreadable file
     }
@@ -649,22 +651,14 @@ export class AgentRouter {
     if (!file || !fs.existsSync(file)) return undefined;
     let name: string | undefined;
     try {
-      const rl = readline.createInterface({
-        input: fs.createReadStream(file, { encoding: "utf8" }),
-        crlfDelay: Infinity,
-      });
-      for await (const line of rl) {
-        if (!line.trim()) continue;
-        try {
-          const parsed = JSON.parse(line) as { type?: string; name?: string };
-          // Later session_info entries overwrite earlier ones (pi does the same).
-          if (parsed.type === "session_info" && typeof parsed.name === "string") {
-            name = parsed.name.trim() || undefined;
-          }
-        } catch {
-          // skip unparsable lines
+      await readSessionEntries(file, (raw) => {
+        const parsed = raw as { type?: string; name?: string };
+        // Later session_info entries overwrite earlier ones (pi does the same).
+        if (parsed.type === "session_info" && typeof parsed.name === "string") {
+          name = parsed.name.trim() || undefined;
         }
-      }
+        return false;
+      });
     } catch {
       // unreadable file
     }
@@ -706,37 +700,26 @@ export class AgentRouter {
     if (!file) return undefined;
     const usage: SessionUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
     try {
-      const rl = readline.createInterface({
-        input: fs.createReadStream(file, { encoding: "utf8" }),
-        crlfDelay: Infinity,
-      });
-      for await (const line of rl) {
-        if (!line.trim()) continue;
-        let entry: {
+      await readSessionEntries(file, (raw) => {
+        const entry = raw as {
           type?: string;
           usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: { total?: number } };
           message?: { role?: string; usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: { total?: number } } };
         };
-        try {
-          entry = JSON.parse(line);
-        } catch {
-          continue; // unparsable line — skip
-        }
-        let u: typeof entry.usage;
-        if (entry.type === "compaction" || entry.type === "branch_summary") {
-          u = entry.usage;
-        } else if (entry.type === "message" && (entry.message?.role === "assistant" || entry.message?.role === "toolResult")) {
-          u = entry.message.usage;
-        } else {
-          continue;
-        }
-        if (!u) continue;
+        const u =
+          entry.type === "compaction" || entry.type === "branch_summary"
+            ? entry.usage
+            : entry.type === "message" && (entry.message?.role === "assistant" || entry.message?.role === "toolResult")
+              ? entry.message.usage
+              : undefined;
+        if (!u) return false;
         usage.input += u.input ?? 0;
         usage.output += u.output ?? 0;
         usage.cacheRead += u.cacheRead ?? 0;
         usage.cacheWrite += u.cacheWrite ?? 0;
         usage.cost += u.cost?.total ?? 0;
-      }
+        return false;
+      });
     } catch {
       // unreadable file — return what we have
     }
@@ -763,18 +746,10 @@ export class AgentRouter {
 
     const entries: FileEntry[] = [];
     try {
-      const rl = readline.createInterface({
-        input: fs.createReadStream(file, { encoding: "utf8" }),
-        crlfDelay: Infinity,
+      await readSessionEntries(file, (raw) => {
+        entries.push(raw as FileEntry);
+        return false;
       });
-      for await (const line of rl) {
-        if (!line.trim()) continue;
-        try {
-          entries.push(JSON.parse(line) as FileEntry);
-        } catch {
-          // skip unparsable lines
-        }
-      }
     } catch {
       // unreadable file
     }
