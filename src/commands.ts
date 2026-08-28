@@ -13,7 +13,7 @@ import {
   statusCard,
 } from "./cards.js";
 import type { ChatClient } from "./chat-client.js";
-import { MODEL_ACTION, RESUME_ACTION, SET_DEFAULT_MODEL_ACTION } from "./constants.js";
+import { MODEL_ACTION, RESUME_ACTION, SET_DEFAULT_MODEL_ACTION, BUSY } from "./constants.js";
 import { logger } from "./logger.js";
 import type { HandleResult } from "./receiver.js";
 import type { IncomingMessage } from "./types.js";
@@ -74,7 +74,7 @@ export async function runCommand(ctx: CommandContext): Promise<HandleResult | nu
       // conversation it changes the default instead), so no new-conversation
       // notice is posted here — the card is the confirmation.
       const result = await router.switchModel(actionKey, provider ?? "", modelId ?? "");
-      if (result.error === "busy") {
+      if (result.error === BUSY) {
         logger.info(`[chat] ${display}: busy, deferring model switch`);
         return "busy"; // leave unacked; retried once the session frees up
       }

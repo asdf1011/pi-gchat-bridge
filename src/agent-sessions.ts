@@ -8,7 +8,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import fs from "node:fs";
 import path from "node:path";
-import { SESSION_ABORT_TIMEOUT_MS } from "./constants.js";
+import { BUSY, SESSION_ABORT_TIMEOUT_MS } from "./constants.js";
 import { logger } from "./logger.js";
 import {
   contentText,
@@ -322,7 +322,7 @@ export class AgentRouter {
       this.sessions.set(sessionKey, entry);
     }
     if (entry.session.isStreaming) {
-      return { ok: false, label: modelId, error: "busy" };
+      return { ok: false, label: modelId, error: BUSY };
     }
     if (!this.modelRuntime) return { ok: false, label: modelId, error: "No model runtime" };
     const model = this.modelRuntime.getModel(providerId, modelId);
