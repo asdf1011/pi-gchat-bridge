@@ -6,6 +6,7 @@ import {
   SettingsManager,
   type AgentSession,
 } from "@earendil-works/pi-coding-agent";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { BUSY, SESSION_ABORT_TIMEOUT_MS } from "./constants.js";
@@ -710,13 +711,24 @@ export class AgentRouter {
         this.stateStore.save();
       }
     }
-    const legacy = this.sessionFileFor(spaceName);
-    // One-time migration: the pre-parallel bridge kept one session per SPACE.
-    // The first thread to open after upgrade inherits that file so history
-    // isn't lost; new threads get fresh files.
-    if (file === undefined && !fs.existsSync(target) && legacy !== target && fs.existsSync(legacy)) {
-      fs.renameSync(legacy, target);
-      logger.info(`[router] migrated ${legacy} -> ${target}`);
+    const legacySpaceFile = path.join(this.sessionsDir, `${spaceName.replace(/[^a-zA-Z0-9]/g, "_")}.jsonl`);
+    // One-time migrations for pre-hashed session files (whose sanitized names
+    // could collide):
+    //   1. The pre-parallel bridge kept one session per SPACE; the first
+    //      thread to open after upgrade inherits that file so history isn't
+    //      lost.
+    //   2. Thread-keyed files created before the hash suffix are renamed to
+    //      the hashed name.
+    if (file === undefined && !fs.existsSync(target)) {
+      const unhashed = path.join(this.sessionsDir, `${sessionKey.replace(/[^a-zA-Z0-9]/g, "_")}.jsonl`);
+      if (unhashed !== target && fs.existsSync(unhashed)) {
+        fs.renameSync(unhashed, target);
+        logger.info(
+          unhashed === legacySpaceFile
+            ? `[router] migrated legacy space session ${unhashed} -> ${target}`
+            : `[router] migrated ${unhashed} -> ${target}`,
+        );
+      }
     }
     if (!fs.existsSync(target)) {
       fs.writeFileSync(target, SESSION_HEADER(this.cwd) + "\n");
@@ -755,8 +767,12 @@ export class AgentRouter {
   }
 
   private sessionFileFor(sessionKey: string): string {
+    // The sanitized key alone is NOT injective ("a/b#c" and "a-b-c" both map
+    // to "a_b_c"), which would alias two conversations onto one session file.
+    // A short hash of the full key makes the mapping collision-proof.
     const safe = sessionKey.replace(/[^a-zA-Z0-9]/g, "_");
-    return path.join(this.sessionsDir, `${safe}.jsonl`);
+    const hash = createHash("sha256").update(sessionKey).digest("hex").slice(0, 8);
+    return path.join(this.sessionsDir, `${safe}-${hash}.jsonl`);
   }
 
   /** Resolve a conversation's session file, honoring a persistent /resume override. */
