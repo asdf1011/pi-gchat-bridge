@@ -18,6 +18,10 @@ export interface Config {
   watchdogIntervalMs: number;
   /** Steer: how long to wait for an in-flight tool call before aborting to redirect (ms). */
   steerWaitMs: number;
+  /** Restrict responding to these spaces (resource name or ID). Empty = all. */
+  allowedSpaces: string[];
+  /** Restrict which users can trigger pi (resource name or ID). Empty = all. */
+  allowedUsers: string[];
 }
 
 function required(name: string): string {
@@ -26,6 +30,14 @@ function required(name: string): string {
     throw new Error(`Missing required env var ${name}. Copy .env.example to .env and fill it in.`);
   }
   return value;
+}
+
+/** Parse a comma-separated env var into a trimmed, non-empty list. */
+function listEnv(name: string): string[] {
+  return (process.env[name] ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 export function loadConfig(): Config {
@@ -53,5 +65,7 @@ export function loadConfig(): Config {
     stallTimeoutMs: Number(process.env.BRIDGE_STALL_TIMEOUT_MS ?? 20 * 60 * 1000),
     watchdogIntervalMs: Number(process.env.BRIDGE_WATCHDOG_INTERVAL_MS ?? 30_000),
     steerWaitMs: Number(process.env.BRIDGE_STEER_WAIT_MS ?? 10_000),
+    allowedSpaces: listEnv("ALLOWED_SPACES"),
+    allowedUsers: listEnv("ALLOWED_USERS"),
   };
 }

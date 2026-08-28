@@ -899,6 +899,8 @@ async function main(): Promise<void> {
     config.serviceAccountPath,
     config.pubsubSubscription,
     state,
+    config.allowedSpaces,
+    config.allowedUsers,
   );
 
   const shutdown = async (): Promise<void> => {

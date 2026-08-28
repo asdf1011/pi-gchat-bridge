@@ -1,4 +1,5 @@
 import { ServiceAccountAuth } from "./auth.js";
+import { isAllowed } from "./access.js";
 import type { HandleResult, MessageReceiver } from "./receiver.js";
 import type { StateStore } from "./state.js";
 import type { ChatAttachment, ChatMessage, ChatSpace, IncomingMessage } from "./types.js";
@@ -74,6 +75,10 @@ export class PubSubReceiver implements MessageReceiver {
     /** Full subscription name: projects/{project}/subscriptions/{subscription} */
     private subscription: string,
     private state: StateStore,
+    /** Restrict responding to these spaces (resource name or ID). Empty = all. */
+    private allowedSpaces: string[],
+    /** Restrict which users can trigger pi via a message (resource name or ID). Empty = all. */
+    private allowedUsers: string[],
   ) {
     this.auth = new ServiceAccountAuth(serviceAccountPath, [PUBSUB_SCOPE]);
   }
@@ -164,6 +169,22 @@ export class PubSubReceiver implements MessageReceiver {
       ) as ChatEvent;
       const incoming = this.mapEvent(event);
       if (!incoming) {
+        await this.ack([receivedMessage.ackId]);
+        return;
+      }
+
+      // Allow-list: respond only in permitted spaces, and to permitted users.
+      // A disallowed event is acked (dropped) so it never loops in Pub/Sub.
+      // The user check applies to MESSAGE events (the ones that run pi); card
+      // events are only bounded by space, since they confirm bot cards the
+      // bridge itself posted and never run pi tools directly.
+      if (!isAllowed(incoming.space.name, this.allowedSpaces)) {
+        console.log(`[pubsub] ${incoming.space.name}: space not in allow-list, dropping`);
+        await this.ack([receivedMessage.ackId]);
+        return;
+      }
+      if (incoming.eventType === "MESSAGE" && !isAllowed(incoming.message.senderName, this.allowedUsers)) {
+        console.log(`[pubsub] ${incoming.space.name}: sender not in allow-list, dropping`);
         await this.ack([receivedMessage.ackId]);
         return;
       }
