@@ -18,6 +18,8 @@ export interface Config {
   watchdogIntervalMs: number;
   /** Steer: how long to wait for an in-flight tool call before aborting to redirect (ms). */
   steerWaitMs: number;
+  /** Evict an idle, non-streaming session from memory after this long (0 = disabled). */
+  sessionIdleMs: number;
   /** Restrict responding to these spaces (resource name or ID). Empty = all. */
   allowedSpaces: string[];
   /** Restrict which users can trigger pi (resource name or ID). Empty = all. */
@@ -65,6 +67,7 @@ export function loadConfig(): Config {
     stallTimeoutMs: Number(process.env.BRIDGE_STALL_TIMEOUT_MS ?? 20 * 60 * 1000),
     watchdogIntervalMs: Number(process.env.BRIDGE_WATCHDOG_INTERVAL_MS ?? 30_000),
     steerWaitMs: Number(process.env.BRIDGE_STEER_WAIT_MS ?? 10_000),
+    sessionIdleMs: Number(process.env.BRIDGE_SESSION_IDLE_MS ?? 0),
     allowedSpaces: listEnv("ALLOWED_SPACES"),
     allowedUsers: listEnv("ALLOWED_USERS"),
   };

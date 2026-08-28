@@ -318,6 +318,8 @@ export class AgentRouter {
     private watchdogIntervalMs: number,
     /** How long to wait for an in-flight tool call before aborting to redirect. */
     private steerWaitMs: number,
+    /** Evict an idle, non-streaming session from memory after this long (0 = disabled). */
+    private sessionIdleMs: number,
     /** Durable store: message dedupe state + persistent /resume overrides. */
     private stateStore: StateStore,
   ) {}
@@ -328,17 +330,19 @@ export class AgentRouter {
     stallTimeoutMs: number,
     watchdogIntervalMs: number,
     steerWaitMs: number,
+    sessionIdleMs: number,
     stateStore: StateStore,
   ): Promise<AgentRouter> {
-    const router = new AgentRouter(cwd, sessionsDir, stallTimeoutMs, watchdogIntervalMs, steerWaitMs, stateStore);
+    const router = new AgentRouter(cwd, sessionsDir, stallTimeoutMs, watchdogIntervalMs, steerWaitMs, sessionIdleMs, stateStore);
     router.modelRuntime = await ModelRuntime.create();
-    if (router.stallTimeoutMs > 0 && router.watchdogIntervalMs > 0) {
+    // The watchdog ticks while either stall-recovery or idle-eviction is on.
+    if ((router.stallTimeoutMs > 0 || router.sessionIdleMs > 0) && router.watchdogIntervalMs > 0) {
       router.watchdogTimer = setInterval(() => {
         void router.watchdogTick().catch((err) =>
           logger.error("[watchdog] tick failed:", (err as Error).message),
         );
       }, router.watchdogIntervalMs);
-      logger.info(`[router] watchdog enabled: stall=${router.stallTimeoutMs}ms interval=${router.watchdogIntervalMs}ms`);
+      logger.info(`[router] watchdog enabled: stall=${router.stallTimeoutMs}ms idle=${router.sessionIdleMs}ms interval=${router.watchdogIntervalMs}ms`);
     } else {
       logger.info("[router] watchdog disabled");
     }
@@ -871,6 +875,22 @@ export class AgentRouter {
   private async watchdogTick(): Promise<void> {
     const now = Date.now();
     for (const [key, entry] of [...this.sessions.entries()]) {
+      // Idle eviction: a session that's not streaming and has had no agent
+      // activity for the idle threshold is dropped from memory (the JSONL
+      // file persists, so the next message reopens it). This keeps the
+      // long-running bridge from holding an open pi session per thread.
+      if (!entry.resetting && !entry.session.isStreaming && this.sessionIdleMs > 0) {
+        const idleMs = now - entry.lastActivityAt;
+        if (idleMs >= this.sessionIdleMs) {
+          entry.session.dispose();
+          this.sessions.delete(key);
+          logger.info(`[router] evicted idle session ${key} (${Math.round(idleMs / 1000)}s)`);
+        }
+        continue;
+      }
+      // Stalled-session recovery: a hung tool call (e.g. a network fetch
+      // without a timeout) produces no events, so the session never frees up
+      // and every message in that conversation is deferred as "busy" forever.
       if (entry.resetting || !entry.session.isStreaming) continue;
       const stalledMs = now - entry.lastActivityAt;
       if (stalledMs < this.stallTimeoutMs) continue;

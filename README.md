@@ -116,6 +116,9 @@ That's it — the bot now answers messages in any space it's installed in.
 | `PORT` | `8080` | Health endpoint (0 disables) |
 | `BRIDGE_STALL_TIMEOUT_MS` | `1200000` (20 min) | Watchdog: force-reset a session streaming with no agent activity for this long (0 disables) |
 | `BRIDGE_WATCHDOG_INTERVAL_MS` | `30000` | Watchdog scan interval |
+| `BRIDGE_SESSION_IDLE_MS` | `0` | Evict an idle, non-streaming session from memory after this long (0 disables) |
+| `ALLOWED_SPACES` | — | Comma-separated spaces (name or ID) the bridge responds in; empty = all |
+| `ALLOWED_USERS` | — | Comma-separated users (name or ID) allowed to trigger pi; empty = anyone |
 
 ### Stuck-session watchdog
 

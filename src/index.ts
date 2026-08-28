@@ -419,6 +419,7 @@ async function main(): Promise<void> {
     config.stallTimeoutMs,
     config.watchdogIntervalMs,
     config.steerWaitMs,
+    config.sessionIdleMs,
     state,
   );
 
