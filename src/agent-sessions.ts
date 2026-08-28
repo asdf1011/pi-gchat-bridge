@@ -33,6 +33,9 @@ interface SpaceEntry {
   resetting: boolean;
   /** In-flight tool calls (tool_execution_start/end deltas). */
   toolsInFlight: number;
+  /** True while handleMessage is between the busy check and prompt() — closes
+   *  the race where two coroutines both pass the isStreaming check. */
+  prompting: boolean;
   /** Steered messages awaiting delivery into the running turn. */
   pendingSteers: { text: string; delivered: boolean }[];
 }
@@ -186,10 +189,14 @@ export class AgentRouter {
       this.sessions.set(sessionKey, entry);
     }
 
-    if (entry.session.isStreaming) {
+    if (entry.session.isStreaming || entry.prompting) {
       logger.info(`[router] ${sessionKey} busy, skipping message`);
       return null;
     }
+    // Synchronous claim: closes the window where two coroutines both pass the
+    // isStreaming check before either calls prompt(). A null return is
+    // treated by the caller like busy (defer/redeliver).
+    entry.prompting = true;
 
     const unsubscribe = onDelta || onToolStart || onToolEnd
       ? entry.session.subscribe((event) => {
@@ -218,13 +225,16 @@ export class AgentRouter {
       entry.pendingSteers = [];
       return reply.trim() || null;
     } finally {
+      entry.prompting = false;
       unsubscribe?.();
     }
   }
 
-  /** Whether the session for this conversation is currently streaming (busy). */
+  /** Whether the session for this conversation is streaming or about to
+   *  prompt (busy). */
   isBusy(sessionKey: string): boolean {
-    return this.sessions.get(sessionKey)?.session.isStreaming ?? false;
+    const entry = this.sessions.get(sessionKey);
+    return !!entry && (entry.session.isStreaming || entry.prompting);
   }
 
   /**
@@ -321,7 +331,7 @@ export class AgentRouter {
       entry = await this.openOrCreateSession(sessionKey, sessionKey);
       this.sessions.set(sessionKey, entry);
     }
-    if (entry.session.isStreaming) {
+    if (entry.session.isStreaming || entry.prompting) {
       return { ok: false, label: modelId, error: BUSY };
     }
     if (!this.modelRuntime) return { ok: false, label: modelId, error: "No model runtime" };
@@ -722,6 +732,7 @@ export class AgentRouter {
       lastActivityAt: Date.now(),
       resetting: false,
       toolsInFlight: 0,
+      prompting: false,
       pendingSteers: [],
     };
     // Long-lived listener: any agent event counts as activity for the watchdog;
