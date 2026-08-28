@@ -7,6 +7,17 @@ interface ServiceAccountKey {
   token_uri: string;
 }
 
+/** A non-2xx response from a Google endpoint, carrying the HTTP status. */
+class AuthError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "AuthError";
+  }
+}
+
 /**
  * Service-account JWT auth: signs an assertion with the private key, exchanges
  * it for an access token (cached until near expiry), and provides an
@@ -58,7 +69,7 @@ export class ServiceAccountAuth {
     try {
       return await fn();
     } catch (err) {
-      if ((err as Error).message.includes("-> 401")) {
+      if (err instanceof AuthError && err.status === 401) {
         this.accessToken = undefined;
         this.tokenExpiry = 0;
         return fn();
@@ -85,7 +96,7 @@ export class ServiceAccountAuth {
     });
     if (!res.ok) {
       const detail = await res.text().catch(() => "");
-      throw new Error(`${method} ${url} -> ${res.status}: ${detail.slice(0, 300)}`);
+      throw new AuthError(`${method} ${url} -> ${res.status}: ${detail.slice(0, 300)}`, res.status);
     }
     const raw = await res.text();
     return raw ? (JSON.parse(raw) as unknown) : undefined;
@@ -100,7 +111,7 @@ export class ServiceAccountAuth {
     });
     if (!res.ok) {
       const detail = await res.text().catch(() => "");
-      throw new Error(`GET ${url} -> ${res.status}: ${detail.slice(0, 300)}`);
+      throw new AuthError(`GET ${url} -> ${res.status}: ${detail.slice(0, 300)}`, res.status);
     }
     return Buffer.from(await res.arrayBuffer());
   }
