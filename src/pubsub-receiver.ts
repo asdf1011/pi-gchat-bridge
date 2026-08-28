@@ -291,7 +291,21 @@ export class PubSubReceiver implements MessageReceiver {
     // Keep ALL attachments — the event payload carries only partial metadata
     // (its shape differs by source), so image detection happens at download
     // time (contentType / extension / Attachment-resource fetch), not here.
-    const attachments = message.attachments ?? [];
+    // Some event payloads deliver attachments under the SINGULAR `attachment`
+    // field (a legacy REST quirk) instead of `attachments`; merge both and
+    // dedupe by attachment name so an image-only message isn't dropped as
+    // "no text and no attachment" just because its image arrived under the
+    // other field.
+    const seenAtt = new Set<string>();
+    const attachments: ChatAttachment[] = [];
+    for (const att of [...(message.attachments ?? []), ...(message.attachment ?? [])]) {
+      const key = att.name ?? att.contentUri ?? att.contentName;
+      if (key) {
+        if (seenAtt.has(key)) continue;
+        seenAtt.add(key);
+      }
+      attachments.push(att);
+    }
     // Image-only messages (pasted screenshot, no text) are valid input — don't
     // drop them just because `text` is empty.
     if (!message.text && attachments.length === 0) return null;
