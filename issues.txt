@@ -1,0 +1,99 @@
+# Google Chat API issues NOT in the issue tracker
+
+Two API limitations we hit while building the bridge (pi-gchat-bridge) that
+have **no filed issue** in Google Issue Tracker (component 350158, Google Chat
+API) as of Aug 14, 2026. Verified live against the API (service-account /
+app auth, `chat.bot` scope). Ready to paste into
+https://issuetracker.google.com/components/350158 when we want to file them.
+
+---
+
+## Issue 1: NOTIFICATION_TYPE_SILENT returns 403 for threaded messages
+
+**Title:** Chat API: NOTIFICATION_TYPE_SILENT returns 403 when creating a message in a thread
+
+**Component:** 350158 (Google Chat API)
+
+**Summary:**
+Sending a message silently (no push notification) via
+`createMessageNotificationOptions.notificationType=NOTIFICATION_TYPE_SILENT`
+works for top-level messages but returns **403 Forbidden** when the message is
+created inside an existing thread (i.e. when `messageReplyOption` is present).
+There is currently no way to create a silent message in an existing thread,
+which forces bots to notify for intermediate messages (e.g. a streaming
+placeholder) in threaded conversations.
+
+**Repro (app auth / service account):**
+
+```
+POST https://chat.googleapis.com/v1/spaces/SPACE/messages?messageReplyOption=REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD&createMessageNotificationOptions.notificationType=NOTIFICATION_TYPE_SILENT
+Body: {"text":"test","thread":{"name":"spaces/SPACE/threads/THREAD"}}
+```
+
+Response: `403` (silent unsupported with `messageReplyOption`).
+
+**Control tests (all verified Aug 14, 2026):**
+
+| Variation | Result |
+|---|---|
+| + silent + messageReplyOption (above) | 403 |
+| thread in body, NO messageReplyOption | 200, but `thread` is **ignored** — message lands in a NEW thread |
+| messageReplyOption, NO silent | 200, correct thread, but notifies |
+| `PATCH ...?updateMask=thread` to move a message into a thread | 400 "Unsupported path name in message field mask" — thread placement is not patchable |
+
+**Expected:** `NOTIFICATION_TYPE_SILENT` honored for threaded messages, or an
+alternative way to create a message in a thread without notifying.
+
+**Related:** #292235340 (app-auth capabilities), #316196511 (notification
+control for bots).
+
+---
+
+## Issue 2: PATCHing message text drops MARKUP_SYNTAX_MARKDOWN (markupSyntax is create-only)
+
+**Title:** Chat API: PATCHing message text resets MARKUP_SYNTAX_MARKDOWN to legacy Chat formatting
+
+**Component:** 350158 (Google Chat API)
+
+**Summary:**
+`markupSyntax: MARKUP_SYNTAX_MARKDOWN` (GA Aug 7, 2026) renders standard
+Markdown in created messages. But any subsequent `PATCH` of the message's
+`text` resets the message to legacy Chat syntax (`*bold*`, `_italic_`, …), and
+`markupSyntax` is not a valid `updateMask` path. This makes it impossible to
+stream/update a message's text incrementally and keep Markdown rendering —
+bots that stream long replies must delete the placeholder and post a fresh
+message when done, leaving a "Message deleted" stub in the conversation.
+
+**Repro (app auth / service account):**
+
+1. `POST /v1/spaces/SPACE/messages`
+   Body: `{"text":"**bold**","markupSyntax":"MARKUP_SYNTAX_MARKDOWN"}`
+   → renders as bold. ✓
+2. `PATCH /v1/{messageName}?updateMask=text`
+   Body: `{"text":"**bold** more"}`
+   → message now renders `**bold** more` as **literal asterisks** (legacy
+   syntax) — Markdown styling lost.
+3. `PATCH /v1/{messageName}?updateMask=markupSyntax`
+   → `400` (not a valid `updateMask` path).
+
+**Expected:** Either `markupSyntax` should be patchable (so streaming updates
+keep Markdown), or `PATCH text` should preserve the message's original
+`markupSyntax`.
+
+**Use case:** Streaming/agent bots (e.g. the Chat bridge to a coding agent)
+patch a placeholder as text streams in, then replace it with a fresh Markdown
+message — the patch-reset is the only reason the replace is necessary.
+
+**Related:** #157909720 (standard Markdown in Chat), #377230196 (Markdown +
+links in one message), #428659965 (Markdown tables).
+
+---
+
+## Notes
+
+- Both verified against the live API Aug 14, 2026 with a service account
+  (`chat.bot` scope).
+- The tracker issues we DID find are already linked from the README
+  (Known limitations): tables #428659965, attachments/service account
+  #447642391, typing indicators #166140696, personal Gmail #322187111
+  (not referenced in the README — see review note).
