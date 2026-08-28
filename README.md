@@ -127,8 +127,8 @@ npm test
 ```
 
 Runs the unit test suite (Node's built-in runner via tsx) against the pure
-logic: session-key derivation, allow-list matching, the session-file reader,
-and the token/context estimation that re-derives pi's counts.
+logic: session-key derivation, allow-list matching, and the session-file
+reader/writer (including the watchdog's incomplete-tail truncation).
 
 ### Stuck-session watchdog
 

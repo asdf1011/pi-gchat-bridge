@@ -1,12 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import {
-  AgentRouter,
-  contentText,
-  readSessionEntries,
-  truncate,
-} from "../src/agent-sessions.js";
+import { AgentRouter } from "../src/agent-sessions.js";
+import { contentText, readSessionEntries, truncate } from "../src/session-file.js";
 
 test("keyFor prefers an app-chosen threadKey", () => {
   assert.equal(AgentRouter.keyFor("spaces/s", "spaces/s/threads/t", "conv-1"), "spaces/s/conv-1");
