@@ -31,13 +31,47 @@ export class ServiceAccountAuth {
     }
   }
 
-  /** Authenticated JSON request with a Bearer token. Empty bodies are OK. */
+  /** Authenticated JSON request with a Bearer token. Empty bodies are OK.
+   *  A 401 clears the cached token and retries once (covers clock skew and a
+   *  token revoked/expired ahead of the cached expiry in long-lived runs). */
   async request(
     method: "GET" | "POST" | "PATCH" | "DELETE",
     url: string,
     body?: string,
     /** Abort the request after this many ms (e.g. a long-lived pull). */
     timeoutMs?: number,
+  ): Promise<unknown> {
+    return this.withAuthRetry(() => this.requestOnce(method, url, body, timeoutMs));
+  }
+
+  /**
+   * Authenticated binary GET (image/attachment downloads) — returns raw bytes
+   * without JSON parsing. No Content-Type header: the payload is arbitrary.
+   * Retries once on 401, like {@link request}.
+   */
+  async requestBuffer(url: string, timeoutMs?: number): Promise<Buffer> {
+    return this.withAuthRetry(() => this.requestBufferOnce(url, timeoutMs));
+  }
+
+  /** Run `fn`, and on a 401 error invalidate the token and retry once. */
+  private async withAuthRetry<T>(fn: () => Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (err) {
+      if ((err as Error).message.includes("-> 401")) {
+        this.accessToken = undefined;
+        this.tokenExpiry = 0;
+        return fn();
+      }
+      throw err;
+    }
+  }
+
+  private async requestOnce(
+    method: "GET" | "POST" | "PATCH" | "DELETE",
+    url: string,
+    body: string | undefined,
+    timeoutMs: number | undefined,
   ): Promise<unknown> {
     const token = await this.getAccessToken();
     const res = await fetch(url, {
@@ -57,11 +91,7 @@ export class ServiceAccountAuth {
     return raw ? (JSON.parse(raw) as unknown) : undefined;
   }
 
-  /**
-   * Authenticated binary GET (image/attachment downloads) — returns raw bytes
-   * without JSON parsing. No Content-Type header: the payload is arbitrary.
-   */
-  async requestBuffer(url: string, timeoutMs?: number): Promise<Buffer> {
+  private async requestBufferOnce(url: string, timeoutMs: number | undefined): Promise<Buffer> {
     const token = await this.getAccessToken();
     const res = await fetch(url, {
       method: "GET",
