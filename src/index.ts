@@ -3,24 +3,20 @@ import http from "node:http";
 import { AgentRouter, type ModelInfo, type SessionInfo, type SwitchModelResult } from "./agent-sessions.js";
 import { ChatClient, MAX_MESSAGE_CHARS } from "./chat-client.js";
 import { loadConfig } from "./config.js";
+import {
+  MARKER_DELAY_MS,
+  MODEL_ACTION,
+  PATCH_DEBOUNCE_MS,
+  RESUME_ACTION,
+  SET_DEFAULT_MODEL_ACTION,
+  THINKING_TEXT,
+  TOOL_STATUS_DELAY_MS,
+} from "./constants.js";
 import { PubSubReceiver } from "./pubsub-receiver.js";
 import type { HandleResult, MessageReceiver } from "./receiver.js";
 import { StateStore } from "./state.js";
 import type { IncomingMessage } from "./types.js";
-
-const THINKING_TEXT = "Thinking…";
-const PATCH_DEBOUNCE_MS = 250;
-/** Delay before posting the placeholder — quick replies never show one. */
-const MARKER_DELAY_MS = 3000;
-/** Delay before showing the running tool's status line — long enough that only
- *  non-trivial commands (compiles, tests, sleeps) show a status. */
-const TOOL_STATUS_DELAY_MS = 2000;
-/** Card action method for the session picker dropdown. */
-const RESUME_ACTION = "resume_session";
-/** Card action method for the model picker dropdown. */
-const MODEL_ACTION = "switch_model";
-/** Card action method for the default-model picker button. */
-const SET_DEFAULT_MODEL_ACTION = "set_default_model";
+import { logger } from "./logger.js";
 
 /**
  * Live streaming markers per conversation: the running turn's handler registers
@@ -403,7 +399,7 @@ function helpCard(): unknown[] {
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  console.log(`[bridge] cwd=${config.cwd}`);
+  logger.info(`[bridge] cwd=${config.cwd}`);
 
   if (config.healthPort > 0) {
     const server = http.createServer((_req, res) => {
@@ -411,7 +407,7 @@ async function main(): Promise<void> {
       res.end("ok");
     });
     server.listen(config.healthPort, "0.0.0.0", () => {
-      console.log(`[health] listening on :${config.healthPort}`);
+      logger.info(`[health] listening on :${config.healthPort}`);
     });
   }
 
@@ -446,7 +442,7 @@ async function main(): Promise<void> {
     // carries the session key it was created for — prefer it when present.
     const actionKey =
       incoming.action?.parameters?.find((p) => p.key === "session")?.value ?? sessionKey;
-    console.log(
+    logger.info(
       `[chat] ${display} [${incoming.message.name ?? "?"}]: ${incoming.eventType === "CARD_CLICKED" ? `card:${incoming.action?.actionMethodName}` : text.slice(0, 120)}`,
     );
 
@@ -457,7 +453,7 @@ async function main(): Promise<void> {
         if (!picked) {
           await client
             .updateMessageCards(incoming.message.name, modelConfirmCard({ ok: false, label: "", error: "No model was selected." }), "No model selected.")
-            .catch((err) => console.error("[chat] card update failed:", (err as Error).message));
+            .catch((err) => logger.error("[chat] card update failed:", (err as Error).message));
           return "ok";
         }
         const [provider, modelId] = picked.split("|");
@@ -466,13 +462,13 @@ async function main(): Promise<void> {
         // notice is posted here — the card is the confirmation.
         const result = await router.switchModel(actionKey, provider ?? "", modelId ?? "");
         if (result.error === "busy") {
-          console.log(`[chat] ${display}: busy, deferring model switch`);
+          logger.info(`[chat] ${display}: busy, deferring model switch`);
           return "busy"; // leave unacked; retried once the session frees up
         }
         await client
           .updateMessageCards(incoming.message.name, modelConfirmCard(result), `Model switch: ${result.ok ? result.label : result.error}`)
-          .catch((err) => console.error("[chat] card update failed:", (err as Error).message));
-        console.log(`[chat] ${display}: model switch ${result.ok ? "-> " + result.label : "failed: " + result.error}`);
+          .catch((err) => logger.error("[chat] card update failed:", (err as Error).message));
+        logger.info(`[chat] ${display}: model switch ${result.ok ? "-> " + result.label : "failed: " + result.error}`);
         return "ok";
       }
       if (incoming.action?.actionMethodName === SET_DEFAULT_MODEL_ACTION) {
@@ -480,15 +476,15 @@ async function main(): Promise<void> {
         if (!picked) {
           await client
             .updateMessageCards(incoming.message.name, defaultModelConfirmCard({ ok: false, label: "", error: "No model was selected." }), "No model selected.")
-            .catch((err) => console.error("[chat] card update failed:", (err as Error).message));
+            .catch((err) => logger.error("[chat] card update failed:", (err as Error).message));
           return "ok";
         }
         const [provider, modelId] = picked.split("|");
         const result = await router.setDefaultModel(provider ?? "", modelId ?? "");
         await client
           .updateMessageCards(incoming.message.name, defaultModelConfirmCard(result), `Default model: ${result.ok ? result.label : result.error}`)
-          .catch((err) => console.error("[chat] card update failed:", (err as Error).message));
-        console.log(`[chat] ${display}: default model ${result.ok ? "-> " + result.label : "failed: " + result.error}`);
+          .catch((err) => logger.error("[chat] card update failed:", (err as Error).message));
+        logger.info(`[chat] ${display}: default model ${result.ok ? "-> " + result.label : "failed: " + result.error}`);
         return "ok";
       }
       if (incoming.action?.actionMethodName === RESUME_ACTION) {
@@ -496,21 +492,21 @@ async function main(): Promise<void> {
         if (!picked) {
           await client
             .updateMessageCards(incoming.message.name, errorCard("No session was selected."), "No session selected.")
-            .catch((err) => console.error("[chat] card update failed:", (err as Error).message));
+            .catch((err) => logger.error("[chat] card update failed:", (err as Error).message));
           return "ok";
         }
         const label = await router.switchSession(actionKey, picked);
         if (label === null) {
-          console.log(`[chat] ${display}: busy, deferring session switch`);
+          logger.info(`[chat] ${display}: busy, deferring session switch`);
           return "busy"; // leave unacked; redelivered once the session frees up
         }
         await client
           .updateMessageCards(incoming.message.name, confirmCard(label), `Resumed session ${label}.`)
-          .catch((err) => console.error("[chat] card update failed:", (err as Error).message));
-        console.log(`[chat] ${display}: resumed session ${label}`);
+          .catch((err) => logger.error("[chat] card update failed:", (err as Error).message));
+        logger.info(`[chat] ${display}: resumed session ${label}`);
         return "ok";
       }
-      console.log(`[chat] ${display}: unhandled card action`);
+      logger.info(`[chat] ${display}: unhandled card action`);
       return "ok";
     }
 
@@ -530,10 +526,10 @@ async function main(): Promise<void> {
       if (router.hasSession(sessionKey)) {
         const current = await router.currentModel(sessionKey);
         await client.createCardMessage(spaceName, modelPickerCard(models, sessionKey, current), "Choose a backend model.", threadName);
-        console.log(`[chat] ${display}: posted model picker (${models.length} models)`);
+        logger.info(`[chat] ${display}: posted model picker (${models.length} models)`);
       } else {
         await client.createCardMessage(spaceName, defaultModelCard(models, router.defaultModel()), "Change the default model for new conversations.", threadName);
-        console.log(`[chat] ${display}: no conversation — posted default-model picker (${models.length} models)`);
+        logger.info(`[chat] ${display}: no conversation — posted default-model picker (${models.length} models)`);
       }
       return "ok";
     }
@@ -555,7 +551,7 @@ async function main(): Promise<void> {
         "Status.",
         threadName,
       );
-      console.log(`[chat] ${display}: posted status card`);
+      logger.info(`[chat] ${display}: posted status card`);
       return "ok";
     }
     if (/^\/session\b/.test(text.trim())) {
@@ -567,7 +563,7 @@ async function main(): Promise<void> {
       }
       const name = await router.getSessionName(sessionKey);
       await client.createCardMessage(spaceName, sessionStatsCard(stats, name), "Session stats.", threadName);
-      console.log(`[chat] ${display}: posted session stats (${stats.totalMessages} messages, $${stats.cost.toFixed(4)})`);
+      logger.info(`[chat] ${display}: posted session stats (${stats.totalMessages} messages, $${stats.cost.toFixed(4)})`);
       return "ok";
     }
     if (/^\/name\b/.test(text.trim())) {
@@ -582,7 +578,7 @@ async function main(): Promise<void> {
             : "This conversation has no session name yet. Use **/name &lt;name&gt;** to set one.",
           threadName,
         );
-        console.log(`[chat] ${display}: queried session name (${current ?? "none"})`);
+        logger.info(`[chat] ${display}: queried session name (${current ?? "none"})`);
         return "ok";
       }
       const set = router.setSessionName(sessionKey, arg);
@@ -595,13 +591,13 @@ async function main(): Promise<void> {
         return "ok";
       }
       await client.sendMessage(spaceName, `Session named: **${escapeHtml(arg)}**`, threadName);
-      console.log(`[chat] ${display}: named session -> ${arg}`);
+      logger.info(`[chat] ${display}: named session -> ${arg}`);
       return "ok";
     }
     if (/^\/help\b/.test(text.trim())) {
       if (router.isBusy(sessionKey)) await router.interrupt(sessionKey);
       await client.createCardMessage(spaceName, helpCard(), "Available commands: /resume, /sessions, /list, /help.", threadName);
-      console.log(`[chat] ${display}: posted help card`);
+      logger.info(`[chat] ${display}: posted help card`);
       return "ok";
     }
     if (/^\/(resume|sessions|list)\b/.test(text.trim())) {
@@ -612,7 +608,7 @@ async function main(): Promise<void> {
         return "ok";
       }
       await client.createCardMessage(spaceName, pickerCard(sessions, sessionKey), "Choose a session to resume.", threadName);
-      console.log(`[chat] ${display}: posted session picker (${sessions.length} sessions)`);
+      logger.info(`[chat] ${display}: posted session picker (${sessions.length} sessions)`);
       return "ok";
     }
 
@@ -641,16 +637,16 @@ async function main(): Promise<void> {
       }
     }
     if (images?.length) {
-      console.log(`[chat] ${display}: ${images.length} image(s) attached${text ? ` with text "${text.slice(0, 60)}"` : ""}`);
+      logger.info(`[chat] ${display}: ${images.length} image(s) attached${text ? ` with text "${text.slice(0, 60)}"` : ""}`);
     } else if (hadAttachments) {
-      console.log(`[chat] ${display}: attachments present but no image could be downloaded`);
+      logger.info(`[chat] ${display}: attachments present but no image could be downloaded`);
     }
     // Nothing usable (no text, no image): tell the user instead of prompting
     // the LLM with an empty message.
     if (!text.trim() && !images?.length) {
       await client
         .sendMessage(spaceName, "I got your message but couldn't read the attachment — only images are supported.", threadName)
-        .catch((err) => console.error("[chat] attachment notice failed:", (err as Error).message));
+        .catch((err) => logger.error("[chat] attachment notice failed:", (err as Error).message));
       return "ok";
     }
 
@@ -662,17 +658,17 @@ async function main(): Promise<void> {
     if (router.isBusy(sessionKey)) {
       const outcome = await router.redirect(sessionKey, text, images);
       if (outcome === "steered") {
-        console.log(`[chat] ${display}: steered into running turn`);
+        logger.info(`[chat] ${display}: steered into running turn`);
         // The reply now covers the steer too, so move its placeholder below the
         // steering message — otherwise the response renders above the steer.
         await markers
           .get(sessionKey)
           ?.relocate()
-          .catch((err) => console.error("[chat] marker relocate failed:", (err as Error).message));
+          .catch((err) => logger.error("[chat] marker relocate failed:", (err as Error).message));
         return "ok";
       }
       if (outcome === "redirected") {
-        console.log(`[chat] ${display}: tool overrun — aborted, redirecting`);
+        logger.info(`[chat] ${display}: tool overrun — aborted, redirecting`);
         // Fall through: the new message becomes a normal prompt.
       }
       // not-busy: race — fall through to a normal prompt below.
@@ -724,7 +720,7 @@ async function main(): Promise<void> {
           // Keep the partial reply where it is (above the steer) as a record
           // of what was being said; only a bare "Thinking…" placeholder is
           // deleted. The below-steer marker carries just the continued stream.
-          console.log(`[chat] steer: kept ${streamed.length} chars of partial reply above the steer`);
+          logger.info(`[chat] steer: kept ${streamed.length} chars of partial reply above the steer`);
         } else {
           await client.deleteMessage(old).catch(() => {});
         }
@@ -742,7 +738,7 @@ async function main(): Promise<void> {
           try {
             await client.updateMessage(markerName, capped);
           } catch (err) {
-            console.error("[chat] relocate carry-over failed:", (err as Error).message);
+            logger.error("[chat] relocate carry-over failed:", (err as Error).message);
           }
         }
       });
@@ -774,7 +770,7 @@ async function main(): Promise<void> {
           try {
             await client.updateMessage(markerName, capped);
           } catch (err) {
-            console.error("[chat] patch failed:", (err as Error).message);
+            logger.error("[chat] patch failed:", (err as Error).message);
           }
         }
       });
@@ -805,7 +801,7 @@ async function main(): Promise<void> {
       // Only show a placeholder if the reply is taking a while — feels like a
       // typing indicator for fast answers (no API exists for the real one).
       markerTimer = setTimeout(() => {
-        ensureMarker().catch((err) => console.error("[chat] marker failed:", (err as Error).message));
+        ensureMarker().catch((err) => logger.error("[chat] marker failed:", (err as Error).message));
       }, MARKER_DELAY_MS);
 
       const reply = await router.handleMessage(
@@ -830,14 +826,14 @@ async function main(): Promise<void> {
       if (reply === null) {
         // Session became busy between the check and the prompt — drop the marker.
         if (markerName) await client.deleteMessage(markerName).catch(() => {});
-        console.log(`[chat] ${display}: busy, deferred`);
+        logger.info(`[chat] ${display}: busy, deferred`);
         return "busy";
       }
 
       const final = reply.trim();
       if (!final) {
         if (markerName) await client.deleteMessage(markerName).catch(() => {});
-        console.log(`[chat] ${display}: empty reply, marker removed`);
+        logger.info(`[chat] ${display}: empty reply, marker removed`);
         return "ok";
       }
 
@@ -865,11 +861,11 @@ async function main(): Promise<void> {
         rest = rest.slice(MAX_MESSAGE_CHARS);
         first = false;
       }
-      console.log(`[chat] ${display}: replied (${final.length} chars)`);
+      logger.info(`[chat] ${display}: replied (${final.length} chars)`);
       return "ok";
     } catch (err) {
       const aborted = (err as Error)?.name === "AbortError";
-      console.error(`[chat] ${display}: handler ${aborted ? "interrupted (implicit stop)" : "error"}:`, (err as Error).message);
+      logger.error(`[chat] ${display}: handler ${aborted ? "interrupted (implicit stop)" : "error"}:`, (err as Error).message);
       if (markerTimer) clearTimeout(markerTimer);
       if (toolTimer) clearTimeout(toolTimer);
       if (aborted && streamed.trim()) {
@@ -882,7 +878,7 @@ async function main(): Promise<void> {
         }
         if (partial) {
           await client.sendMessage(spaceName, partial, threadName).catch((e) =>
-            console.error("[chat] final partial post failed:", (e as Error).message),
+            logger.error("[chat] final partial post failed:", (e as Error).message),
           );
         }
       } else if (markerName) {
@@ -904,7 +900,7 @@ async function main(): Promise<void> {
   );
 
   const shutdown = async (): Promise<void> => {
-    console.log("[bridge] shutting down...");
+    logger.info("[bridge] shutting down...");
     await receiver.stop();
     router.dispose();
     process.exit(0);
@@ -913,10 +909,10 @@ async function main(): Promise<void> {
   process.on("SIGTERM", () => void shutdown());
 
   await receiver.start(handler);
-  console.log("[bridge] running. Ctrl+C to stop.");
+  logger.info("[bridge] running. Ctrl+C to stop.");
 }
 
 main().catch((err) => {
-  console.error("[bridge] fatal:", err);
+  logger.error("[bridge] fatal:", err);
   process.exit(1);
 });

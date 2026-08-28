@@ -1,5 +1,6 @@
 import { ServiceAccountAuth } from "./auth.js";
 import { isAllowed } from "./access.js";
+import { logger } from "./logger.js";
 import type { HandleResult, MessageReceiver } from "./receiver.js";
 import type { StateStore } from "./state.js";
 import type { ChatAttachment, ChatMessage, ChatSpace, IncomingMessage } from "./types.js";
@@ -96,7 +97,7 @@ export class PubSubReceiver implements MessageReceiver {
       JSON.stringify({ maxMessages: 1, returnImmediately: true }),
       PULL_TIMEOUT_MS,
     );
-    console.log(`[pubsub] connected to ${this.subscription}`);
+    logger.info(`[pubsub] connected to ${this.subscription}`);
 
     this.running = true;
     // Long-lived pull loop: one blocking pull in flight at a time. Pub/Sub
@@ -105,7 +106,7 @@ export class PubSubReceiver implements MessageReceiver {
     // When a pull returns (messages, or the idle timeout), the next pull is
     // issued right away.
     void this.pullLoop(handler).catch((err) =>
-      console.error("[pubsub] pull loop failed:", (err as Error).message),
+      logger.error("[pubsub] pull loop failed:", (err as Error).message),
     );
   }
 
@@ -142,7 +143,7 @@ export class PubSubReceiver implements MessageReceiver {
       )) as { receivedMessages?: ReceivedMessage[] };
       received = data.receivedMessages ?? [];
     } catch (err) {
-      console.error("[pubsub] pull failed:", (err as Error).message);
+      logger.error("[pubsub] pull failed:", (err as Error).message);
     } finally {
       // Release immediately: handlers below run CONCURRENTLY, and the next
       // pull may start while they are still streaming. Dedupe claims keep
@@ -179,12 +180,12 @@ export class PubSubReceiver implements MessageReceiver {
       // events are only bounded by space, since they confirm bot cards the
       // bridge itself posted and never run pi tools directly.
       if (!isAllowed(incoming.space.name, this.allowedSpaces)) {
-        console.log(`[pubsub] ${incoming.space.name}: space not in allow-list, dropping`);
+        logger.info(`[pubsub] ${incoming.space.name}: space not in allow-list, dropping`);
         await this.ack([receivedMessage.ackId]);
         return;
       }
       if (incoming.eventType === "MESSAGE" && !isAllowed(incoming.message.senderName, this.allowedUsers)) {
-        console.log(`[pubsub] ${incoming.space.name}: sender not in allow-list, dropping`);
+        logger.info(`[pubsub] ${incoming.space.name}: sender not in allow-list, dropping`);
         await this.ack([receivedMessage.ackId]);
         return;
       }
@@ -209,7 +210,7 @@ export class PubSubReceiver implements MessageReceiver {
         if (result === "busy") {
           // Session is busy: leave the message unacked so Pub/Sub redelivers
           // it later (acts as the per-thread queue). Don't mark processed.
-          console.log(`[pubsub] ${incoming.space.name}: busy, leaving unacked`);
+          logger.info(`[pubsub] ${incoming.space.name}: busy, leaving unacked`);
           return;
         }
         this.state.markProcessed(incoming.space.name, dedupeKey, incoming.message.createTime);
@@ -220,12 +221,12 @@ export class PubSubReceiver implements MessageReceiver {
       } catch (err) {
         // Handler crashed mid-stream: release the claim and stay unacked so
         // Pub/Sub redelivers and we retry.
-        console.error("[pubsub] handler failed, leaving unacked for redelivery:", err);
+        logger.error("[pubsub] handler failed, leaving unacked for redelivery:", err);
       } finally {
         this.processing.delete(dedupeKey);
       }
     } catch (err) {
-      console.error("[pubsub] event failed, leaving unacked for redelivery:", err);
+      logger.error("[pubsub] event failed, leaving unacked for redelivery:", err);
     }
   }
 
@@ -238,7 +239,7 @@ export class PubSubReceiver implements MessageReceiver {
         JSON.stringify({ ackIds }),
       );
     } catch (err) {
-      console.error("[pubsub] ack failed:", (err as Error).message);
+      logger.error("[pubsub] ack failed:", (err as Error).message);
     }
   }
 
@@ -277,7 +278,7 @@ export class PubSubReceiver implements MessageReceiver {
 
     if (event.type === "CARD_CLICKED") {
       // Debug: dump the raw payload (formInputs shape varies by widget/version).
-      console.log(
+      logger.info(
         `[pubsub] CARD_CLICKED action: ${JSON.stringify(event.action)} common: ${JSON.stringify(event.common)}`,
       );
       // Interactive card event (dropdown/button). No text required. The widget
@@ -332,7 +333,7 @@ export class PubSubReceiver implements MessageReceiver {
     if (!message.text && attachments.length === 0) return null;
     if (attachments.length > 0) {
       // Debug: learn the exact attachment shape Google sends in events.
-      console.log(`[pubsub] ${space.name}: message ${message.name} has ${attachments.length} attachment(s): ${JSON.stringify(attachments)}`);
+      logger.info(`[pubsub] ${space.name}: message ${message.name} has ${attachments.length} attachment(s): ${JSON.stringify(attachments)}`);
     }
 
     const chatMessage: ChatMessage = {

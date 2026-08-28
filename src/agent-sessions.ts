@@ -10,6 +10,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
+import { logger } from "./logger.js";
 import type { StateStore } from "./state.js";
 
 /** Minimal structural view of pi messages, so we don't depend on exact exports. */
@@ -324,12 +325,12 @@ export class AgentRouter {
     if (router.stallTimeoutMs > 0 && router.watchdogIntervalMs > 0) {
       router.watchdogTimer = setInterval(() => {
         void router.watchdogTick().catch((err) =>
-          console.error("[watchdog] tick failed:", (err as Error).message),
+          logger.error("[watchdog] tick failed:", (err as Error).message),
         );
       }, router.watchdogIntervalMs);
-      console.log(`[router] watchdog enabled: stall=${router.stallTimeoutMs}ms interval=${router.watchdogIntervalMs}ms`);
+      logger.info(`[router] watchdog enabled: stall=${router.stallTimeoutMs}ms interval=${router.watchdogIntervalMs}ms`);
     } else {
-      console.log("[router] watchdog disabled");
+      logger.info("[router] watchdog disabled");
     }
     return router;
   }
@@ -372,7 +373,7 @@ export class AgentRouter {
     }
 
     if (entry.session.isStreaming) {
-      console.log(`[router] ${sessionKey} busy, skipping message`);
+      logger.info(`[router] ${sessionKey} busy, skipping message`);
       return null;
     }
 
@@ -445,7 +446,7 @@ export class AgentRouter {
         byPath.set(s.path, { label, file: s.path, mtimeMs: s.modified.getTime() });
       }
     } catch (err) {
-      console.error("[router] SessionManager.listAll failed:", (err as Error).message);
+      logger.error("[router] SessionManager.listAll failed:", (err as Error).message);
     }
 
     return [...byPath.values()].sort((a, b) => b.mtimeMs - a.mtimeMs);
@@ -618,7 +619,7 @@ export class AgentRouter {
   async switchSession(sessionKey: string, file: string): Promise<string | null> {
     const entry = this.sessions.get(sessionKey);
     if (entry?.session.isStreaming) {
-      console.log(`[router] ${sessionKey} busy, refusing session switch`);
+      logger.info(`[router] ${sessionKey} busy, refusing session switch`);
       return null;
     }
     const label = path.basename(file).replace(/\.jsonl$/, "");
@@ -635,7 +636,7 @@ export class AgentRouter {
       this.stateStore.setResumeTarget(sessionKey, file);
     }
     this.stateStore.save();
-    console.log(`[router] ${sessionKey} switched to session ${label} -> ${file}`);
+    logger.info(`[router] ${sessionKey} switched to session ${label} -> ${file}`);
     return label;
   }
 
@@ -830,7 +831,7 @@ export class AgentRouter {
       await entry.session.steer(text, images);
       return true;
     } catch (err) {
-      console.error(`[router] ${sessionKey} steer failed:`, (err as Error).message);
+      logger.error(`[router] ${sessionKey} steer failed:`, (err as Error).message);
       entry.pendingSteers.pop();
       return false;
     }
@@ -854,7 +855,7 @@ export class AgentRouter {
         await new Promise((r) => setTimeout(r, 100));
       }
       if (entry.toolsInFlight > 0) {
-        console.log(
+        logger.info(
           `[router] ${sessionKey} tool still running after ${this.steerWaitMs}ms — aborting to redirect`,
         );
         await this.interrupt(sessionKey);
@@ -876,14 +877,14 @@ export class AgentRouter {
   async interrupt(sessionKey: string): Promise<void> {
     const entry = this.sessions.get(sessionKey);
     if (!entry || !entry.session.isStreaming) return;
-    console.log(`[router] ${sessionKey} interrupting current run (implicit stop)`);
+    logger.info(`[router] ${sessionKey} interrupting current run (implicit stop)`);
     await withTimeout(entry.session.abort(), 15_000);
     if (entry.session.isStreaming) {
-      console.log(`[router] ${sessionKey} still streaming after abort — force-resetting`);
+      logger.info(`[router] ${sessionKey} still streaming after abort — force-resetting`);
       await this.forceReset(sessionKey, entry);
       return;
     }
-    console.log(`[router] ${sessionKey} interrupted — aborted turn kept in context`);
+    logger.info(`[router] ${sessionKey} interrupted — aborted turn kept in context`);
   }
 
   /**
@@ -898,13 +899,13 @@ export class AgentRouter {
       if (entry.resetting || !entry.session.isStreaming) continue;
       const stalledMs = now - entry.lastActivityAt;
       if (stalledMs < this.stallTimeoutMs) continue;
-      console.log(
+      logger.info(
         `[watchdog] ${key} stalled ${Math.round(stalledMs / 1000)}s without agent activity — force-resetting`,
       );
       try {
         await this.forceReset(key, entry);
       } catch (err) {
-        console.error(`[watchdog] reset of ${key} failed:`, (err as Error).message);
+        logger.error(`[watchdog] reset of ${key} failed:`, (err as Error).message);
       }
     }
   }
@@ -929,7 +930,7 @@ export class AgentRouter {
       this.sessions.delete(key);
       const reopened = await this.openOrCreateSession(key, key, entry.file);
       this.sessions.set(key, reopened);
-      console.log(`[watchdog] ${key} reset (dropped ${dropped} incomplete entr${dropped === 1 ? "y" : "ies"}), session reopened`);
+      logger.info(`[watchdog] ${key} reset (dropped ${dropped} incomplete entr${dropped === 1 ? "y" : "ies"}), session reopened`);
     } finally {
       entry.resetting = false;
     }
@@ -1017,7 +1018,7 @@ export class AgentRouter {
     // isn't lost; new threads get fresh files.
     if (file === undefined && !fs.existsSync(target) && legacy !== target && fs.existsSync(legacy)) {
       fs.renameSync(legacy, target);
-      console.log(`[router] migrated ${legacy} -> ${target}`);
+      logger.info(`[router] migrated ${legacy} -> ${target}`);
     }
     if (!fs.existsSync(target)) {
       fs.writeFileSync(target, SESSION_HEADER(this.cwd) + "\n");
@@ -1050,7 +1051,7 @@ export class AgentRouter {
         if (pending) pending.delivered = true;
       }
     });
-    console.log(`[router] opened session for ${sessionKey} -> ${target}`);
+    logger.info(`[router] opened session for ${sessionKey} -> ${target}`);
     return entry;
   }
 

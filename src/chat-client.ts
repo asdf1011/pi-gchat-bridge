@@ -1,4 +1,5 @@
 import { ServiceAccountAuth } from "./auth.js";
+import { logger } from "./logger.js";
 
 import type { ChatAttachment, IncomingMessage } from "./types.js";
 
@@ -86,7 +87,7 @@ export class ChatClient {
         const full = (await this.auth.request("GET", `${CHAT_API_BASE}/${meta.name}`, undefined, 15_000)) as ChatAttachment;
         meta = { ...meta, ...full };
       } catch (err) {
-        console.warn("[chat] attachment metadata fetch failed:", (err as Error).message);
+        logger.warn("[chat] attachment metadata fetch failed:", (err as Error).message);
       }
     }
 
@@ -94,7 +95,7 @@ export class ChatClient {
     const mime = meta.contentType?.toLowerCase();
     const isImage = mime ? mime.startsWith("image/") : IMAGE_EXT_RE.test(meta.contentName ?? "");
     if (!isImage) {
-      console.log(`[chat] attachment ${meta.contentName ?? key ?? "?"} (${mime ?? "unknown type"}) is not an image — skipping`);
+      logger.info(`[chat] attachment ${meta.contentName ?? key ?? "?"} (${mime ?? "unknown type"}) is not an image — skipping`);
       return undefined;
     }
     const finalMime = mime ?? mimeFromName(meta.contentName);
@@ -108,18 +109,18 @@ export class ChatClient {
         ? `${MEDIA_API_BASE}/${encodeURIComponent(mediaRef)}?alt=media`
         : undefined;
     if (!url) {
-      console.warn("[chat] attachment has no contentUri or attachmentDataRef; skipping");
+      logger.warn("[chat] attachment has no contentUri or attachmentDataRef; skipping");
       return undefined;
     }
     let bytes: Buffer;
     try {
       bytes = await this.auth.requestBuffer(url, 30_000);
     } catch (err) {
-      console.error("[chat] attachment download failed:", (err as Error).message);
+      logger.error("[chat] attachment download failed:", (err as Error).message);
       return undefined;
     }
     if (bytes.length > ChatClient.MAX_ATTACHMENT_BYTES) {
-      console.warn(`[chat] attachment ${meta.contentName ?? key ?? ""} is ${bytes.length} bytes — skipping (cap ${ChatClient.MAX_ATTACHMENT_BYTES})`);
+      logger.warn(`[chat] attachment ${meta.contentName ?? key ?? ""} is ${bytes.length} bytes — skipping (cap ${ChatClient.MAX_ATTACHMENT_BYTES})`);
       return undefined;
     }
     const result = { data: bytes.toString("base64"), mimeType: finalMime, name: meta.contentName };
@@ -147,7 +148,7 @@ export class ChatClient {
       // Google's Message resource uses `attachment` (SINGULAR) — handle both.
       return data.attachment ?? data.attachments ?? [];
     } catch (err) {
-      console.warn("[chat] messages.get failed:", (err as Error).message);
+      logger.warn("[chat] messages.get failed:", (err as Error).message);
       return [];
     }
   }
