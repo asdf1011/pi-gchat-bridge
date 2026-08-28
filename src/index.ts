@@ -191,8 +191,9 @@ async function main(): Promise<void> {
     }
     if (/^\/status\b/.test(text.trim())) {
       // Read-only: no interrupt (doesn't disturb an in-flight reply). Model,
-      // context occupancy, and token totals are all read from the session file
-      // (or the in-memory session when open), so no session needs opening.
+      // context occupancy, and token totals come from pi's own accounting
+      // (getSessionStats / getContextUsage), which opens the session if it
+      // hasn't been opened yet.
       const model = await router.currentModel(sessionKey);
       const context = await router.sessionContextUsage(sessionKey);
       const usage = await router.sessionUsage(sessionKey);

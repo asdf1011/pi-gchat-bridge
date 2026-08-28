@@ -185,110 +185,6 @@ export interface SessionContext {
   percent: number | null;
 }
 
-/** Minimal shape of a session-file usage record. */
-interface FileUsage {
-  totalTokens?: number;
-  input?: number;
-  output?: number;
-  cacheRead?: number;
-  cacheWrite?: number;
-  cost?: { total?: number };
-}
-/** Minimal shape of a session-file message. */
-interface FileMessage {
-  role?: string;
-  content?: string | { type?: string; text?: string; thinking?: string; name?: string; arguments?: unknown }[];
-  usage?: FileUsage;
-  stopReason?: string;
-  summary?: string;
-  command?: string;
-  output?: string;
-}
-/** Minimal shape of a session-file entry. */
-interface FileEntry {
-  type?: string;
-  message?: FileMessage;
-  usage?: FileUsage;
-}
-
-/** pi's calculateContextTokens: totalTokens, else the in/out/cache sum. */
-export function contextTokensOf(usage: FileUsage): number {
-  const sum = (usage.input ?? 0) + (usage.output ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
-  return usage.totalTokens || sum || 0;
-}
-
-/** Estimate a message's token count using pi's chars/4 heuristic (conservative). */
-export function estimateTokensFile(message: FileMessage): number {
-  const contentChars = (content: FileMessage["content"]): number => {
-    if (typeof content === "string") return content.length;
-    if (Array.isArray(content)) {
-      let chars = 0;
-      for (const block of content) {
-        if (block.type === "text" && block.text) chars += block.text.length;
-        else if (block.type === "image") chars += 4800; // pi's ESTIMATED_IMAGE_CHARS
-      }
-      return chars;
-    }
-    return 0;
-  };
-  let chars = 0;
-  switch (message.role) {
-    case "user":
-    case "custom":
-    case "toolResult":
-      chars = contentChars(message.content);
-      break;
-    case "assistant": {
-      const blocks = Array.isArray(message.content) ? message.content : [];
-      for (const block of blocks) {
-        if (block.type === "text" && block.text) chars += block.text.length;
-        else if (block.type === "thinking" && block.thinking) chars += block.thinking.length;
-        else if (block.type === "toolCall" && block.name) chars += block.name.length + JSON.stringify(block.arguments ?? {}).length;
-      }
-      break;
-    }
-    case "bashExecution":
-      chars = (message.command ?? "").length + (message.output ?? "").length;
-      break;
-    case "branchSummary":
-    case "compactionSummary":
-      chars = (message.summary ?? "").length;
-      break;
-    default:
-      return 0;
-  }
-  return Math.ceil(chars / 4);
-}
-
-/**
- * pi's estimateContextTokens over a list of messages: the last valid
- * assistant usage, plus char-based estimates for anything after it (or a full
- * estimate when no usage exists yet).
- */
-export function estimateContextTokensFile(messages: FileMessage[]): number {
-  let lastUsageIndex = -1;
-  let usageTokens = 0;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (m.role === "assistant" && m.usage && m.stopReason !== "aborted" && m.stopReason !== "error") {
-      const ct = contextTokensOf(m.usage);
-      if (ct > 0) {
-        lastUsageIndex = i;
-        usageTokens = ct;
-        break;
-      }
-    }
-  }
-  if (lastUsageIndex === -1) {
-    let estimated = 0;
-    for (const m of messages) estimated += estimateTokensFile(m);
-    return estimated;
-  }
-  let trailing = 0;
-  for (let i = lastUsageIndex + 1; i < messages.length; i++) trailing += estimateTokensFile(messages[i]);
-  return usageTokens + trailing;
-}
-
 /**
  * Routes incoming Chat messages to a per-thread pi AgentSession.
  *
@@ -700,97 +596,46 @@ export class AgentRouter {
    * memory. Returns undefined when the conversation has no session file.
    */
   async sessionUsage(sessionKey: string): Promise<SessionUsage | undefined> {
-    const file = this.resolvedSessionFile(sessionKey);
-    if (!file) return undefined;
-    const usage: SessionUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
-    try {
-      await readSessionEntries(file, (raw) => {
-        const entry = raw as {
-          type?: string;
-          usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: { total?: number } };
-          message?: { role?: string; usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: { total?: number } } };
-        };
-        const u =
-          entry.type === "compaction" || entry.type === "branch_summary"
-            ? entry.usage
-            : entry.type === "message" && (entry.message?.role === "assistant" || entry.message?.role === "toolResult")
-              ? entry.message.usage
-              : undefined;
-        if (!u) return false;
-        usage.input += u.input ?? 0;
-        usage.output += u.output ?? 0;
-        usage.cacheRead += u.cacheRead ?? 0;
-        usage.cacheWrite += u.cacheWrite ?? 0;
-        usage.cost += u.cost?.total ?? 0;
-        return false;
-      });
-    } catch {
-      // unreadable file — return what we have
-    }
-    return usage;
+    const entry = await this.ensureSession(sessionKey);
+    if (!entry) return undefined;
+    const stats = entry.session.getSessionStats();
+    return {
+      input: stats.tokens.input,
+      output: stats.tokens.output,
+      cacheRead: stats.tokens.cacheRead,
+      cacheWrite: stats.tokens.cacheWrite,
+      cost: stats.cost,
+    };
   }
 
   /**
-   * Current context-window occupancy for a conversation: an estimate of the
-   * tokens the next LLM call will see, the model's window, and percent full.
-   * Mirrors pi's getContextUsage() — the last valid assistant usage after the
-   * latest compaction, plus chars/4 estimates for trailing messages; null
-   * until the next response when compaction happened and no usage exists
-   * after it. Computed from the session file, so it works without an open
-   * session. Returns undefined when there's no session or the model's window
-   * is unknown.
+   * Pi's own context-window occupancy for a conversation: tokens/window/percent
+   * from getContextUsage(). Opens the session if a file exists (the live
+   * accounting lives on the AgentSession). Returns undefined when there's no
+   * session, or pi returns no context yet.
    */
   async sessionContextUsage(sessionKey: string): Promise<SessionContext | undefined> {
-    const file = this.resolvedSessionFile(sessionKey);
-    if (!file) return undefined;
-    const ids = await this.currentModelIds(sessionKey);
-    const model = ids ? this.modelRuntime?.getModel(ids.provider, ids.modelId) : undefined;
-    const window = model?.contextWindow ?? 0;
-    if (window <= 0) return undefined;
+    const entry = await this.ensureSession(sessionKey);
+    if (!entry) return undefined;
+    const cu = entry.session.getContextUsage();
+    if (!cu) return undefined;
+    return { tokens: cu.tokens, window: cu.contextWindow, percent: cu.percent };
+  }
 
-    const entries: FileEntry[] = [];
-    try {
-      await readSessionEntries(file, (raw) => {
-        entries.push(raw as FileEntry);
-        return false;
-      });
-    } catch {
-      // unreadable file
-    }
-
-    let messages: FileMessage[] = entries
-      .map((e) => e.message)
-      .filter((m): m is FileMessage => m !== undefined);
-    // After a compaction, only assistant usage recorded after it is trustworthy
-    // as the current context size.
-    let compactionIndex = -1;
-    for (let i = entries.length - 1; i >= 0; i--) {
-      if (entries[i].type === "compaction") {
-        compactionIndex = i;
-        break;
-      }
-    }
-    if (compactionIndex >= 0) {
-      let hasPostCompactionUsage = false;
-      for (let i = entries.length - 1; i > compactionIndex; i--) {
-        const m = entries[i].message;
-        if (m?.role === "assistant" && m.usage && m.stopReason !== "aborted" && m.stopReason !== "error") {
-          if (contextTokensOf(m.usage) > 0) {
-            hasPostCompactionUsage = true;
-            break;
-          }
-        }
-      }
-      if (!hasPostCompactionUsage) {
-        return { tokens: null, window, percent: null };
-      }
-      messages = entries
-        .slice(compactionIndex + 1)
-        .map((e) => e.message)
-        .filter((m): m is FileMessage => m !== undefined);
-    }
-    const tokens = estimateContextTokensFile(messages);
-    return { tokens, window, percent: (tokens / window) * 100 };
+  /**
+   * Return the in-memory session for a conversation, opening it from its file
+   * if one exists but isn't open yet (e.g. right after a restart or an idle
+   * eviction). Does NOT create a session — returns undefined when the
+   * conversation has no session file. Used by read-only status/stats reads
+   * that need pi's live accounting.
+   */
+  private async ensureSession(sessionKey: string): Promise<SpaceEntry | undefined> {
+    const existing = this.sessions.get(sessionKey);
+    if (existing) return existing;
+    if (!this.hasSession(sessionKey)) return undefined;
+    const opened = await this.openOrCreateSession(sessionKey, sessionKey);
+    this.sessions.set(sessionKey, opened);
+    return opened;
   }
 
   /**

@@ -4,14 +4,9 @@ import fs from "node:fs";
 import {
   AgentRouter,
   contentText,
-  contextTokensOf,
-  estimateContextTokensFile,
-  estimateTokensFile,
   readSessionEntries,
   truncate,
 } from "../src/agent-sessions.js";
-
-// The FileMessage type isn't exported; used structurally here for fixtures.
 
 test("keyFor prefers an app-chosen threadKey", () => {
   assert.equal(AgentRouter.keyFor("spaces/s", "spaces/s/threads/t", "conv-1"), "spaces/s/conv-1");
@@ -43,40 +38,6 @@ test("truncate collapses whitespace and trims", () => {
 
 test("truncate clips long strings to the max length", () => {
   assert.equal(truncate("x".repeat(20), 10), "xxxxxxxxx…");
-});
-
-test("contextTokensOf prefers the explicit totalTokens", () => {
-  assert.equal(contextTokensOf({ totalTokens: 100, input: 10, output: 20, cacheRead: 30, cacheWrite: 40 }), 100);
-});
-
-test("contextTokensOf falls back to the input/output/cache sum", () => {
-  assert.equal(contextTokensOf({ input: 10, output: 20, cacheRead: 30, cacheWrite: 40 }), 100);
-});
-
-test("contextTokensOf returns 0 when nothing is known", () => {
-  assert.equal(contextTokensOf({}), 0);
-});
-
-test("estimateContextTokensFile estimates from chars/4 when there's no usage", () => {
-  const messages = [
-    { role: "user", content: "abcd" }, // 4 chars -> 1
-    { role: "assistant", content: [{ type: "text", text: "efgh" }] }, // 4 chars -> 1
-  ];
-  assert.equal(estimateContextTokensFile(messages), 2);
-});
-
-test("estimateContextTokensFile uses the last assistant usage plus trailing estimate", () => {
-  const messages = [
-    { role: "user", content: "abcd" },
-    { role: "assistant", content: [{ type: "text", text: "efgh" }], usage: { totalTokens: 500 }, stopReason: "end_turn" },
-    { role: "user", content: "ijkl" }, // trailing 4 chars -> 1
-  ];
-  assert.equal(estimateContextTokensFile(messages), 501);
-});
-
-test("estimateTokensFile counts assistant text blocks by chars/4", () => {
-  const estimate = estimateTokensFile({ role: "assistant", content: [{ type: "text", text: "abcdefgh" }] });
-  assert.equal(estimate, 2);
 });
 
 test("readSessionEntries skips unparsable lines and returns parsed entries", async () => {
