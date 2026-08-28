@@ -190,9 +190,11 @@ export class PubSubReceiver implements MessageReceiver {
         return;
       }
 
-      // Dedupe by Pub/Sub messageId when present (unique per publish, so
-      // repeated clicks on the same card message each process once); fall
-      // back to the Chat message name.
+      // Dedupe by Pub/Sub messageId when present (stable across redeliveries
+      // of the same publish) so an unacked message that Pub/Sub redelivers is
+      // processed once; fall back to the Chat message name. NOTE: repeated
+      // user actions (e.g. clicking a card again) are new publishes with new
+      // messageIds and are intentionally processed again.
       incoming.message.messageId = receivedMessage.message?.messageId;
       const dedupeKey = incoming.message.messageId ?? incoming.message.name;
       const spaceState = this.state.getSpaceState(incoming.space.name);
