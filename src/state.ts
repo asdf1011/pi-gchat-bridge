@@ -1,11 +1,10 @@
 import fs from "node:fs";
 
 /**
- * Persists polling cursors per space: which messages we have already handed
- * to pi, plus the last processed createTime (used as a list filter).
+ * Persists per-space dedupe state: which messages we have already handed to
+ * pi. Plus persistent /resume overrides.
  */
 interface SpaceState {
-  lastCreateTime?: string;
   processed: string[];
 }
 
@@ -41,14 +40,11 @@ export class StateStore {
     return fresh;
   }
 
-  markProcessed(spaceName: string, messageName: string, createTime?: string): void {
+  markProcessed(spaceName: string, messageName: string): void {
     const st = this.getSpaceState(spaceName);
     st.processed.push(messageName);
     if (st.processed.length > MAX_PROCESSED_PER_SPACE) {
       st.processed.splice(0, st.processed.length - MAX_PROCESSED_PER_SPACE);
-    }
-    if (createTime && (!st.lastCreateTime || createTime > st.lastCreateTime)) {
-      st.lastCreateTime = createTime;
     }
   }
 
@@ -66,6 +62,10 @@ export class StateStore {
   }
 
   save(): void {
-    fs.writeFileSync(this.file, JSON.stringify(this.state, null, 2));
+    // Write-then-rename: a crash mid-write can't leave a truncated state.json
+    // (whose load() failure would silently reset dedupe + /resume state).
+    const tmp = `${this.file}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(this.state, null, 2));
+    fs.renameSync(tmp, this.file);
   }
 }

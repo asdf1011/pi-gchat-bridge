@@ -213,7 +213,7 @@ export class PubSubReceiver implements MessageReceiver {
           logger.info(`[pubsub] ${incoming.space.name}: busy, leaving unacked`);
           return;
         }
-        this.state.markProcessed(incoming.space.name, dedupeKey, incoming.message.createTime);
+        this.state.markProcessed(incoming.space.name, dedupeKey);
         // Persist before acking so a redelivered message stays deduped even if
         // the ack below fails or the process restarts.
         this.state.save();
