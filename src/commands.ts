@@ -51,13 +51,144 @@ function selectedValue(incoming: IncomingMessage): string | undefined {
   return undefined;
 }
 
+/** A built-in slash command handled by the bridge (not sent to pi). */
+interface SlashCommand {
+  pattern: RegExp;
+  /** Whether to interrupt a running reply before handling (commands are
+   *  explicit user control; read-only ones like /status opt out). */
+  interrupt?: boolean;
+  run: (ctx: CommandContext) => Promise<HandleResult>;
+}
+
+/** Built-in command dispatch, tried in order against the trimmed text. */
+const SLASH_COMMANDS: SlashCommand[] = [
+  {
+    pattern: /^\/model\b/,
+    interrupt: true,
+    run: async ({ client, router, sessionKey, spaceName, threadName, display }) => {
+      const models = await router.listModels();
+      if (models.length === 0) {
+        await client.sendMessage(spaceName, "No models configured.", threadName);
+        return "ok";
+      }
+      // With a conversation, /model switches THIS conversation's model. With
+      // no conversation yet, it just changes the global default for NEW
+      // conversations — starting one here strands the pick on a thread nobody
+      // replies in (and a reply there opens a fresh default-model session).
+      if (router.hasSession(sessionKey)) {
+        const current = await router.currentModel(sessionKey);
+        await client.createCardMessage(spaceName, modelPickerCard(models, sessionKey, current), "Choose a backend model.", threadName);
+        logger.info(`[chat] ${display}: posted model picker (${models.length} models)`);
+      } else {
+        await client.createCardMessage(spaceName, defaultModelCard(models, router.defaultModel()), "Change the default model for new conversations.", threadName);
+        logger.info(`[chat] ${display}: no conversation — posted default-model picker (${models.length} models)`);
+      }
+      return "ok";
+    },
+  },
+  {
+    pattern: /^\/status\b/,
+    // Read-only: no interrupt (doesn't disturb an in-flight reply). Model,
+    // context occupancy, and token totals come from pi's own accounting
+    // (getSessionStats / getContextUsage), which opens the session if it
+    // hasn't been opened yet.
+    run: async ({ client, router, sessionKey, spaceName, threadName, display }) => {
+      const model = await router.currentModel(sessionKey);
+      const context = await router.sessionContextUsage(sessionKey);
+      const usage = await router.sessionUsage(sessionKey);
+      await client.createCardMessage(
+        spaceName,
+        statusCard({
+          model,
+          defaultModel: router.defaultModel(),
+          context,
+          usage,
+        }),
+        "Status.",
+        threadName,
+      );
+      logger.info(`[chat] ${display}: posted status card`);
+      return "ok";
+    },
+  },
+  {
+    pattern: /^\/session\b/,
+    interrupt: true,
+    run: async ({ client, router, sessionKey, spaceName, threadName, display }) => {
+      const stats = router.sessionStats(sessionKey);
+      if (!stats) {
+        await client.sendMessage(spaceName, "No session for this conversation yet — send a message first.", threadName);
+        return "ok";
+      }
+      const name = await router.getSessionName(sessionKey);
+      await client.createCardMessage(spaceName, sessionStatsCard(stats, name), "Session stats.", threadName);
+      logger.info(`[chat] ${display}: posted session stats (${stats.totalMessages} messages, $${stats.cost.toFixed(4)})`);
+      return "ok";
+    },
+  },
+  {
+    pattern: /^\/name\b/,
+    interrupt: true,
+    run: async ({ client, router, sessionKey, spaceName, threadName, display, text }) => {
+      const arg = text.trim().replace(/^\/name\s*/, "").trim();
+      if (!arg) {
+        const current = await router.getSessionName(sessionKey);
+        await client.sendMessage(
+          spaceName,
+          current
+            ? `This conversation's session is named: **${escapeHtml(current)}**`
+            : "This conversation has no session name yet. Use **/name &lt;name&gt;** to set one.",
+          threadName,
+        );
+        logger.info(`[chat] ${display}: queried session name (${current ?? "none"})`);
+        return "ok";
+      }
+      const set = router.setSessionName(sessionKey, arg);
+      if (set === null) {
+        await client.sendMessage(
+          spaceName,
+          "No session for this conversation yet — send a message first, then use /name.",
+          threadName,
+        );
+        return "ok";
+      }
+      await client.sendMessage(spaceName, `Session named: **${escapeHtml(arg)}**`, threadName);
+      logger.info(`[chat] ${display}: named session -> ${arg}`);
+      return "ok";
+    },
+  },
+  {
+    pattern: /^\/help\b/,
+    interrupt: true,
+    run: async ({ client, spaceName, threadName, display }) => {
+      await client.createCardMessage(spaceName, helpCard(), "Available commands: /resume, /sessions, /list, /help.", threadName);
+      logger.info(`[chat] ${display}: posted help card`);
+      return "ok";
+    },
+  },
+  {
+    pattern: /^\/(resume|sessions|list)\b/,
+    interrupt: true,
+    run: async ({ client, router, sessionKey, spaceName, threadName, display }) => {
+      const sessions = await router.listSessions();
+      if (sessions.length === 0) {
+        await client.sendMessage(spaceName, "No sessions found yet.", threadName);
+        return "ok";
+      }
+      await client.createCardMessage(spaceName, pickerCard(sessions, sessionKey), "Choose a session to resume.", threadName);
+      logger.info(`[chat] ${display}: posted session picker (${sessions.length} sessions)`);
+      return "ok";
+    },
+  },
+];
+
 /**
  * Handle a card action or a built-in slash command. Returns a HandleResult when
  * the message was a bridge command (already handled), or null when it isn't —
  * so the caller falls through to a normal pi prompt.
  */
 export async function runCommand(ctx: CommandContext): Promise<HandleResult | null> {
-  const { client, router, incoming, sessionKey, actionKey, spaceName, threadName, display, text } = ctx;
+  const { client, router, incoming, sessionKey, actionKey, display, text } = ctx;
 
   // --- Interactive card events (dropdown selection, buttons) ---
   if (incoming.eventType === "CARD_CLICKED") {
@@ -124,106 +255,11 @@ export async function runCommand(ctx: CommandContext): Promise<HandleResult | nu
   }
 
   // --- Built-in commands (handled by the bridge, not sent to pi) ---
-  // Commands are explicit control: they interrupt any running reply first.
-  if (/^\/model\b/.test(text.trim())) {
-    if (router.isBusy(sessionKey)) await router.interrupt(sessionKey);
-    const models = await router.listModels();
-    if (models.length === 0) {
-      await client.sendMessage(spaceName, "No models configured.", threadName);
-      return "ok";
-    }
-    // With a conversation, /model switches THIS conversation's model. With no
-    // conversation yet, it just changes the global default for NEW
-    // conversations — starting one here strands the pick on a thread nobody
-    // replies in (and a reply there opens a fresh default-model session).
-    if (router.hasSession(sessionKey)) {
-      const current = await router.currentModel(sessionKey);
-      await client.createCardMessage(spaceName, modelPickerCard(models, sessionKey, current), "Choose a backend model.", threadName);
-      logger.info(`[chat] ${display}: posted model picker (${models.length} models)`);
-    } else {
-      await client.createCardMessage(spaceName, defaultModelCard(models, router.defaultModel()), "Change the default model for new conversations.", threadName);
-      logger.info(`[chat] ${display}: no conversation — posted default-model picker (${models.length} models)`);
-    }
-    return "ok";
-  }
-  if (/^\/status\b/.test(text.trim())) {
-    // Read-only: no interrupt (doesn't disturb an in-flight reply). Model,
-    // context occupancy, and token totals come from pi's own accounting
-    // (getSessionStats / getContextUsage), which opens the session if it
-    // hasn't been opened yet.
-    const model = await router.currentModel(sessionKey);
-    const context = await router.sessionContextUsage(sessionKey);
-    const usage = await router.sessionUsage(sessionKey);
-    await client.createCardMessage(
-      spaceName,
-      statusCard({
-        model,
-        defaultModel: router.defaultModel(),
-        context,
-        usage,
-      }),
-      "Status.",
-      threadName,
-    );
-    logger.info(`[chat] ${display}: posted status card`);
-    return "ok";
-  }
-  if (/^\/session\b/.test(text.trim())) {
-    if (router.isBusy(sessionKey)) await router.interrupt(sessionKey);
-    const stats = router.sessionStats(sessionKey);
-    if (!stats) {
-      await client.sendMessage(spaceName, "No session for this conversation yet — send a message first.", threadName);
-      return "ok";
-    }
-    const name = await router.getSessionName(sessionKey);
-    await client.createCardMessage(spaceName, sessionStatsCard(stats, name), "Session stats.", threadName);
-    logger.info(`[chat] ${display}: posted session stats (${stats.totalMessages} messages, $${stats.cost.toFixed(4)})`);
-    return "ok";
-  }
-  if (/^\/name\b/.test(text.trim())) {
-    if (router.isBusy(sessionKey)) await router.interrupt(sessionKey);
-    const arg = text.trim().replace(/^\/name\s*/, "").trim();
-    if (!arg) {
-      const current = await router.getSessionName(sessionKey);
-      await client.sendMessage(
-        spaceName,
-        current
-          ? `This conversation's session is named: **${escapeHtml(current)}**`
-          : "This conversation has no session name yet. Use **/name &lt;name&gt;** to set one.",
-        threadName,
-      );
-      logger.info(`[chat] ${display}: queried session name (${current ?? "none"})`);
-      return "ok";
-    }
-    const set = router.setSessionName(sessionKey, arg);
-    if (set === null) {
-      await client.sendMessage(
-        spaceName,
-        "No session for this conversation yet — send a message first, then use /name.",
-        threadName,
-      );
-      return "ok";
-    }
-    await client.sendMessage(spaceName, `Session named: **${escapeHtml(arg)}**`, threadName);
-    logger.info(`[chat] ${display}: named session -> ${arg}`);
-    return "ok";
-  }
-  if (/^\/help\b/.test(text.trim())) {
-    if (router.isBusy(sessionKey)) await router.interrupt(sessionKey);
-    await client.createCardMessage(spaceName, helpCard(), "Available commands: /resume, /sessions, /list, /help.", threadName);
-    logger.info(`[chat] ${display}: posted help card`);
-    return "ok";
-  }
-  if (/^\/(resume|sessions|list)\b/.test(text.trim())) {
-    if (router.isBusy(sessionKey)) await router.interrupt(sessionKey);
-    const sessions = await router.listSessions();
-    if (sessions.length === 0) {
-      await client.sendMessage(spaceName, "No sessions found yet.", threadName);
-      return "ok";
-    }
-    await client.createCardMessage(spaceName, pickerCard(sessions, sessionKey), "Choose a session to resume.", threadName);
-    logger.info(`[chat] ${display}: posted session picker (${sessions.length} sessions)`);
-    return "ok";
+  const trimmed = text.trim();
+  for (const command of SLASH_COMMANDS) {
+    if (!command.pattern.test(trimmed)) continue;
+    if (command.interrupt && router.isBusy(sessionKey)) await router.interrupt(sessionKey);
+    return command.run(ctx);
   }
 
   return null;
