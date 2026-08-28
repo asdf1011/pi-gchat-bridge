@@ -332,8 +332,13 @@ export class PubSubReceiver implements MessageReceiver {
     // drop them just because `text` is empty.
     if (!message.text && attachments.length === 0) return null;
     if (attachments.length > 0) {
-      // Debug: learn the exact attachment shape Google sends in events.
-      logger.info(`[pubsub] ${space.name}: message ${message.name} has ${attachments.length} attachment(s): ${JSON.stringify(attachments)}`);
+      // Log a concise summary only — the full payload carries multi-KB
+      // thumbnail/download URLs that bloat the log. Debug level so it's
+      // hidden unless LOG_LEVEL=debug.
+      logger.debug(
+        `[pubsub] ${space.name}: message ${message.name} has ${attachments.length} attachment(s): ` +
+          attachments.map((a) => `${a.contentName ?? a.name} (${a.contentType ?? "?"})`).join(", "),
+      );
     }
 
     const chatMessage: ChatMessage = {
