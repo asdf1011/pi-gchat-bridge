@@ -282,3 +282,40 @@ export class ChatClient {
     );
   }
 }
+
+/**
+ * Collect image attachments for an incoming Chat message, ready to hand to pi
+ * as multimodal input. Tries the event's attachment metadata first; when that
+ * yields nothing (event payloads carry only partial data, and its shape
+ * differs by source), falls back to fetching the Message resource.
+ *
+ * Failures are non-fatal — the caller sends the text through without images.
+ */
+export async function collectImageAttachments(
+  client: ChatClient,
+  incoming: IncomingMessage,
+): Promise<{ images: { type: "image"; data: string; mimeType: string }[]; hadAttachments: boolean }> {
+  const images: { type: "image"; data: string; mimeType: string }[] = [];
+  let hadAttachments = (incoming.message.attachments?.length ?? 0) > 0;
+
+  const tryDownload = async (atts: ChatAttachment[]): Promise<void> => {
+    for (const att of atts) {
+      const img = await client.downloadAttachment(att);
+      if (img) images.push({ type: "image", data: img.data, mimeType: img.mimeType });
+    }
+  };
+
+  if (incoming.message.attachments?.length) {
+    await tryDownload(incoming.message.attachments);
+  }
+  // Event carried no attachment data — fetch the Message resource and retry
+  // (messages.get is the authoritative attachment shape).
+  if (!images.length && incoming.message.name) {
+    const fetched = await client.fetchMessageAttachments(incoming.message.name);
+    if (fetched.length > 0) {
+      hadAttachments = true;
+      await tryDownload(fetched);
+    }
+  }
+  return { images, hadAttachments };
+}

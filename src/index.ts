@@ -1,7 +1,7 @@
 import http from "node:http";
 
 import { AgentRouter } from "./agent-sessions.js";
-import { ChatClient } from "./chat-client.js";
+import { ChatClient, collectImageAttachments } from "./chat-client.js";
 import { runCommand } from "./commands.js";
 import { loadConfig } from "./config.js";
 import { PubSubReceiver } from "./pubsub-receiver.js";
@@ -79,35 +79,15 @@ async function main(): Promise<void> {
     // --- Image attachments: download pasted images so they reach the LLM as
     // multimodal input (pi's `images` content blocks, base64). Failures are
     // non-fatal — the text still goes through. ---
-    let images: { type: "image"; data: string; mimeType: string }[] | undefined;
-    let hadAttachments = (incoming.message.attachments?.length ?? 0) > 0;
-    const tryAttachments = async (atts: import("./types.js").ChatAttachment[]): Promise<void> => {
-      for (const att of atts) {
-        const img = await client.downloadAttachment(att);
-        if (img) (images ??= []).push({ type: "image", data: img.data, mimeType: img.mimeType });
-      }
-    };
-    if (incoming.message.attachments?.length) {
-      await tryAttachments(incoming.message.attachments);
-    }
-    // Event carried no attachment data — fetch the Message resource and retry
-    // (the event payload's attachment shape differs by source; messages.get is
-    // the authoritative one).
-    if (!images?.length && incoming.message.name) {
-      const fetched = await client.fetchMessageAttachments(incoming.message.name);
-      if (fetched.length > 0) {
-        hadAttachments = true;
-        await tryAttachments(fetched);
-      }
-    }
-    if (images?.length) {
+    const { images, hadAttachments } = await collectImageAttachments(client, incoming);
+    if (images.length) {
       logger.info(`[chat] ${display}: ${images.length} image(s) attached${text ? ` with text "${text.slice(0, 60)}"` : ""}`);
     } else if (hadAttachments) {
       logger.info(`[chat] ${display}: attachments present but no image could be downloaded`);
     }
     // Nothing usable (no text, no image): tell the user instead of prompting
     // the LLM with an empty message.
-    if (!text.trim() && !images?.length) {
+    if (!text.trim() && !images.length) {
       await client
         .sendMessage(spaceName, "I got your message but couldn't read the attachment — only images are supported.", threadName)
         .catch((err) => logger.error("[chat] attachment notice failed:", (err as Error).message));
@@ -145,7 +125,7 @@ async function main(): Promise<void> {
         sessionKey,
         spaceName,
         text,
-        images,
+        images.length > 0 ? images : undefined,
         (delta) => stream.onDelta(delta),
         (toolName, args) => stream.showTool(toolName, args),
         () => stream.clearTool(),
