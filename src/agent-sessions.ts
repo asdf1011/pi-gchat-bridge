@@ -362,11 +362,6 @@ export class AgentRouter {
   }
 
   /**
-   * Display label for the model currently on a conversation's session (the
-   * last `model_change` entry). Reads the session file so it's correct even
-   * when the session isn't open in memory (e.g. right after a restart).
-   */
-  /**
    * Provider + model id currently on a conversation's session (the last
    * `model_change` entry). Reads the session file so it's correct even when
    * the session isn't open in memory (e.g. right after a restart).
@@ -478,13 +473,11 @@ export class AgentRouter {
 
   /**
    * Session stats for a conversation (aggregated over the WHOLE session file,
-   * including compacted history — i.e. what was actually billed), or null when
-   * the conversation has no session yet.
+   * including compacted history — i.e. what was actually billed), or undefined
+   * when the conversation has no open session.
    */
-  sessionStats(sessionKey: string): import("@earendil-works/pi-coding-agent").SessionStats | null {
-    const entry = this.sessions.get(sessionKey);
-    if (!entry) return null;
-    return entry.session.getSessionStats();
+  sessionStats(sessionKey: string): import("@earendil-works/pi-coding-agent").SessionStats | undefined {
+    return this.sessions.get(sessionKey)?.session.getSessionStats();
   }
 
   /**
