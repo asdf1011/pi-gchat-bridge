@@ -414,8 +414,13 @@ export class AgentRouter {
       return null;
     }
     const label = path.basename(file).replace(/\.jsonl$/, "");
-    const opened = await this.openOrCreateSession(sessionKey, sessionKey, file);
+    // Drop the in-memory entry BEFORE reopening: openOrCreateSession returns
+    // any existing entry as-is, so with the old session still registered it
+    // would hand back the very session being replaced (a silent no-op that
+    // then gets disposed out from under the router).
     const prev = this.sessions.get(sessionKey);
+    this.sessions.delete(sessionKey);
+    const opened = await this.openOrCreateSession(sessionKey, sessionKey, file);
     this.sessions.set(sessionKey, opened);
     prev?.session.dispose();
     // Persist the override so the binding survives restarts. Resuming a
