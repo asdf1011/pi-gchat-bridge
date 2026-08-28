@@ -15,3 +15,6 @@ export const RESUME_ACTION = "resume_session";
 export const MODEL_ACTION = "switch_model";
 /** Card action method for the default-model picker button. */
 export const SET_DEFAULT_MODEL_ACTION = "set_default_model";
+
+/** How long to wait for a session abort to clear before force-resetting (ms). */
+export const SESSION_ABORT_TIMEOUT_MS = 15_000;

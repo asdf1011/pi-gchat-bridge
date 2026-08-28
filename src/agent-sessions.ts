@@ -8,6 +8,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import fs from "node:fs";
 import path from "node:path";
+import { SESSION_ABORT_TIMEOUT_MS } from "./constants.js";
 import { logger } from "./logger.js";
 import {
   contentText,
@@ -577,7 +578,7 @@ export class AgentRouter {
     const entry = this.sessions.get(sessionKey);
     if (!entry || !entry.session.isStreaming) return;
     logger.info(`[router] ${sessionKey} interrupting current run (implicit stop)`);
-    await withTimeout(entry.session.abort(), 15_000);
+    await withTimeout(entry.session.abort(), SESSION_ABORT_TIMEOUT_MS);
     if (entry.session.isStreaming) {
       logger.info(`[router] ${sessionKey} still streaming after abort — force-resetting`);
       await this.forceReset(sessionKey, entry);
@@ -636,7 +637,7 @@ export class AgentRouter {
     try {
       // 1. Abort the stuck run — this kills the tool's process tree. Bounded
       //    so a wedged abort can't block recovery.
-      await withTimeout(entry.session.abort(), 15_000);
+      await withTimeout(entry.session.abort(), SESSION_ABORT_TIMEOUT_MS);
       // 2. Remove any trailing assistant turn(s) that never completed (have
       //    unanswered tool calls) from the file.
       const dropped = truncateIncompleteTail(entry.file);
