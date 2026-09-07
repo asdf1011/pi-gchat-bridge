@@ -15,6 +15,8 @@ import {
   contentText,
   readLastModelIds,
   readLatestDisplayName,
+  seedNotificationFile,
+  sessionFileHasMessagesSync,
   SESSION_HEADER,
   summarizeSessionFile,
   truncate,
@@ -528,6 +530,42 @@ export class AgentRouter {
     const opened = await this.openOrCreateSession(sessionKey, sessionKey);
     this.sessions.set(sessionKey, opened);
     return opened;
+  }
+
+  /**
+   * Seed a NEW conversation's session file with the content of an app-posted
+   * notification thread (bridge /notify endpoint). The bridge is the ONLY
+   * writer of session files, so this refuses when the conversation already
+   * has an open session or any prior messages — including a pre-hash file
+   * (older notifiers/bridge wrote unhashed names; it migrates on first open,
+   * so it counts as populated). No LLM call. Returns true when seeded.
+   */
+  seedNotificationSession(
+    sessionKey: string,
+    opts: { text: string; hint?: string; title?: string },
+  ): boolean {
+    // An open in-memory session means the conversation is live — never append
+    // behind pi's back (its SessionManager cache would go stale and could
+    // rewrite the file from memory on the next flush).
+    if (this.sessions.has(sessionKey)) {
+      logger.info(`[router] ${sessionKey} has an open session — not seeding`);
+      return false;
+    }
+    const target = this.sessionFileFor(sessionKey);
+    if (sessionFileHasMessagesSync(target)) {
+      logger.info(`[router] ${sessionKey} session already has content — not seeding`);
+      return false;
+    }
+    // Pre-hash era file (created by older cron notifiers / bridge): renamed to
+    // `target` on first open, so treat existing content as already seeded.
+    const unhashed = path.join(this.sessionsDir, `${sessionKey.replace(/[^a-zA-Z0-9]/g, "_")}.jsonl`);
+    if (unhashed !== target && sessionFileHasMessagesSync(unhashed)) {
+      logger.info(`[router] ${sessionKey} pre-hash session file found — not seeding`);
+      return false;
+    }
+    seedNotificationFile(target, this.cwd, opts.text, { hint: opts.hint, title: opts.title });
+    logger.info(`[router] seeded notification session ${sessionKey} -> ${target}`);
+    return true;
   }
 
   /**

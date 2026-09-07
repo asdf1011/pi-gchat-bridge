@@ -24,6 +24,8 @@ export interface Config {
   allowedSpaces: string[];
   /** Restrict which users can trigger pi (resource name or ID). Empty = all. */
   allowedUsers: string[];
+  /** Optional shared secret required on POST /notify (Authorization: Bearer …). Empty = no auth. */
+  notifyToken: string;
 }
 
 function required(name: string): string {
@@ -70,5 +72,6 @@ export function loadConfig(): Config {
     sessionIdleMs: Number(process.env.BRIDGE_SESSION_IDLE_MS ?? 0),
     allowedSpaces: listEnv("ALLOWED_SPACES"),
     allowedUsers: listEnv("ALLOWED_USERS"),
+    notifyToken: process.env.BRIDGE_NOTIFY_TOKEN ?? "",
   };
 }

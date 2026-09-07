@@ -250,6 +250,28 @@ export class ChatClient {
   }
 
   /**
+   * Post a message that creates or joins an app-keyed thread (threadKey). Used
+   * by the /notify endpoint so cron notifications land in a thread whose key
+   * the bridge can resolve back to a session (space/threadKey). Returns the
+   * created message name and the thread (name + echoed threadKey).
+   */
+  async createMessageWithThreadKey(
+    spaceName: string,
+    text: string,
+    threadKey: string,
+  ): Promise<{ name: string; threadName: string; threadKey?: string }> {
+    const data = (await this.auth.request(
+      "POST",
+      `${CHAT_API_BASE}/${spaceName}/messages?messageReplyOption=REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD`,
+      JSON.stringify({ text, markupSyntax: MARKUP_SYNTAX_MARKDOWN, thread: { threadKey } }),
+    )) as { name?: string; thread?: { name?: string; threadKey?: string } };
+    if (!data.name || !data.thread?.name) {
+      throw new Error(`createMessageWithThreadKey: response missing message/thread name for threadKey ${threadKey}`);
+    }
+    return { name: data.name, threadName: data.thread.name, threadKey: data.thread.threadKey };
+  }
+
+  /**
    * Show/clear the typing indicator for a space (bot identity).
    *
    * POST https://chat.googleapis.com/v1/{parent=users/app/spaces/*}:setTypingIndicator

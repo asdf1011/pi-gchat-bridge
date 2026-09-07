@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 import crypto from "node:crypto";
-import { type SessionEntry } from "@earendil-works/pi-coding-agent";
+import { SessionManager, type SessionEntry } from "@earendil-works/pi-coding-agent";
 
 /**
  * Reading and mutating pi SESSION FILES lives only here, so the bridge's
@@ -41,6 +41,74 @@ export const SESSION_HEADER = (cwd: string): string =>
     timestamp: new Date().toISOString(),
     cwd,
   });
+
+/**
+ * True when the file exists and contains at least one real message entry
+ * (synchronous; session files are small). A file with only a header — or no
+ * file at all — means the conversation has no content yet.
+ */
+export function sessionFileHasMessagesSync(file: string): boolean {
+  if (!fs.existsSync(file)) return false;
+  try {
+    return fs
+      .readFileSync(file, "utf8")
+      .split("\n")
+      .some((line) => line.trim().length > 0 && line.includes('"type":"message"'));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Seed a NEW conversation's session file with the content of an app-posted
+ * notification thread (bridge /notify endpoint). Writes, via pi's own
+ * SessionManager so the schema can't drift:
+ *   - a user message framing the notification as auto-posted background
+ *     (with an optional retrieval hint, e.g. an email id),
+ *   - an assistant ack — pi only flushes entries to disk once an assistant
+ *     message exists, so this makes the seed durable,
+ *   - a session_info title (clean name in pi's session picker).
+ * No LLM call. The caller is responsible for only seeding conversations that
+ * have no prior content (see sessionFileHasMessagesSync).
+ */
+export function seedNotificationFile(
+  file: string,
+  cwd: string,
+  text: string,
+  opts?: { hint?: string; title?: string },
+): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const sm = SessionManager.open(file, undefined, cwd);
+  const body = [
+    "[Background — an automated cron job posted the notification below to this Google Chat thread; you did not write it.",
+    "Treat it as what the user is replying to when they message in this thread.]",
+    "",
+    text,
+    ...(opts?.hint ? ["", opts.hint] : []),
+  ].join("\n");
+  const ts = new Date().toISOString();
+  // pi's SessionManager is lenient at runtime (only role/content matter); the
+  // declared types additionally require timestamp/api/provider/etc. Cast so the
+  // seed stays minimal — pi's own loader tolerates the sparse shape.
+  type Appendable = Parameters<SessionManager["appendMessage"]>[0];
+  sm.appendMessage(
+    {
+      role: "user",
+      content: [{ type: "text", text: body }],
+      timestamp: ts,
+    } as unknown as Appendable,
+  );
+  sm.appendMessage(
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "Noted — the notification above is in context for this thread." }],
+      timestamp: ts,
+    } as unknown as Appendable,
+  );
+  if (opts?.title) {
+    sm.appendSessionInfo(opts.title.trim().replace(/\s+/g, " ").slice(0, 120));
+  }
+}
 
 /** Extract plain text from pi message content (string or block array). */
 export function contentText(content: unknown): string {

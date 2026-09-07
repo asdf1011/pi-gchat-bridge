@@ -4,6 +4,7 @@ import { AgentRouter } from "./agent-sessions.js";
 import { ChatClient, collectImageAttachments } from "./chat-client.js";
 import { runCommand } from "./commands.js";
 import { loadConfig } from "./config.js";
+import { handleNotify } from "./notify.js";
 import { PubSubReceiver } from "./pubsub-receiver.js";
 import type { HandleResult, MessageReceiver } from "./receiver.js";
 import { StateStore } from "./state.js";
@@ -14,16 +15,6 @@ import { logger } from "./logger.js";
 async function main(): Promise<void> {
   const config = loadConfig();
   logger.info(`[bridge] cwd=${config.cwd}`);
-
-  if (config.healthPort > 0) {
-    const server = http.createServer((_req, res) => {
-      res.writeHead(200, { "Content-Type": "text/plain" });
-      res.end("ok");
-    });
-    server.listen(config.healthPort, "0.0.0.0", () => {
-      logger.info(`[health] listening on :${config.healthPort}`);
-    });
-  }
 
   const client = new ChatClient(config.serviceAccountPath);
   const state = new StateStore(config.stateFile);
@@ -36,6 +27,67 @@ async function main(): Promise<void> {
     config.sessionIdleMs,
     state,
   );
+
+  /**
+   * Local HTTP API (healthcheck + internal endpoints). `/notify` lets the
+   * cron service post notifications THROUGH the bridge — the bridge is the
+   * only writer of Chat messages and session files, so cron never touches
+   * either (see notify.ts). Body reads are capped; responses are JSON.
+   */
+  if (config.healthPort > 0) {
+    const server = http.createServer((req, res) => {
+      void (async () => {
+        const url = new URL(req.url ?? "/", "http://localhost");
+        try {
+          if (req.method === "GET" && (url.pathname === "/healthz" || url.pathname === "/")) {
+            res.writeHead(200, { "Content-Type": "text/plain" });
+            res.end("ok");
+            return;
+          }
+          if (req.method === "POST" && url.pathname === "/notify") {
+            const body = await readBody(req, 1_000_000);
+            if (body === null) {
+              res.writeHead(413, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ ok: false, error: "request body too large" }));
+              return;
+            }
+            let json: unknown;
+            try {
+              json = JSON.parse(body);
+            } catch {
+              res.writeHead(400, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ ok: false, error: "invalid JSON body" }));
+              return;
+            }
+            const { status, json: payload } = await handleNotify(
+              {
+                client,
+                router,
+                allowedSpaces: config.allowedSpaces,
+                notifyToken: config.notifyToken,
+              },
+              json,
+              req.headers.authorization,
+            );
+            res.writeHead(status, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(payload));
+            return;
+          }
+          res.writeHead(404, { "Content-Type": "text/plain" });
+          res.end("not found");
+        } catch (err) {
+          logger.error("[http] request failed:", (err as Error).message);
+          if (!res.headersSent) {
+            res.writeHead(500, { "Content-Type": "text/plain" });
+            res.end("internal error");
+          }
+        }
+      })();
+    });
+    server.listen(config.healthPort, "0.0.0.0", () => {
+      logger.info(`[http] listening on :${config.healthPort} (healthz + /notify)`);
+    });
+  }
 
   /**
    * Handle one incoming Chat message with a live, in-place streaming reply:
@@ -183,3 +235,33 @@ main().catch((err) => {
   logger.error("[bridge] fatal:", err);
   process.exit(1);
 });
+
+/** Read a request body up to `maxBytes`; returns null when the cap is exceeded. */
+function readBody(req: http.IncomingMessage, maxBytes: number): Promise<string | null> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let done = false;
+    req.on("data", (chunk: Buffer) => {
+      if (done) return;
+      size += chunk.length;
+      if (size > maxBytes) {
+        done = true;
+        resolve(null);
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      if (done) return;
+      done = true;
+      resolve(Buffer.concat(chunks).toString("utf8"));
+    });
+    req.on("error", (err) => {
+      if (done) return;
+      done = true;
+      reject(err);
+    });
+  });
+}
