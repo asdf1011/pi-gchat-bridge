@@ -99,35 +99,50 @@ export function seedNotificationFile(
 ): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const sm = SessionManager.open(file, undefined, cwd);
-  const body = [
-    "[Background — an automated cron job posted the notification below to this Google Chat thread; you did not write it.",
-    "Treat it as what the user is replying to when they message in this thread.]",
-    "",
-    text,
-    ...(opts?.hint ? ["", opts.hint] : []),
-  ].join("\n");
+  appendNotificationTurns(sm, text, opts?.hint);
+  if (opts?.title) {
+    sm.appendSessionInfo(opts.title.trim().replace(/\s+/g, " ").slice(0, 120));
+  }
+}
+
+const NOTIFICATION_FRAMING = [
+  "[Background — an automated cron job posted the notification below to this Google Chat thread; you did not write it.",
+  "Treat it as what the user is replying to when they message in this thread.]",
+].join("\n");
+
+const NOTIFICATION_ACK = "Noted — the notification above is in context for this thread.";
+
+/** The framed user-message text for a posted notification (+ optional hint). */
+export function notificationUserText(text: string, hint?: string): string {
+  return [NOTIFICATION_FRAMING, "", text, ...(hint ? ["", hint] : [])].join("\n");
+}
+
+type Appendable = Parameters<SessionManager["appendMessage"]>[0];
+
+/**
+ * Append the [user: framed notification, assistant: ack] turns to an OPEN
+ * SessionManager. Used by seedNotificationFile (fresh conversations) and by
+ * the validated /notify flow after posting (so the session mirrors the
+ * visible Chat thread exactly). pi's SessionManager is lenient at runtime
+ * (only role/content matter); the declared types additionally require
+ * timestamp/api/provider/etc., hence the cast.
+ */
+export function appendNotificationTurns(sm: SessionManager, text: string, hint?: string): void {
   const ts = new Date().toISOString();
-  // pi's SessionManager is lenient at runtime (only role/content matter); the
-  // declared types additionally require timestamp/api/provider/etc. Cast so the
-  // seed stays minimal — pi's own loader tolerates the sparse shape.
-  type Appendable = Parameters<SessionManager["appendMessage"]>[0];
   sm.appendMessage(
     {
       role: "user",
-      content: [{ type: "text", text: body }],
+      content: [{ type: "text", text: notificationUserText(text, hint) }],
       timestamp: ts,
     } as unknown as Appendable,
   );
   sm.appendMessage(
     {
       role: "assistant",
-      content: [{ type: "text", text: "Noted — the notification above is in context for this thread." }],
+      content: [{ type: "text", text: NOTIFICATION_ACK }],
       timestamp: ts,
     } as unknown as Appendable,
   );
-  if (opts?.title) {
-    sm.appendSessionInfo(opts.title.trim().replace(/\s+/g, " ").slice(0, 120));
-  }
 }
 
 /** Extract plain text from pi message content (string or block array). */

@@ -12,6 +12,7 @@ import path from "node:path";
 import { BUSY, SESSION_ABORT_TIMEOUT_MS } from "./constants.js";
 import { logger } from "./logger.js";
 import {
+  appendNotificationTurns,
   contentText,
   readLastCustomEntry as readLastCustomEntryFromFile,
   readLastModelIds,
@@ -566,6 +567,28 @@ export class AgentRouter {
     }
     entry.session.sessionManager.appendCustomEntry(customType, { ...data, at: new Date().toISOString() });
     return true;
+  }
+
+  /**
+   * Append the posted notification into an OPEN session so the thread's
+   * session mirrors the visible Chat thread (same framed user message + ack
+   * as the plain /notify seed). Best-effort: refused when the conversation
+   * isn't open (e.g. a YES retry after a restart) — the validation analysis
+   * already carries the email content. Returns true when appended.
+   */
+  appendNotificationNotice(sessionKey: string, text: string): boolean {
+    const entry = this.sessions.get(sessionKey);
+    if (!entry) {
+      logger.info(`[router] ${sessionKey}: no open session — skipping notification mirror`);
+      return false;
+    }
+    try {
+      appendNotificationTurns(entry.session.sessionManager, text);
+      return true;
+    } catch (err) {
+      logger.error(`[router] ${sessionKey}: appending notification mirror failed:`, (err as Error).message);
+      return false;
+    }
   }
 
   /**

@@ -234,9 +234,13 @@ export async function handleNotify(
     }
   }
 
-  // 3. Verdict YES (or UNCLEAR — fail open) → post, then record the post.
+  // 3. Verdict YES (or UNCLEAR — fail open) → post, then record the post and
+  //    mirror the posted notification into the session (it's open — the
+  //    validation just ran in it) so the thread's context shows what the user
+  //    actually sees in Chat.
   try {
     const { messageName, threadName } = await postText(deps.client, space, text, threadKey);
+    deps.router.appendNotificationNotice(sessionKeyReq, text);
     deps.router.appendCustomEntry(sessionKeyReq, VERDICT_CUSTOM_TYPE, {
       verdict: rec?.verdict ?? "YES",
       reason: String(rec?.reason ?? "posted after validation"),
