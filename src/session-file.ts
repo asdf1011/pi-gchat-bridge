@@ -45,15 +45,19 @@ export const SESSION_HEADER = (cwd: string): string =>
 /**
  * True when the file exists and contains at least one real message entry
  * (synchronous; session files are small). A file with only a header — or no
- * file at all — means the conversation has no content yet.
+ * file at all — means the conversation has no content yet. Parses each line
+ * (instead of substring matching) so compact-JSON formatting or message text
+ * that happens to embed a marker can't false-positive.
  */
 export function sessionFileHasMessagesSync(file: string): boolean {
   if (!fs.existsSync(file)) return false;
   try {
-    return fs
-      .readFileSync(file, "utf8")
-      .split("\n")
-      .some((line) => line.trim().length > 0 && line.includes('"type":"message"'));
+    for (const line of fs.readFileSync(file, "utf8").split("\n")) {
+      if (!line.trim()) continue;
+      const entry = JSON.parse(line) as { type?: string };
+      if (entry.type === "message") return true;
+    }
+    return false;
   } catch {
     return false;
   }
@@ -64,7 +68,7 @@ export function sessionFileHasMessagesSync(file: string): boolean {
  * readable verdict record appended by the /notify validation flow), or
  * undefined when the file is missing / has no such entry.
  */
-export async function readLastCustomEntry(
+export async function readLastCustomEntryFromFile(
   file: string,
   customType: string,
 ): Promise<{ data?: Record<string, unknown> } | undefined> {

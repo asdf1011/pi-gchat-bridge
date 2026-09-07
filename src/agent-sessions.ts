@@ -14,7 +14,7 @@ import { logger } from "./logger.js";
 import {
   appendNotificationTurns,
   contentText,
-  readLastCustomEntry as readLastCustomEntryFromFile,
+  readLastCustomEntryFromFile,
   readLastModelIds,
   readLatestDisplayName,
   seedNotificationFile,
@@ -543,13 +543,12 @@ export class AgentRouter {
     sessionKey: string,
     customType: string,
   ): Promise<{ data?: Record<string, unknown> } | undefined> {
-    const target = this.sessionFileFor(sessionKey);
-    const fromHashed = await readLastCustomEntryFromFile(target, customType);
+    const fromHashed = await readLastCustomEntryFromFile(this.sessionFileFor(sessionKey), customType);
     if (fromHashed) return fromHashed;
-    const unhashed = path.join(this.sessionsDir, `${sessionKey.replace(/[^a-zA-Z0-9]/g, "_")}.jsonl`);
-    if (unhashed !== target) {
-      const fromUnhashed = await readLastCustomEntryFromFile(unhashed, customType);
-      if (fromUnhashed) return fromUnhashed;
+    const legacy = this.legacyFileFor(sessionKey);
+    if (legacy !== this.sessionFileFor(sessionKey)) {
+      const fromLegacy = await readLastCustomEntryFromFile(legacy, customType);
+      if (fromLegacy) return fromLegacy;
     }
     return undefined;
   }
@@ -597,7 +596,9 @@ export class AgentRouter {
    * writer of session files, so this refuses when the conversation already
    * has an open session or any prior messages — including a pre-hash file
    * (older notifiers/bridge wrote unhashed names; it migrates on first open,
-   * so it counts as populated). No LLM call. Returns true when seeded.
+   * so it counts as populated) or a /resume override (the user bound this
+   * conversation to a different file, which would shadow the seed). No LLM
+   * call. Returns true when seeded.
    */
   seedNotificationSession(
     sessionKey: string,
@@ -610,20 +611,27 @@ export class AgentRouter {
       logger.info(`[router] ${sessionKey} has an open session — not seeding`);
       return false;
     }
-    const target = this.sessionFileFor(sessionKey);
-    if (sessionFileHasMessagesSync(target)) {
+    // A /resume override points this conversation at another session file;
+    // openOrCreateSession prefers it, so a seed of the derived file would be
+    // written but never read — refuse rather than shadow the user's choice.
+    const resumed = this.stateStore.getResumeTarget(sessionKey);
+    if (resumed && fs.existsSync(resumed)) {
+      logger.info(`[router] ${sessionKey} has a /resume override (${resumed}) — not seeding`);
+      return false;
+    }
+    if (sessionFileHasMessagesSync(this.sessionFileFor(sessionKey))) {
       logger.info(`[router] ${sessionKey} session already has content — not seeding`);
       return false;
     }
     // Pre-hash era file (created by older cron notifiers / bridge): renamed to
-    // `target` on first open, so treat existing content as already seeded.
-    const unhashed = path.join(this.sessionsDir, `${sessionKey.replace(/[^a-zA-Z0-9]/g, "_")}.jsonl`);
-    if (unhashed !== target && sessionFileHasMessagesSync(unhashed)) {
+    // the hashed name on first open, so treat existing content as seeded.
+    const legacy = this.legacyFileFor(sessionKey);
+    if (legacy !== this.sessionFileFor(sessionKey) && sessionFileHasMessagesSync(legacy)) {
       logger.info(`[router] ${sessionKey} pre-hash session file found — not seeding`);
       return false;
     }
-    seedNotificationFile(target, this.cwd, opts.text, { hint: opts.hint, title: opts.title });
-    logger.info(`[router] seeded notification session ${sessionKey} -> ${target}`);
+    seedNotificationFile(this.sessionFileFor(sessionKey), this.cwd, opts.text, { hint: opts.hint, title: opts.title });
+    logger.info(`[router] seeded notification session ${sessionKey} -> ${this.sessionFileFor(sessionKey)}`);
     return true;
   }
 
@@ -808,7 +816,7 @@ export class AgentRouter {
         this.stateStore.save();
       }
     }
-    const legacySpaceFile = path.join(this.sessionsDir, `${spaceName.replace(/[^a-zA-Z0-9]/g, "_")}.jsonl`);
+    const legacySpaceFile = this.legacyFileFor(spaceName);
     // One-time migrations for pre-hashed session files (whose sanitized names
     // could collide):
     //   1. The pre-parallel bridge kept one session per SPACE; the first
@@ -817,7 +825,7 @@ export class AgentRouter {
     //   2. Thread-keyed files created before the hash suffix are renamed to
     //      the hashed name.
     if (file === undefined && !fs.existsSync(target)) {
-      const unhashed = path.join(this.sessionsDir, `${sessionKey.replace(/[^a-zA-Z0-9]/g, "_")}.jsonl`);
+      const unhashed = this.legacyFileFor(sessionKey);
       if (unhashed !== target && fs.existsSync(unhashed)) {
         fs.renameSync(unhashed, target);
         logger.info(
@@ -863,13 +871,23 @@ export class AgentRouter {
     return entry;
   }
 
+  /**
+   * Pre-hash (unhashed) session file path for a conversation key: the
+   * sanitized key + .jsonl. Older cron notifiers and bridge builds wrote here;
+   * doOpen migrates such files to the hashed name on first open. Kept in one
+   * place so a naming change can't drift across call sites.
+   */
+  private legacyFileFor(sessionKey: string): string {
+    return path.join(this.sessionsDir, `${sessionKey.replace(/[^a-zA-Z0-9]/g, "_")}.jsonl`);
+  }
+
   private sessionFileFor(sessionKey: string): string {
     // The sanitized key alone is NOT injective ("a/b#c" and "a-b-c" both map
     // to "a_b_c"), which would alias two conversations onto one session file.
     // A short hash of the full key makes the mapping collision-proof.
-    const safe = sessionKey.replace(/[^a-zA-Z0-9]/g, "_");
+    const stem = path.basename(this.legacyFileFor(sessionKey), ".jsonl");
     const hash = createHash("sha256").update(sessionKey).digest("hex").slice(0, 8);
-    return path.join(this.sessionsDir, `${safe}-${hash}.jsonl`);
+    return path.join(this.sessionsDir, `${stem}-${hash}.jsonl`);
   }
 
   /** Resolve a conversation's session file, honoring a persistent /resume override. */
