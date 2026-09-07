@@ -60,6 +60,26 @@ export function sessionFileHasMessagesSync(file: string): boolean {
 }
 
 /**
+ * Latest custom entry of `customType` in a session file (e.g. a machine-
+ * readable verdict record appended by the /notify validation flow), or
+ * undefined when the file is missing / has no such entry.
+ */
+export async function readLastCustomEntry(
+  file: string,
+  customType: string,
+): Promise<{ data?: Record<string, unknown> } | undefined> {
+  if (!fs.existsSync(file)) return undefined;
+  let found: { data?: Record<string, unknown> } | undefined;
+  await readSessionEntries(file, (entry) => {
+    if (entry.type === "custom" && entry.customType === customType) {
+      found = { data: (entry.data ?? {}) as Record<string, unknown> };
+    }
+    return false; // keep scanning — later entries win
+  });
+  return found;
+}
+
+/**
  * Seed a NEW conversation's session file with the content of an app-posted
  * notification thread (bridge /notify endpoint). Writes, via pi's own
  * SessionManager so the schema can't drift:

@@ -13,6 +13,7 @@ import { BUSY, SESSION_ABORT_TIMEOUT_MS } from "./constants.js";
 import { logger } from "./logger.js";
 import {
   contentText,
+  readLastCustomEntry as readLastCustomEntryFromFile,
   readLastModelIds,
   readLatestDisplayName,
   seedNotificationFile,
@@ -530,6 +531,41 @@ export class AgentRouter {
     const opened = await this.openOrCreateSession(sessionKey, sessionKey);
     this.sessions.set(sessionKey, opened);
     return opened;
+  }
+
+  /**
+   * Latest custom entry of `customType` for a conversation (checks the hashed
+   * file, then the pre-hash form that migrates on first open), or undefined.
+   * Used by /notify validation to short-circuit already-decided candidates.
+   */
+  async readLastCustomEntry(
+    sessionKey: string,
+    customType: string,
+  ): Promise<{ data?: Record<string, unknown> } | undefined> {
+    const target = this.sessionFileFor(sessionKey);
+    const fromHashed = await readLastCustomEntryFromFile(target, customType);
+    if (fromHashed) return fromHashed;
+    const unhashed = path.join(this.sessionsDir, `${sessionKey.replace(/[^a-zA-Z0-9]/g, "_")}.jsonl`);
+    if (unhashed !== target) {
+      const fromUnhashed = await readLastCustomEntryFromFile(unhashed, customType);
+      if (fromUnhashed) return fromUnhashed;
+    }
+    return undefined;
+  }
+
+  /**
+   * Append a custom (non-context) entry to an OPEN conversation's session —
+   * e.g. the /notify validation verdict. Returns false when the conversation
+   * has no open session (callers open one first via handleMessage/prompt).
+   */
+  appendCustomEntry(sessionKey: string, customType: string, data: Record<string, unknown>): boolean {
+    const entry = this.sessions.get(sessionKey);
+    if (!entry) {
+      logger.warn(`[router] ${sessionKey}: no open session to append ${customType} entry`);
+      return false;
+    }
+    entry.session.sessionManager.appendCustomEntry(customType, { ...data, at: new Date().toISOString() });
+    return true;
   }
 
   /**
