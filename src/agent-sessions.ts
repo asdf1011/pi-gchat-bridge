@@ -6,11 +6,11 @@ import {
   SettingsManager,
   type AgentSession,
 } from "@earendil-works/pi-coding-agent";
-import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { BUSY, SESSION_ABORT_TIMEOUT_MS } from "./constants.js";
 import { logger } from "./logger.js";
+import { keyFor, legacySessionFile, sessionFileFor } from "./session-key.js";
 import {
   appendNotificationTurns,
   contentText,
@@ -166,7 +166,7 @@ export class AgentRouter {
    *   3. space — fallback for non-threaded DMs.
    */
   static keyFor(spaceName: string, threadName?: string, threadKey?: string): string {
-    return threadKey ? `${spaceName}/${threadKey}` : (threadName ?? spaceName);
+    return keyFor(spaceName, threadName, threadKey);
   }
 
   /**
@@ -843,6 +843,22 @@ export class AgentRouter {
       modelRuntime: this.modelRuntime,
       sessionManager: SessionManager.open(target),
     });
+    // createAgentSession loads extensions but does NOT bind them: only pi's
+    // interactive/rpc/print modes call bindExtensions, so a headless SDK host
+    // must do it itself or extension lifecycle events (session_start etc.)
+    // never fire. Binding is what lets extensions re-apply per-conversation
+    // state — e.g. a persisted tool policy — on every open, including
+    // after a restart or idle eviction.
+    try {
+      await session.bindExtensions({
+        onError: (err) =>
+          logger.error(
+            `[router] ${sessionKey} extension "${err.event}" failed (${err.extensionPath}): ${err.error}`,
+          ),
+      });
+    } catch (err) {
+      logger.error(`[router] ${sessionKey} bindExtensions failed:`, (err as Error).message);
+    }
     const entry: SpaceEntry = {
       session,
       file: target,
@@ -878,16 +894,13 @@ export class AgentRouter {
    * place so a naming change can't drift across call sites.
    */
   private legacyFileFor(sessionKey: string): string {
-    return path.join(this.sessionsDir, `${sessionKey.replace(/[^a-zA-Z0-9]/g, "_")}.jsonl`);
+    return legacySessionFile(this.sessionsDir, sessionKey);
   }
 
   private sessionFileFor(sessionKey: string): string {
-    // The sanitized key alone is NOT injective ("a/b#c" and "a-b-c" both map
-    // to "a_b_c"), which would alias two conversations onto one session file.
-    // A short hash of the full key makes the mapping collision-proof.
-    const stem = path.basename(this.legacyFileFor(sessionKey), ".jsonl");
-    const hash = createHash("sha256").update(sessionKey).digest("hex").slice(0, 8);
-    return path.join(this.sessionsDir, `${stem}-${hash}.jsonl`);
+    // Collision-proof: the sanitized key alone can alias distinct
+    // conversations, so a short hash of the full key is appended.
+    return sessionFileFor(this.sessionsDir, sessionKey);
   }
 
   /** Resolve a conversation's session file, honoring a persistent /resume override. */
