@@ -44,12 +44,38 @@ Response: `403` (silent unsupported with `messageReplyOption`).
 **Expected:** `NOTIFICATION_TYPE_SILENT` honored for threaded messages, or an
 alternative way to create a message in a thread without notifying.
 
-**Related:** #292235340 (app-auth capabilities), #316196511 (notification
-control for bots).
+**Related:** #292235340 (app-auth capabilities). (An earlier draft also cited
+#316196511, which turns out to be "Disable Notifications for Instruction
+Changes" — unrelated.)
 
 ---
 
-## Issue 2: PATCHing message text drops MARKUP_SYNTAX_MARKDOWN (markupSyntax is create-only)
+## Issue 2: PATCHing message text drops MARKUP_SYNTAX_MARKDOWN — RESOLVED
+
+**Status: fixed / workable as of Oct 17, 2026.** The Oct 16, 2026 release notes
+announce per-request `markupSyntax` on create *and update*. Verified live: the
+field is honoured when sent in the **body** of a text PATCH
+(`PATCH ?updateMask=text`, body `{"text": …, "markupSyntax":
+"MARKUP_SYNTAX_MARKDOWN"}`) — the response echoes MARKUP_SYNTAX_MARKDOWN and
+`formattedText` keeps the Markdown source.
+
+What still does NOT work (unchanged, still worth reporting):
+
+| Variation | Result |
+|---|---|
+| `updateMask=text,markupSyntax` | 400 "Unsupported path name in message field mask" |
+| `updateMask=markupSyntax` (body only markupSyntax) | 400, same |
+| `updateMask=*` | 200, response says MARKDOWN, but the message is legacy |
+| `updateMask=text`, no markupSyntax in body | 200, resets to MARKUP_SYNTAX_CHAT |
+
+So Markdown on update requires the undocumented combination above; the field
+still isn't a maskable path. Keep the section below as the original report (it
+is the clearest repro for "make markupSyntax patchable").
+
+Implemented in pi-gchat-bridge: `ChatClient.updateMessage()` sends the field in
+the body (commit f7e87f9).
+
+**Original report**
 
 **Title:** Chat API: PATCHing message text resets MARKUP_SYNTAX_MARKDOWN to legacy Chat formatting
 
@@ -93,7 +119,54 @@ links in one message), #428659965 (Markdown tables).
 
 - Both verified against the live API Aug 14, 2026 with a service account
   (`chat.bot` scope).
+- Issue 2 re-verified Oct 17, 2026 (body field works; mask form still 400s).
 - The tracker issues we DID find are already linked from the README
   (Known limitations): tables #428659965, attachments/service account
   #447642391, typing indicators #166140696, personal Gmail #322187111
   (not referenced in the README — see review note).
+
+---
+
+## Issue 3: no way to notify users when an existing message is updated
+
+**Title:** Chat API: message updates can't notify recipients — bots must post a new message to ping "reply ready"
+
+**Component:** 350158 (Google Chat API)
+
+**Summary:**
+Notifications are only produced by `spaces.messages.create` (via
+`createMessageNotificationOptions`, incl. NOTIFICATION_TYPE_SILENT to suppress
+them). `spaces.messages.patch` / `update` accept only `updateMask` and
+`allowMissing` — there is no notification parameter at all, and a PATCH never
+notifies. `allowMissing: true` even creates a message, and per the docs the mask
+is ignored, but the request still offers no notification control.
+
+Consequence for streaming bots (agent/coding bridges): to watch a reply stream
+in, the bot patches a placeholder — usually created silently to avoid ping
+noise. When the answer is ready there is no way to notify, so the bot must post
+the completed text as a *new* message and delete the placeholder. That leaves a
+"Message deleted" stub in the thread and doubles the message count per reply.
+The only alternative is to keep the placeholder and never notify, which is
+worse (the user has to sit in the chat and wait).
+
+**Ask:** an update-time notification control — e.g.
+`updateMessageNotificationOptions.notificationType` on PATCH (FORCED /
+NOTIFICATION_TYPE_SILENT / default), so a bot can stream silently into a
+placeholder and notify once when it finishes. Failing that, `allowMissing` +
+client-assigned IDs would be a usable workaround only if the create-through-
+PATCH path could notify (`allowMissing` currently can't create a notifying
+message in a thread either, since silent 403s with `messageReplyOption` see
+Issue 1).
+
+**Workaround used by pi-gchat-bridge:** create the answer as a new message (the
+ping), then delete the placeholder; if that create fails, keep the placeholder
+and patch the answer into it (no ping, but no lost reply). Configurable with
+`BRIDGE_REPLACE_ON_FINISH`.
+
+**Related:** Issue 1 above (silent + threads), #166140696 (typing indicators —
+same family of "let a bot show progress without spamming"), #428659965 (tables).
+
+**Not the same thing:** editing a message in the Chat client also sends no
+notification (Google Chat Community thread 374000881) — that's user-facing
+behaviour, not this API gap.
+
