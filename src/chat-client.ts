@@ -162,10 +162,12 @@ export class ChatClient {
    * legacy Chat `*bold*` syntax. Tables are NOT in the supported Markdown
    * subset.
    *
-   * NOTE (verified Aug 2026): `markupSyntax` is create-only — any PATCH that
-   * updates `text` resets the message to legacy CHAT syntax (and `markupSyntax`
-   * is not a valid `updateMask` path). That's why the streaming placeholder is
-   * replaced with a fresh MARKDOWN message when done.
+   * NOTE (verified Oct 2026): Markdown also survives a text PATCH when
+   * `markupSyntax` is included in the PATCH body — see {@link updateMessage}.
+   * A PATCH without it resets the message to legacy CHAT syntax. An app-level
+   * default syntax can also be set on the Chat API Configuration page in the
+   * Cloud console (GA Oct 16, 2026), but we keep sending the field explicitly
+   * so rendering doesn't depend on console state.
    *
    * `opts.silent` sends the message without a push notification and without
    * marking the space unread (app auth, GA since May 8, 2026). NOTE (verified
@@ -230,12 +232,24 @@ export class ChatClient {
     );
   }
 
-  /** Replace the text of an existing bot message (used for streaming replies). */
+  /**
+   * Replace the text of an existing bot message (used for streaming replies).
+   *
+   * `markupSyntax` goes in the BODY while only `text` is in the `updateMask` —
+   * that keeps the message in Markdown syntax, so the streamed placeholder
+   * renders real Markdown instead of legacy Chat syntax.
+   *
+   * Verified Oct 2026: the body field is honoured (the PATCH response echoes
+   * MARKUP_SYNTAX_MARKDOWN, `formattedText` keeps the Markdown source), while
+   * putting it in the mask (`text,markupSyntax` or `markupSyntax` alone) still
+   * 400s with "Unsupported path name in message field mask", and omitting it
+   * drops the message back to CHAT syntax.
+   */
   async updateMessage(messageName: string, text: string): Promise<void> {
     await this.auth.request(
       "PATCH",
       `${CHAT_API_BASE}/${messageName}?updateMask=text`,
-      JSON.stringify({ text }),
+      JSON.stringify({ text, markupSyntax: MARKUP_SYNTAX_MARKDOWN }),
     );
   }
 

@@ -26,6 +26,13 @@ export interface Config {
   allowedUsers: string[];
   /** Optional shared secret required on POST /notify (Authorization: Bearer …). Empty = no auth. */
   notifyToken: string;
+  /**
+   * Streaming placeholder: post a fresh final message and delete the placeholder
+   * (true, the historical behaviour — costs a "Message deleted" stub but the
+   * final create is the notification), or keep the patched placeholder as the
+   * answer (false — no stub, renders Markdown live).
+   */
+  replaceOnFinish: boolean;
 }
 
 function required(name: string): string {
@@ -73,5 +80,6 @@ export function loadConfig(): Config {
     allowedSpaces: listEnv("ALLOWED_SPACES"),
     allowedUsers: listEnv("ALLOWED_USERS"),
     notifyToken: process.env.BRIDGE_NOTIFY_TOKEN ?? "",
+    replaceOnFinish: (process.env.BRIDGE_REPLACE_ON_FINISH ?? "1") !== "0",
   };
 }

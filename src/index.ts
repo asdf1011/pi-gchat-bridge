@@ -169,7 +169,9 @@ async function main(): Promise<void> {
       }
       // not-busy: race — fall through to a normal prompt below.
     }
-    const stream = new ReplyStream(client, spaceName, threadName, display);
+    const stream = new ReplyStream(client, spaceName, threadName, display, {
+      replaceOnFinish: config.replaceOnFinish,
+    });
     stream.register(sessionKey);
 
     try {

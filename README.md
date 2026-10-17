@@ -55,8 +55,10 @@ That's it — the bot now answers messages in any space it's installed in.
 ## How it behaves
 
 - **Live streaming replies** — after a short delay a "Thinking…" placeholder
-  is posted and **patched in place** as pi generates the answer, so you watch
-  the reply appear live.
+  is posted and **patched in place** as pi generates the answer, so you watch the
+  reply appear live. The patched text is sent with `markupSyntax: MARKDOWN`, so
+  Markdown renders *while* it streams (code fences, bold, lists), not just at the
+  end.
 - **One pi session per thread** — conversations persist across bridge
   restarts (JSONL files under `sessions/`, keyed by thread; non-threaded DMs
   key by space). Threads are fully independent conversations. See
@@ -119,6 +121,7 @@ That's it — the bot now answers messages in any space it's installed in.
 | `BRIDGE_SESSION_IDLE_MS` | `0` | Evict an idle, non-streaming session from memory after this long (0 disables) |
 | `ALLOWED_SPACES` | — | Comma-separated spaces (name or ID) the bridge responds in; empty = all |
 | `ALLOWED_USERS` | — | Comma-separated users (name or ID) allowed to trigger pi; empty = anyone |
+| `BRIDGE_REPLACE_ON_FINISH` | `1` | `1`: post the final answer as a new message (the completion notification), then delete the streaming placeholder (leaves a "Message deleted" stub). `0`: keep the patched placeholder as the answer (no stub; the notification is the one posted when the placeholder appears). |
 
 ## Testing
 
@@ -180,23 +183,33 @@ work around them without external pieces:
   no table widget either. Tracked upstream:
   [issue 428659965](https://issuetracker.google.com/issues/428659965).
 
-- **Streamed placeholders can't render Markdown.** `markupSyntax` is
-  create-only — a text PATCH resets a message to legacy Chat syntax and the
-  field isn't a valid `updateMask` path (verified Aug 2026). The live
-  "Thinking…" placeholder is therefore deleted and replaced by a fresh
-  Markdown message when the reply is done, leaving a "Message deleted" stub
-  in the thread.
+- **Streamed placeholders render Markdown (Oct 2026).** A text PATCH keeps the
+  message in Markdown syntax as long as `markupSyntax` is sent **in the body**
+  (`updateMask=text`); only the field-mask form (`updateMask=text,markupSyntax`
+  or `updateMask=markupSyntax`) still 400s with "Unsupported path name in message
+  field mask". Send a PATCH *without* the field and the message drops back to
+  legacy Chat syntax.
 
-- **Threaded conversations get several notifications per reply.** In a
+- **The "Message deleted" stub is a notification trade-off.** Notifications fire
+  on message *creation*, not on a PATCH (with app auth there is no other
+  notify-on-update hook), so with `BRIDGE_REPLACE_ON_FINISH=1` (default) the
+  answer is posted as a new message — that create is the "reply is ready" ping —
+  and the placeholder is deleted afterwards, which leaves the stub. The answer
+  is created *before* the placeholder is deleted, so a failed create falls back
+  to keeping the streamed placeholder as the answer instead of losing the reply.
+  With `BRIDGE_REPLACE_ON_FINISH=0` the placeholder becomes the answer (no stub,
+  no duplicate message), but the ping is the one emitted when "Thinking…"
+  appears — and in a top-level conversation the placeholder is then *not* sent
+  silent, otherwise a slow reply would arrive with no notification at all.
+
+- **Threaded conversations get more than one notification per reply.** In a
   thread you'll get a ping for the "Thinking…" placeholder, another for the
-  relocated placeholder after a steering message, and one for the final
-  answer — and these can appear even when the Chat window has focus. The
-  bridge creates the placeholder silent where it can, but Google's API
-  rejects `silent` for threaded messages (403 when combined with
-  `messageReplyOption`, verified Aug 2026) and message thread placement
-  isn't patchable, so a silent message inside an existing thread isn't
-  possible. Top-level (non-threaded) conversations get exactly one
-  notification — the final answer.
+  relocated placeholder after a steering message, and — with the default
+  `BRIDGE_REPLACE_ON_FINISH=1` — one for the final answer. Google's API rejects
+  `silent` for threaded messages (403 when combined with `messageReplyOption`,
+  verified Aug 2026) and thread placement isn't patchable, so a silent message
+  inside an existing thread isn't possible. Top-level (non-threaded)
+  conversations get exactly one notification.
 
 - **Bots can't upload media attachments.** The `attachments:upload`
   (`media.upload`) endpoint rejects service-account auth outright

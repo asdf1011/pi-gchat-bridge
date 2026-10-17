@@ -13,25 +13,33 @@ import { logger } from "./logger.js";
 export const markers = new Map<string, { owner: object; relocate: () => Promise<void> }>();
 
 /** One-line status shown under the stream while a tool is running (e.g. the command).
- *  The placeholder is PATCHed, so it renders legacy Chat syntax only — backtick
- *  monospace is the closest to a code block; the final answer renders real
- *  Markdown. Inner backticks are stripped so the wrap can't break. */
+ *  The placeholder is PATCHed with `markupSyntax: MARKDOWN` (verified Oct 2026),
+ *  so this renders as real Markdown: backtick monospace for the command, italic
+ *  for the label. Inner backticks are stripped so the span can't break. */
 export function toolStatusLine(toolName: string, args: unknown): string {
   const a = (args ?? {}) as Record<string, unknown>;
   const command = typeof a.command === "string" ? a.command.trim().replace(/\s+/g, " ") : "";
   const path = typeof a.path === "string" ? a.path.trim() : "";
   const detail = (command || path).replace(/`/g, "").slice(0, 140);
-  // Legacy Chat syntax: "Running" is _italic_ (underscores), the command stays
-  // in `monospace` backticks.
   const label = command ? "Running" : `Running ${toolName}`;
   return detail ? `_${label}:_ \`${detail}\`` : `_${label}_…`;
+}
+
+/** Split `text` into Chat's per-message character cap, without losing anything. */
+export function splitMessage(text: string, max: number = MAX_MESSAGE_CHARS): string[] {
+  const chunks: string[] = [];
+  for (let i = 0; i < text.length; i += max) chunks.push(text.slice(i, i + max));
+  return chunks;
 }
 
 /**
  * Per-message streaming state: posts a "Thinking…" placeholder, patches it in
  * place as the reply streams in, relocates it below a steering message, and
- * replaces it with a fresh Markdown message when done (markupSyntax is
- * create-only, so a PATCH can't render Markdown).
+ * either keeps it as the final answer (default) or replaces it with a fresh
+ * Markdown message when done (`replaceOnFinish`, the pre-Oct-2026 behaviour).
+ *
+ * Both modes send Markdown-syntax PATCHes now (`markupSyntax` in the body —
+ * see ChatClient.updateMessage), so the streamed text renders properly.
  *
  * A new instance is created per incoming message. Register it with the
  * conversation key so the steering path can relocate the placeholder, and
@@ -47,13 +55,18 @@ export class ReplyStream {
   private relocateChain: Promise<void> = Promise.resolve();
   private readonly owner: object = {};
   private streamed = "";
+  /** Post a fresh message with the final answer instead of keeping the patched placeholder. */
+  private readonly replaceOnFinish: boolean;
 
   constructor(
     private client: ChatClient,
     private spaceName: string,
     private threadName: string | undefined,
     private display: string,
-  ) {}
+    opts: { replaceOnFinish?: boolean } = {},
+  ) {
+    this.replaceOnFinish = opts.replaceOnFinish ?? true;
+  }
 
   /** Register in the shared markers map and start the placeholder delay timer. */
   register(sessionKey: string): void {
@@ -102,34 +115,74 @@ export class ReplyStream {
     if (this.markerName) await this.client.deleteMessage(this.markerName).catch(() => {});
   }
 
-  /** Post the final answer: replace the placeholder (if any), then any overflow. */
+  /** Post the final answer: either keep the patched placeholder, or replace it. */
   async finish(final: string): Promise<void> {
     this.clearTimers();
     // Show the final text (in the placeholder if one exists), then post overflow.
     this.streamed = final;
-    // Replace the streamed placeholder with a fresh message: `markupSyntax`
-    // is create-only (any text PATCH resets the message to legacy CHAT
-    // syntax — verified Aug 2026), so the placeholder can't render Markdown.
-    // The placeholder is silent where the API allows, so this final create
-    // is the single notification that the answer is ready.
-    if (this.markerName) {
-      await this.patchNow();
-      await this.client.deleteMessage(this.markerName).catch(() => {});
+    const chunks = splitMessage(final);
+
+    if (chunks.length === 0) {
+      if (this.markerName) await this.client.deleteMessage(this.markerName).catch(() => {});
+      return;
     }
-    // The first chunk IS the answer (it notifies). Overflow chunks would
-    // ideally be silent so long replies don't re-notify per 4000-char spill,
-    // but NOTIFICATION_TYPE_SILENT 403s when combined with messageReplyOption
-    // (threaded replies — verified Aug 2026); silent only works for top-level
-    // creates, so threaded overflow posts normally.
-    let rest = final;
-    let first = true;
-    while (rest.length > 0) {
-      const silent = !first && !this.threadName ? { silent: true } : undefined;
-      await this.client.sendMessage(this.spaceName, rest.slice(0, MAX_MESSAGE_CHARS), this.threadName, silent);
-      rest = rest.slice(MAX_MESSAGE_CHARS);
-      first = false;
+
+    if (this.replaceOnFinish) {
+      // Notifications fire on create, not on PATCH, so an "answer is ready" ping
+      // means the answer must be a new message — and the placeholder then has to
+      // go, leaving a "Message deleted" stub. That stub is the price of the
+      // completion ping (there is no other notify-on-update hook with app auth).
+      //
+      // Post first, delete second: if the create fails, the streamed text is
+      // still on screen and we keep the placeholder as the answer instead of
+      // losing the reply.
+      let posted = false;
+      try {
+        await this.client.sendMessage(this.spaceName, chunks[0], this.threadName);
+        posted = true;
+      } catch (err) {
+        logger.error("[chat] final post failed — keeping the streamed placeholder:", (err as Error).message);
+      }
+      if (posted) {
+        await this.postChunks(chunks, 1, { firstNotifies: false });
+        if (this.markerName) await this.client.deleteMessage(this.markerName).catch(() => {});
+      } else if (this.markerName) {
+        // Fallback: the placeholder becomes the answer (no ping, but no loss).
+        await this.patchText(chunks[0]);
+        await this.postChunks(chunks, 1, { firstNotifies: false }).catch((e) =>
+          logger.error("[chat] overflow post failed:", (e as Error).message),
+        );
+      }
+      this.markerName = undefined;
+    } else {
+      // In-place: the placeholder becomes the answer. Markdown survives the
+      // PATCH now, so there's no delete+recreate and no "Message deleted" stub.
+      let start = 0;
+      if (this.markerName) {
+        if (await this.patchText(chunks[0])) {
+          start = 1;
+        } else {
+          // PATCH failed (or Markdown wasn't honoured) — fall back to replace
+          // so the answer is still delivered.
+          await this.client.deleteMessage(this.markerName).catch(() => {});
+          this.markerName = undefined;
+        }
+      }
+      await this.postChunks(chunks, start, { firstNotifies: start === 0 });
     }
     logger.info(`[chat] ${this.display}: replied (${final.length} chars)`);
+  }
+
+  /**
+   * Post `chunks[start..]` as new messages. `firstNotifies` marks whether the
+   * first posted chunk is the one that should notify (only true when nothing
+   * was patched in place); later chunks are silent where the API allows it.
+   */
+  private async postChunks(chunks: string[], start: number, opts: { firstNotifies: boolean }): Promise<void> {
+    for (let i = start; i < chunks.length; i++) {
+      const silent = !this.threadName && !(opts.firstNotifies && i === start) ? { silent: true } : undefined;
+      await this.client.sendMessage(this.spaceName, chunks[i], this.threadName, silent);
+    }
   }
 
   /** Handle an interrupt/error; keep a partial reply visible for aborts. */
@@ -137,6 +190,12 @@ export class ReplyStream {
     if (this.markerTimer) clearTimeout(this.markerTimer);
     if (this.toolTimer) clearTimeout(this.toolTimer);
     if (aborted && this.streamed.trim()) {
+      if (this.markerName && !this.replaceOnFinish) {
+        // The placeholder already holds the partial reply as Markdown — keep it.
+        this.statusText = undefined;
+        await this.patchNow();
+        return;
+      }
       // Implicit stop: keep the partial reply visible, but replace the
       // streamed placeholder with a fresh message so it renders as Markdown.
       const partial = this.streamed.trim().slice(0, MAX_MESSAGE_CHARS);
@@ -185,7 +244,7 @@ export class ReplyStream {
       // streamed AFTER the steer — the frozen message above already holds
       // the rest. The final answer posted at the end is the complete text.
       this.streamed = "";
-      const silent = !this.threadName ? { silent: true } : undefined;
+      const silent = !this.threadName && this.replaceOnFinish ? { silent: true } : undefined;
       this.markerName = await this.client.createMessage(this.spaceName, THINKING_TEXT, this.threadName, silent);
       const capped = this.displayText();
       if (capped) {
@@ -202,10 +261,26 @@ export class ReplyStream {
   /** Create the placeholder on demand (called by the delay timer). */
   private async ensureMarker(): Promise<void> {
     if (this.markerName) return;
-    const silent = !this.threadName ? { silent: true } : undefined;
+    // In replace mode the placeholder is silent where allowed and the final
+    // create notifies. In in-place mode the placeholder IS the answer, so it
+    // must be the thing that notifies (otherwise a slow top-level reply would
+    // arrive with no ping at all).
+    const silent = !this.threadName && this.replaceOnFinish ? { silent: true } : undefined;
     this.markerName = await this.client.createMessage(this.spaceName, THINKING_TEXT, this.threadName, silent);
     // A tool is already running — show its status right away.
     if (this.statusText) await this.patchNow();
+  }
+
+  /** PATCH the placeholder's text (Markdown); returns false when the call fails. */
+  private async patchText(text: string): Promise<boolean> {
+    if (!text || !this.markerName) return false;
+    try {
+      await this.client.updateMessage(this.markerName, text);
+      return true;
+    } catch (err) {
+      logger.error("[chat] patch failed:", (err as Error).message);
+      return false;
+    }
   }
 
   /** Serialized placeholder update: only one PATCH in flight at a time. */
@@ -213,13 +288,7 @@ export class ReplyStream {
     this.patchChain = this.patchChain.then(async () => {
       this.patchTimer = undefined;
       const capped = this.displayText();
-      if (capped && this.markerName) {
-        try {
-          await this.client.updateMessage(this.markerName, capped);
-        } catch (err) {
-          logger.error("[chat] patch failed:", (err as Error).message);
-        }
-      }
+      if (capped && this.markerName) await this.patchText(capped);
     });
     return this.patchChain;
   }
