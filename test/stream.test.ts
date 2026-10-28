@@ -27,3 +27,20 @@ test("toolStatusLine falls back to the tool name when there is no command", () =
 test("toolStatusLine strips backticks so the code span can't break", () => {
   assert.equal(toolStatusLine("bash", { command: "echo `x`" }), "_Running:_ `echo x`");
 });
+
+test("splitMessage prefers a newline boundary", () => {
+  const text = "aaaa\nbbbb\ncccc"; // 14 chars
+  assert.deepEqual(splitMessage(text, 10), ["aaaa\nbbbb", "cccc"]);
+});
+
+test("splitMessage closes and reopens a fenced code block across the cut", () => {
+  const text = ["```", "line one", "line two", "line three", "```"].join("\n");
+  const chunks = splitMessage(text, 20);
+  assert.ok(chunks.length > 1);
+  for (const chunk of chunks) {
+    const fences = chunk.split("\n").filter((l) => l.trim() === "```").length;
+    assert.equal(fences % 2, 0, `unbalanced fence in ${JSON.stringify(chunk)}`);
+  }
+  const codeLines = chunks.join("\n").split("\n").filter((l) => l.trim() !== "```");
+  assert.deepEqual(codeLines, ["line one", "line two", "line three"]);
+});

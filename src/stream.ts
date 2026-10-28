@@ -1,5 +1,6 @@
 import { ChatClient, MAX_MESSAGE_CHARS } from "./chat-client.js";
 import { MARKER_DELAY_MS, PATCH_DEBOUNCE_MS, THINKING_TEXT, TOOL_STATUS_DELAY_MS } from "./constants.js";
+import { toChatMarkdown } from "./chat-markdown.js";
 import { logger } from "./logger.js";
 
 /**
@@ -25,10 +26,43 @@ export function toolStatusLine(toolName: string, args: unknown): string {
   return detail ? `_${label}:_ \`${detail}\`` : `_${label}_…`;
 }
 
-/** Split `text` into Chat's per-message character cap, without losing anything. */
+/** Opening fence line (``` or ~~~), used to keep chunks inside valid code blocks. */
+const FENCE_LINE_RE = /^\s{0,3}(`{3,}|~{3,})/;
+
+/** The still-open fence run at the end of `text`, if any. */
+function openFence(text: string): string | undefined {
+  let open: string | undefined;
+  for (const line of text.split("\n")) {
+    const m = FENCE_LINE_RE.exec(line);
+    if (!m) continue;
+    if (!open) open = m[1];
+    else if (m[1][0] === open[0] && m[1].length >= open.length) open = undefined;
+  }
+  return open;
+}
+
+/**
+ * Split `text` into Chat's per-message character cap, without losing anything.
+ *
+ * Cuts at a line boundary where one is available (a hard slice mid-line is what
+ * makes a split reply look like two unfinished sentences), and closes/reopens a
+ * fenced code block across the cut so the second half isn't rendered as prose.
+ */
 export function splitMessage(text: string, max: number = MAX_MESSAGE_CHARS): string[] {
   const chunks: string[] = [];
-  for (let i = 0; i < text.length; i += max) chunks.push(text.slice(i, i + max));
+  let rest = text;
+  while (rest.length > max) {
+    let cut = rest.lastIndexOf("\n", max - 1);
+    if (cut <= 0) cut = max; // no usable newline — hard cut
+    let chunk = rest.slice(0, cut);
+    const fence = openFence(chunk);
+    if (fence) chunk += `\n${fence}`;
+    chunks.push(chunk);
+    rest = rest.slice(cut);
+    if (rest.startsWith("\n")) rest = rest.slice(1);
+    if (fence) rest = `${fence}\n${rest}`;
+  }
+  if (rest.length > 0) chunks.push(rest);
   return chunks;
 }
 
@@ -119,8 +153,10 @@ export class ReplyStream {
   async finish(final: string): Promise<void> {
     this.clearTimers();
     // Show the final text (in the placeholder if one exists), then post overflow.
+    // Normalise for Chat's renderer *before* splitting so a table can't be cut
+    // in half; the client normalises again on the way out (it's idempotent).
     this.streamed = final;
-    const chunks = splitMessage(final);
+    const chunks = splitMessage(toChatMarkdown(final));
 
     if (chunks.length === 0) {
       if (this.markerName) await this.client.deleteMessage(this.markerName).catch(() => {});

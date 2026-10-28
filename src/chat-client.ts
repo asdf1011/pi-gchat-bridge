@@ -1,4 +1,5 @@
 import { ServiceAccountAuth } from "./auth.js";
+import { toChatMarkdown } from "./chat-markdown.js";
 import { logger } from "./logger.js";
 
 import type { ChatAttachment, IncomingMessage } from "./types.js";
@@ -160,7 +161,8 @@ export class ChatClient {
    * 2026) so pi's Markdown output — bold, italic, code, bulleted/numbered
    * lists, block quotes, links — renders properly instead of being parsed as
    * legacy Chat `*bold*` syntax. Tables are NOT in the supported Markdown
-   * subset.
+   * subset, so outgoing text is passed through {@link toChatMarkdown} first
+   * (tables → bullet lines, headings → bold, soft breaks → hard breaks).
    *
    * NOTE (verified Oct 2026): Markdown also survives a text PATCH when
    * `markupSyntax` is included in the PATCH body — see {@link updateMessage}.
@@ -182,7 +184,7 @@ export class ChatClient {
     opts?: { silent?: boolean },
   ): Promise<string> {
     const body: Record<string, unknown> = {
-      text,
+      text: toChatMarkdown(text),
       markupSyntax: MARKUP_SYNTAX_MARKDOWN,
     };
     if (threadName) body.thread = { name: threadName };
@@ -249,7 +251,7 @@ export class ChatClient {
     await this.auth.request(
       "PATCH",
       `${CHAT_API_BASE}/${messageName}?updateMask=text`,
-      JSON.stringify({ text, markupSyntax: MARKUP_SYNTAX_MARKDOWN }),
+      JSON.stringify({ text: toChatMarkdown(text), markupSyntax: MARKUP_SYNTAX_MARKDOWN }),
     );
   }
 
@@ -277,7 +279,7 @@ export class ChatClient {
     const data = (await this.auth.request(
       "POST",
       `${CHAT_API_BASE}/${spaceName}/messages?messageReplyOption=REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD`,
-      JSON.stringify({ text, markupSyntax: MARKUP_SYNTAX_MARKDOWN, thread: { threadKey } }),
+      JSON.stringify({ text: toChatMarkdown(text), markupSyntax: MARKUP_SYNTAX_MARKDOWN, thread: { threadKey } }),
     )) as { name?: string; thread?: { name?: string; threadKey?: string } };
     if (!data.name || !data.thread?.name) {
       throw new Error(`createMessageWithThreadKey: response missing message/thread name for threadKey ${threadKey}`);

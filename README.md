@@ -174,14 +174,25 @@ work around them without external pieces:
   account can chat with a bot but can't install or develop one, so the bridge
   needs a Workspace account.
 
-- **Markdown tables don't render.** Since Aug 2026 the bridge sends replies
-  with `markupSyntax: MARKUP_SYNTAX_MARKDOWN`, so standard Markdown (bold,
-  italic, strikethrough, monospace, code fences, bulleted/nested/numbered
-  lists, block quotes, links) renders properly in Chat. GFM pipe tables are
-  *not* in the supported Markdown subset and still show up as literal text —
-  the closest rendering is an aligned monospace fenced block, and cards have
-  no table widget either. Tracked upstream:
-  [issue 428659965](https://issuetracker.google.com/issues/428659965).
+- **Markdown tables don't render — the bridge converts them.** Since Aug 2026
+  replies go out with `markupSyntax: MARKUP_SYNTAX_MARKDOWN`, so standard
+  Markdown (bold, italic, strikethrough, monospace, code fences,
+  bulleted/nested/numbered lists, block quotes, links) renders properly in
+  Chat. GFM pipe tables are *not* in the supported subset, and Chat's fallback
+  is destructive: the rows are concatenated with **no** separator, so a table
+  collapses into a run-on paragraph (`… F16258.1 ± 34.03.58 t/s…`) and swallows
+  whatever line follows it. `src/chat-markdown.ts` therefore rewrites every
+  outgoing message (posts, PATCHes, `/notify`) before it leaves the bridge:
+  pipe tables become one bullet per row with the column names taken from the
+  header (`- **Q8_0** — method: naive RTN from F16; PPL: 258.1 ± 34.0`),
+  headings (`## x`, which Chat renders as a plain bold line) become `**x**`,
+  and single line breaks become CommonMark hard breaks (two trailing spaces,
+  verified supported) so lines aren't glued together — a plain `\n` inside a
+  paragraph is joined with a space. Fenced code blocks pass through untouched.
+  There is still no real table widget (cards don't have one either), and the
+  model is also told up front not to emit tables (`chat-format` extension in
+  `pi-agent/extensions/`), which reads better than a mechanical conversion.
+  Tracked upstream: [issue 428659965](https://issuetracker.google.com/issues/428659965).
 
 - **Streamed placeholders render Markdown (Oct 2026).** A text PATCH keeps the
   message in Markdown syntax as long as `markupSyntax` is sent **in the body**
@@ -189,6 +200,12 @@ work around them without external pieces:
   or `updateMask=markupSyntax`) still 400s with "Unsupported path name in message
   field mask". Send a PATCH *without* the field and the message drops back to
   legacy Chat syntax.
+
+- **Sentences are never split mid-line.** Replies longer than the 4,000-char
+  message cap are chunked at a line boundary where one exists (`splitMessage`),
+  and a fenced code block that straddles the cut is closed at the end of one
+  chunk and reopened at the start of the next, so the second half isn't
+  rendered as prose.
 
 - **The "Message deleted" stub is a notification trade-off.** Notifications fire
   on message *creation*, not on a PATCH (with app auth there is no other
