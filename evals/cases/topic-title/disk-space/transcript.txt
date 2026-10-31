@@ -1,0 +1,5 @@
+USER: how much free disk is there?
+
+ASSISTANT: There's about **2.6TB of free space** out of 11TB total on the root filesystem (76% used).
+
+TITLE:

@@ -1,0 +1,12 @@
+USER: The current functionality, when running '/model' when not in a conversation, is to change the default, right?
+
+ASSISTANT: Yes — in this bridge that's exactly what it does (`src/commands.ts:66-85`):
+
+- **With an active conversation** — `/model` opens the normal picker and switches *that* conversation's model.
+- **With no conversation open** — `/model` posts a "Change the default model for new conversations." picker, and the pick goes to `router.setDefaultModel()` → `SettingsManager.setDefaultModelAndProvider()`, i.e. writes `defaultModel` (and provider) into `settings.json`.
+
+So it's a global default that only affects **new** conversations; existing conversations keep their model until switched explicitly.
+
+One related wrinkle worth knowing (`src/agent-sessions.ts:353-361`): if there is *no* global default set yet, switching a model inside a conversation also becomes the global default, since `setDefaultModelAndProvider` can't "unset" — it just logs a warning.
+
+TITLE:

@@ -1,0 +1,28 @@
+{
+  "suite": "topic-title",
+  "id": "model-default-behaviour",
+  "mode": "direct",
+  "contract": "title-v3",
+  "source": "spaces_sPA7FKAAAAE_threads_ztgOxWDF6uM-a07504eb.jsonl",
+  "hasImage": false,
+  "transcriptChars": 987,
+  "note": "Asks whether /model outside a conversation changes the default; answer explains the rule.",
+  "expectations": {
+    "mustMention": [
+      [
+        "model"
+      ],
+      [
+        "default",
+        "change",
+        "behaviour",
+        "behavior"
+      ]
+    ],
+    "mustNotMention": [
+      "noise",
+      "disk"
+    ],
+    "labelSource": "hand label read from the conversation (and the image, for photo cases)"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "suite": "topic-title",
+  "id": "photo-noise-sign",
+  "mode": "direct",
+  "contract": "title-v3",
+  "source": "spaces_sPA7FKAAAAE_threads_2x_jDOV8T_8-16f63de7.jsonl",
+  "hasImage": true,
+  "transcriptChars": 673,
+  "note": "Photo of a sign asking employees to monitor noise levels. Image-only-ish prompt ('What's going on here'), so this is the case the titler's image forwarding exists for.",
+  "expectations": {
+    "mustMention": [
+      [
+        "sign",
+        "notice",
+        "poster"
+      ],
+      [
+        "noise",
+        "monitor"
+      ]
+    ],
+    "mustNotMention": [
+      "disk",
+      "wedding",
+      "invoice"
+    ],
+    "labelSource": "hand label read from the conversation (and the image, for photo cases)"
+  }
+}

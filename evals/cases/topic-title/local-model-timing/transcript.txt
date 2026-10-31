@@ -1,0 +1,24 @@
+USER: I started a thread with an very underpowered local model where I asked it what was in the picture (it did a good job on that). I then asked it for a breakdown in timing, not at great there... Can you tell me the timing breakdown please?
+
+ASSISTANT: Found it — thread `2x_jDOV8T_8` (the "Please Monitor Noise" sign), model `llama-local/lfm3-vl-2b-q8`, running 2 threads. All of this was in `/workspace/logs/lfm-router.log` (the model was wrong when it said it couldn't see timings).
+
+## 1. The picture question
+19:49:04 → 20:03:05 = **14 min 0 s** wall (log `task 142`)
+
+- prompt processing — **739.1 s** / 2,404 tokens (3.25 t/s)
+- generation — **101.1 s** / 135 tokens (1.32 t/s)
+- total — 840.2 s
+
+Inside the 739 s prompt phase:
+- 98.5 s → first 487 text tokens (~4.95 t/s)
+- 102 s → 735 s = **~633 s for the ~1,900 image tokens** (~3.0 t/s)
+- prompt was ~4,250 tokens total, of which ~1,850 came from the cached prefix
+
+So ~10.5 of the 14 minutes was literally chewing through image tokens; vision encoding itself was cheap.
+
+## 2. The follow-up timing question
+20:05:24 → 20:07:55 = **150.6 s** (log `task 281`)
+
+- prompt eval — **32.5 s** / 52 
+
+TITLE:

@@ -1,0 +1,25 @@
+{
+  "suite": "topic-title",
+  "id": "local-model-timing",
+  "mode": "direct",
+  "contract": "title-v3",
+  "source": "spaces_sPA7FKAAAAE_threads_12MBXYcYReY-eadb9eda.jsonl",
+  "hasImage": false,
+  "transcriptChars": 1163,
+  "note": "Asks for a processing-time breakdown of a local-model run; the reply is a timing table.",
+  "expectations": {
+    "mustMention": [
+      [
+        "timing",
+        "time",
+        "performance",
+        "breakdown"
+      ]
+    ],
+    "mustNotMention": [
+      "noise",
+      "disk"
+    ],
+    "labelSource": "hand label read from the conversation (and the image, for photo cases)"
+  }
+}

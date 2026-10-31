@@ -1,0 +1,5 @@
+USER: Hello
+
+ASSISTANT: Hello! I'm in `/workspace` — looks like the `pi-gchat-bridge` project. What would you like to work on?
+
+TITLE:

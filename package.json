@@ -9,7 +9,9 @@
     "dev": "tsx watch src/index.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc",
-    "test": "tsx --test test/*.test.ts"
+    "test": "tsx --test test/*.test.ts",
+    "evals": "node evals/run.mjs",
+    "evals:regrade": "node evals/regrade.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.99.2",

@@ -183,6 +183,16 @@ Runs the unit test suite (Node's built-in runner via tsx) against the pure
 logic: session-key derivation, allow-list matching, and the session-file
 reader/writer (including the watchdog's incomplete-tail truncation).
 
+```bash
+npm run evals                             # local-model evals (topic titles)
+npm run evals -- --case disk-space --judge
+```
+
+`evals/` holds the model-quality evals for jobs that aren't deterministic code —
+currently the `/model` card titler. Cases are mined from real conversations in
+`sessions/` and graded deterministically first, with an optional LLM judge for
+the judgement calls. See `evals/README.md`.
+
 ### Stuck-session watchdog
 
 If a session's tool call hangs (e.g. the agent runs a network fetch without a

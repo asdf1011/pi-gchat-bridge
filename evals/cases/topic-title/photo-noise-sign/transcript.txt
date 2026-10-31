@@ -1,0 +1,13 @@
+USER: What's going on here
+
+ASSISTANT: This is a sign from a workplace asking employees to monitor their noise levels. Here's what it says:
+
+**"Please Monitor Noise**
+
+Please help us create a culture of acoustic courtesy and a secure work space. In order to be respectful of our work neighbors, please monitor your volume."
+
+There's a robot illustration wearing sunglasses, and for questions you can file a ticket at `go/facilities`.
+
+It looks like an office or coworking space sign — likely from a company that uses the "go/facilities" ticket system (possibly GoToWork or similar). The sign is asking people to keep their voices down so neighbors aren't disturbed.
+
+TITLE:

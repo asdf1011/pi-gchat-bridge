@@ -1,0 +1,25 @@
+{
+  "suite": "topic-title",
+  "id": "audio-capable-model",
+  "mode": "direct",
+  "contract": "title-v3",
+  "source": "spaces_sPA7FKAAAAE_threads_Fdg_EmHKlkI-a0b723fe.jsonl",
+  "hasImage": false,
+  "transcriptChars": 1088,
+  "note": "Asks about voice/audio chat with an audio-capable model. The reply concludes it's blocked by two layers, so this is the case that punishes answer-restating titles.",
+  "expectations": {
+    "mustMention": [
+      [
+        "audio",
+        "voice",
+        "speech"
+      ]
+    ],
+    "mustNotMention": [
+      "noise",
+      "disk",
+      "invoice"
+    ],
+    "labelSource": "hand label read from the conversation (and the image, for photo cases)"
+  }
+}

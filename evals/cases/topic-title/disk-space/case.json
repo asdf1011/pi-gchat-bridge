@@ -1,0 +1,30 @@
+{
+  "suite": "topic-title",
+  "id": "disk-space",
+  "mode": "direct",
+  "contract": "title-v3",
+  "source": "spaces_sPA7FKAAAAE_threads_MSibe26NqS0-6271538e.jsonl",
+  "hasImage": false,
+  "transcriptChars": 145,
+  "note": "Plain question about free disk space; answer is mostly numbers, so a title that copies the answer is useless.",
+  "expectations": {
+    "mustMention": [
+      [
+        "disk",
+        "storage"
+      ],
+      [
+        "space",
+        "free",
+        "available",
+        "capacity"
+      ]
+    ],
+    "mustNotMention": [
+      "noise",
+      "sign",
+      "photo"
+    ],
+    "labelSource": "hand label read from the conversation (and the image, for photo cases)"
+  }
+}

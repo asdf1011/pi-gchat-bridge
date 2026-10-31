@@ -8,3 +8,6 @@ data/
 workspace/
 pi-agent/
 *.log
+
+# Eval run artifacts (results/summary/report per run)
+evals/runs/

@@ -1,0 +1,27 @@
+USER: When chatting with the gchat interface, is it possible to switch to audio, to chat with an audio capable model? Or is that restricted to human users / endpoints?
+
+ASSISTANT: Short answer: **no, not today** — and it's not a Chat permissions/human-only thing. Voice notes arrive as ordinary media attachments, so the API side is fine. There are two blockers stacked on top of each other:
+
+## Blocker 1 — the bridge discards non-image attachments
+
+`src/chat-client.ts:96-100` hard-filters on `image/*`:
+
+```ts
+const isImage = mime ? mime.startsWith("image/") : IMAGE_EXT_RE.test(...)
+if (!isImage) {
+  logger.info(`... is not an image — skipping`);
+  return undefined;
+}
+```
+
+So an `audio/*` attachment is logged and dropped (you can see the doc-file version of this in `bridge.log:2773`). An audio-only message then hits the "only images are supported" notice at `src/index.ts:144`.
+
+## Blocker 2 — pi has no audio content type at all
+
+pi's LLM layer only carries text and images:
+
+```ts
+export interface ImageContent { type: "image"; data: string; mimeType: string; }
+content
+
+TITLE:

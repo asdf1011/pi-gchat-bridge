@@ -1,0 +1,30 @@
+{
+  "suite": "topic-title",
+  "id": "greeting-only",
+  "mode": "direct",
+  "contract": "title-v3",
+  "source": "spaces_sPA7FKAAAAE_threads_K0eqRPp5FNo-b9c60c51.jsonl",
+  "hasImage": false,
+  "transcriptChars": 134,
+  "note": "Opener is 'Hello' and the first reply only says which directory/project pi is in — there is NO topic yet. Both prompt variants tested so far invented one ('Workspace Introduction', 'Workflow Design for AI Chat Interfaces'), so this case punishes fabricated subjects: the honest title is about the greeting/project context.",
+  "expectations": {
+    "mustMention": [
+      [
+        "workspace",
+        "project",
+        "greeting",
+        "hello",
+        "intro",
+        "opening"
+      ]
+    ],
+    "mustNotMention": [
+      "workflow",
+      "design",
+      "noise",
+      "sign",
+      "disk"
+    ],
+    "labelSource": "hand label read from the conversation (and the image, for photo cases)"
+  }
+}
