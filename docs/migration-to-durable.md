@@ -86,7 +86,7 @@ Prove the stack on *this* machine before touching the bridge. All exit criteria 
 
 **Exit:** one script prints a streamed answer with a tool call, from a real configured model.
 
-### M1 — Upgrade pi-coding-agent to 1.4.0 (legacy bridge untouched)
+### M1 — Upgrade pi-coding-agent to 1.4.0 — **DONE** (see [M1 results](#m1-results))
 
 - Bump to `1.4.0` in `package.json`; `npm ls @earendil-works/pi-ai` must show **one** copy.
 - Re-verify the bridge's uses of it: `createAgentSession`, `bindExtensions`, `SessionManager`,
@@ -324,14 +324,16 @@ Protocol for every milestone that changes running code:
   `BRIDGE_SESSIONS_DIR` / state file. The live bridge is untouched.
 - **M7** (cutover) — one restart, or none at all with the space split below.
 
-### Session-format hazard (the real risk to continuity)
+### Session-format hazard (the real risk to continuity) — **downgraded by M1**
 
-`pi` migrates session files **automatically on first load**, and historically one-way (v1→v2, v2→v3).
-The moment Chat resumes on 1.4.0, the 86 MB of session history is upgraded in place and 0.99.2 can no
-longer read it — the rollback escape hatch closes.
+`pi` can migrate session files automatically on first load, and historically one-way (v1→v2, v2→v3).
+M1 checked this directly: a 0.99.2 session file opened under 1.4.0 keeps all 818 entries **and is left
+byte-identical** (md5 match before/after). So there is no rewrite on open. A file only changes when new
+entries are appended, i.e. per thread, while it is used on 1.4.0 — so a rollback after the canary
+affects only the threads touched since, which the backup covers.
 
-Mitigation, before M1: `cp -a sessions sessions.pre-1.4.0` (86 MB, seconds). Verified by opening one
-old thread on 1.4.0 and confirming the history renders.
+Still worth the cheap insurance before M1: `cp -a sessions sessions.pre-1.4.0` (86 MB, seconds).
+Done on this machine.
 
 ### Zero-downtime path for M7: split by space
 
@@ -349,3 +351,26 @@ Rollback is the reverse edit. No message is ever dropped or answered twice.
 
 `npm i` while a turn is in flight can defeat a lazily-imported provider SDK. Bundle dependency
 installs and build into a single idle window, immediately before the restart.
+
+## M1 results
+
+Upgraded in place, `@earendil-works/pi-coding-agent` `0.99.2` → `1.4.0` (exact pin), one
+`pi-ai@1.4.0` in the tree. Checked against this repo's real integration points, not the changelog.
+
+| Check | Result |
+|---|---|
+| `tsc --noEmit` | clean, no code changes needed |
+| `npm test` | 88/88 pass |
+| Open a 0.99.2 session file | 818 entries, kinds `model_change`/`thinking_level_change`/`message` |
+| Is it rewritten on open? | **no** — md5 identical before and after, same byte size |
+| `bindExtensions` with the real `~/.pi/agent` extensions | succeeds, no `extension_error` |
+| A real turn | streams via `message_update.assistantMessageEvent.delta` (unchanged shape) |
+| `appendCustomEntry` + read-back | works (what `notify.ts` needs) |
+| Session file written and reopened | works; `getSessionFile()`, `getSessionId()` unchanged |
+
+The upgrade needed **zero source changes**. The one surprise was in the smoke test, not the SDK: the
+delta lives at `event.assistantMessageEvent.delta`, which is what `stream.ts` already read — a
+reminder to test the real consumer path rather than a convenient one.
+
+Rollback: `git revert` the dependency commit and `npm install`; sessions are untouched by the
+upgrade itself (see the hazard note above).
