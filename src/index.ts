@@ -9,6 +9,7 @@ import { PubSubReceiver } from "./pubsub-receiver.js";
 import type { HandleResult, MessageReceiver } from "./receiver.js";
 import { StateStore } from "./state.js";
 import { markers, ReplyStream } from "./stream.js";
+import { applyTopicSummary } from "./topic-summary.js";
 import type { IncomingMessage } from "./types.js";
 import { logger } from "./logger.js";
 
@@ -118,6 +119,7 @@ async function main(): Promise<void> {
     const handled = await runCommand({
       client,
       router,
+      state,
       incoming,
       sessionKey,
       actionKey,
@@ -210,6 +212,23 @@ async function main(): Promise<void> {
       }
 
       await stream.finish(final);
+      // Re-title the /model card now that the conversation has a subject. Fired
+      // detached and never awaited: the local model can take minutes on CPU,
+      // and no-op when no /model card is waiting for this conversation.
+      if (config.topicSummary) {
+        void applyTopicSummary({
+          state,
+          router,
+          client,
+          sessionKey,
+          display,
+          config: {
+            baseUrl: config.topicSummaryBaseUrl,
+            model: config.topicSummaryModel,
+            timeoutMs: config.topicSummaryTimeoutMs,
+          },
+        }).catch((err) => logger.error("[chat] topic summary failed:", (err as Error).message));
+      }
       return "ok";
     } catch (err) {
       const aborted = (err as Error)?.name === "AbortError";

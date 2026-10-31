@@ -26,6 +26,14 @@ export interface Config {
   allowedUsers: string[];
   /** Optional shared secret required on POST /notify (Authorization: Bearer …). Empty = no auth. */
   notifyToken: string;
+  /** Re-title the /model "Model switched" card with a local-model topic (gchat display only). */
+  topicSummary: boolean;
+  /** OpenAI-compatible base URL of the LOCAL model used for titles (e.g. llama.cpp). */
+  topicSummaryBaseUrl: string;
+  /** Model id to request from that server. */
+  topicSummaryModel: string;
+  /** Give up on a title after this long — CPU inference is slow and shared. */
+  topicSummaryTimeoutMs: number;
   /**
    * Streaming placeholder: post a fresh final message and delete the placeholder
    * (true, the historical behaviour — costs a "Message deleted" stub but the
@@ -80,6 +88,12 @@ export function loadConfig(): Config {
     allowedSpaces: listEnv("ALLOWED_SPACES"),
     allowedUsers: listEnv("ALLOWED_USERS"),
     notifyToken: process.env.BRIDGE_NOTIFY_TOKEN ?? "",
+    topicSummary: (process.env.BRIDGE_TOPIC_SUMMARY ?? "1") !== "0",
+    topicSummaryBaseUrl: process.env.BRIDGE_TOPIC_SUMMARY_BASE_URL ?? "http://127.0.0.1:8090/v1",
+    topicSummaryModel: process.env.BRIDGE_TOPIC_SUMMARY_MODEL ?? "lfm3-vl-2b-q8",
+    // 15 min: the local server has one slot, so a title can queue behind real
+    // chat before it even starts. It runs detached, so waiting costs nothing.
+    topicSummaryTimeoutMs: Number(process.env.BRIDGE_TOPIC_SUMMARY_TIMEOUT_MS ?? 15 * 60 * 1000),
     replaceOnFinish: (process.env.BRIDGE_REPLACE_ON_FINISH ?? "1") !== "0",
   };
 }

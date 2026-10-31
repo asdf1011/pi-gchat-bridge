@@ -161,6 +161,65 @@ export function contentText(content: unknown): string {
   return "";
 }
 
+/** The first exchange of a conversation, as the USER SAW it. */
+export interface FirstTurn {
+  /** Visible text of the first user message ("" when the message was image-only). */
+  userText: string;
+  /** Visible text of the first assistant reply that had any ("" when none yet). */
+  assistantText: string;
+  /** First image the user attached, if any (pi stores it base64 in the block). */
+  image?: { data: string; mimeType: string };
+}
+
+/**
+ * First user message + first assistant reply of a session file, restricted to
+ * VISIBLE content. Thinking blocks are skipped: they're pi's private reasoning,
+ * not what the conversation looked like in Chat, so they'd mislead a title.
+ * Tool calls/results are skipped for the same reason.
+ */
+export async function readFirstTurn(file: string): Promise<FirstTurn> {
+  const turn: FirstTurn = { userText: "", assistantText: "" };
+  let sawUser = false;
+  try {
+    await readSessionEntries(file, (entry) => {
+      if (entry.type !== "message") return false;
+      // pi's AgentMessage union includes non-chat entries (e.g. bash execution),
+      // which carry no `content`; the structural PiMessage view is enough here.
+      const message = entry.message as unknown as PiMessage;
+      const blocks: PiBlock[] = Array.isArray(message.content)
+        ? (message.content as PiBlock[])
+        : typeof message.content === "string"
+          ? [{ type: "text", text: message.content }]
+          : [];
+      if (message.role === "user") {
+        if (sawUser) return false;
+        sawUser = true;
+        for (const block of blocks) {
+          if (block.type === "text" && block.text) turn.userText += block.text;
+          else if (block.type === "image" && !turn.image) {
+            const data = typeof block.data === "string" ? block.data : "";
+            const mimeType = typeof block.mimeType === "string" ? block.mimeType : "image/jpeg";
+            if (data) turn.image = { data, mimeType };
+          }
+        }
+        return false;
+      }
+      if (message.role === "assistant" && sawUser) {
+        for (const block of blocks) {
+          if (block.type === "text" && block.text) turn.assistantText += block.text;
+        }
+        // Stop at the first assistant message that said anything visible; keep
+        // scanning only while replies so far are tool-call-only.
+        return turn.assistantText.trim().length > 0;
+      }
+      return false;
+    });
+  } catch {
+    // unreadable file — report what we managed to read
+  }
+  return turn;
+}
+
 /** Collapse whitespace and trim to a display-friendly length. */
 export function truncate(text: string, max = 60): string {
   const t = text.trim().replace(/\s+/g, " ");

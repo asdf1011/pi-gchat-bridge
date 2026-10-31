@@ -117,6 +117,29 @@ That's it — the bot now answers messages in any space it's installed in.
   as a `model_change` entry) and the bridge posts a gchat-only notice
   — *“Starting a new conversation with model …”* — that is never sent to pi.
   The global defaults are untouched.
+- **Topic titles on the “Model switched” card.** When that card *starts* a
+  conversation it becomes the thread's top message — i.e. the one line the
+  space's conversation list shows — which says which model is running but
+  nothing about the subject. So once the first reply has been posted, the
+  bridge asks a **local model** (llama.cpp, no API cost, always available) for
+  a one-line topic and patches only the card's **header**, keeping the
+  "New conversation on *model*" body as it was:
+
+  ```
+  Sign requesting employees to monitor noise levels in a workspace
+  ───
+  New conversation on LFM3-VL-2B Q8 (local CPU, free) (llama-local).
+  ```
+
+  It runs **detached, after the reply**, so a slow CPU model never delays
+  anything, and it reads only the first user message plus the first
+  assistant reply, skipping thinking blocks and tool output. Images are
+  forwarded, so a photo-only "what's going on here" gets a title too. The
+  title is written **only to the Chat card**, never to the session file, so
+  pi's history and prompt cache are untouched; `/name` still sets the session
+  name separately. If the local model is down or too slow the card keeps the
+  plain "Model switched" wording (no retry). Configure or disable with
+  `BRIDGE_TOPIC_SUMMARY*` below.
 - **`/settings`** (formerly `/defaultmodel`, still accepted as an alias)
   changes the **defaults for *new* conversations** in settings.json, again as
   model + thinking level, with the same dynamic thinking list.
@@ -145,6 +168,10 @@ That's it — the bot now answers messages in any space it's installed in.
 | `ALLOWED_SPACES` | — | Comma-separated spaces (name or ID) the bridge responds in; empty = all |
 | `ALLOWED_USERS` | — | Comma-separated users (name or ID) allowed to trigger pi; empty = anyone |
 | `BRIDGE_REPLACE_ON_FINISH` | `1` | `1`: post the final answer as a new message (the completion notification), then delete the streaming placeholder (leaves a "Message deleted" stub). `0`: keep the patched placeholder as the answer (no stub; the notification is the one posted when the placeholder appears). |
+| `BRIDGE_TOPIC_SUMMARY` | `1` | Re-title the `/model` "Model switched" card with a local-model topic line once the first reply lands. `0` keeps the plain wording. |
+| `BRIDGE_TOPIC_SUMMARY_BASE_URL` | `http://127.0.0.1:8090/v1` | OpenAI-compatible endpoint of the local model used for titles (llama.cpp). |
+| `BRIDGE_TOPIC_SUMMARY_MODEL` | `lfm3-vl-2b-q8` | Model id requested from that endpoint. |
+| `BRIDGE_TOPIC_SUMMARY_TIMEOUT_MS` | `900000` (15 min) | Give up on a title after this long — CPU inference is slow and the server may have one slot. The job is detached, so waiting is free. |
 
 ## Testing
 

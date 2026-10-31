@@ -328,14 +328,22 @@ export function modelPickerCard(
   ];
 }
 
-/** Confirmation card after a model / thinking-level switch. */
-export function modelConfirmCard(result: ConversationSettingsResult): unknown[] {
+/**
+ * Confirmation card after a model / thinking-level switch.
+ *
+ * `opts.title` replaces the "Model switched" header with a conversation topic,
+ * once one is known (see topic-summary.ts). Only the header changes: the body
+ * keeps announcing the model exactly as before, so the card still answers
+ * "which model am I on?" while the thread list gives a hint of the subject.
+ */
+export function modelConfirmCard(result: ConversationSettingsResult, opts?: { title?: string }): unknown[] {
   const safe = escapeHtml;
+  const title = opts?.title?.trim();
   return [
     {
       cardId: "model-confirm",
       card: {
-        header: { title: result.ok ? "Model switched" : "Couldn't switch model" },
+        header: { title: result.ok ? (title || "Model switched") : "Couldn't switch model" },
         sections: [
           {
             widgets: [

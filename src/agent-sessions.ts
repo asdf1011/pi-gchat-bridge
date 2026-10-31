@@ -402,6 +402,16 @@ export class AgentRouter {
   }
 
   /**
+   * Absolute path of a conversation's session file: the open session's, else
+   * the /resume override, else the derived path (whether or not it exists yet).
+   * Read-only readers (topic titles, diagnostics) shouldn't have to know which
+   * of those applies.
+   */
+  sessionFile(sessionKey: string): string | undefined {
+    return this.sessions.get(sessionKey)?.file ?? this.resolvedSessionFile(sessionKey);
+  }
+
+  /**
    * Switch the active model for a conversation's session. Fails (without
    * touching the session) if the session is busy or the model needs auth we
    * don't have.

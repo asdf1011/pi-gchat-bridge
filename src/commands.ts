@@ -23,12 +23,15 @@ import {
 } from "./constants.js";
 import { logger } from "./logger.js";
 import type { HandleResult } from "./receiver.js";
+import type { StateStore } from "./state.js";
 import type { IncomingMessage } from "./types.js";
 
 /** Everything a bridge command/card handler needs from the message handler. */
 export interface CommandContext {
   client: ChatClient;
   router: AgentRouter;
+  /** Durable state; used to remember the /model card for a later topic title. */
+  state: StateStore;
   incoming: IncomingMessage;
   sessionKey: string;
   actionKey: string;
@@ -256,7 +259,7 @@ const SLASH_COMMANDS: SlashCommand[] = [
  * so the caller falls through to a normal pi prompt.
  */
 export async function runCommand(ctx: CommandContext): Promise<HandleResult | null> {
-  const { client, router, incoming, sessionKey, actionKey, spaceName, threadName, display, text } = ctx;
+  const { client, router, state, incoming, sessionKey, actionKey, spaceName, threadName, display, text } = ctx;
 
   // --- Interactive card events (dropdown selection, buttons) ---
   if (incoming.eventType === "CARD_CLICKED") {
@@ -363,6 +366,14 @@ export async function runCommand(ctx: CommandContext): Promise<HandleResult | nu
         .catch((err) => logger.error("[chat] card update failed:", (err as Error).message));
       logger.info(`[chat] ${display}: model switch ${summary} (key ${targetKey})`);
       if (result.ok && result.created) {
+        // This card usually becomes the thread's top message, i.e. the one line
+        // the space's conversation list shows. Remember it so it can be
+        // re-titled with the conversation's topic once the first reply lands
+        // (index.ts fires the background job).
+        state.setTopicCard(targetKey, {
+          messageName: incoming.message.name,
+          modelLabel: result.modelLabel,
+        });
         const note = `Starting a new conversation with model **${escapeHtml(result.modelLabel)}**` +
           (result.thinkingLevel ? ` and thinking level **${escapeHtml(result.thinkingLevel)}**` : "") +
           "…";
