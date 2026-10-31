@@ -1,8 +1,6 @@
-import type { AgentRouter } from "./agent-sessions.js";
+import type { AgentRouter, ConversationSettingsResult, DefaultSettingsResult } from "./agent-sessions.js";
 import {
   confirmCard,
-  defaultModelCard,
-  defaultModelConfirmCard,
   errorCard,
   escapeHtml,
   helpCard,
@@ -10,10 +8,19 @@ import {
   modelPickerCard,
   pickerCard,
   sessionStatsCard,
+  settingsCard,
+  settingsConfirmCard,
   statusCard,
 } from "./cards.js";
 import type { ChatClient } from "./chat-client.js";
-import { MODEL_ACTION, RESUME_ACTION, SET_DEFAULT_MODEL_ACTION, BUSY } from "./constants.js";
+import {
+  BUSY,
+  MODEL_ACTION,
+  RESUME_ACTION,
+  SET_DEFAULT_MODEL_ACTION,
+  SETTINGS_ACTION,
+  THINKING_LEVELS_ACTION,
+} from "./constants.js";
 import { logger } from "./logger.js";
 import type { HandleResult } from "./receiver.js";
 import type { IncomingMessage } from "./types.js";
@@ -31,24 +38,38 @@ export interface CommandContext {
   text: string;
 }
 
-/** Extract the picked value from a CARD_CLICKED event's form inputs.
+/** Read one widget's value from a CARD_CLICKED event's form inputs, by the
+ *  widget's `name`. Needed now that cards carry several dropdowns (model +
+ *  thinking level) — reading "the first value" would pick the wrong one.
  *  Selection values only arrive when a BUTTON submits the form — a dropdown's
  *  onChangeAction fires an event with no value. Widget values appear either as
  *  `input.selectionInput.selectedValues[]` / `input.stringInputs.value[]`
  *  (action.formInputs, legacy) or flattened under common.formInputs (new). */
-function selectedValue(incoming: IncomingMessage): string | undefined {
+function formValue(incoming: IncomingMessage, name: string): string | undefined {
   const formInputs = incoming.action?.formInputs;
-  if (formInputs) {
-    for (const key of Object.keys(formInputs)) {
-      const widget = formInputs[key];
-      const input = widget?.input ?? widget;
-      const value =
-        input?.selectionInput?.selectedValues?.[0] ??
-        input?.stringInputs?.value?.[0];
-      if (value) return value;
-    }
+  if (!formInputs) return undefined;
+  const widget = formInputs[name];
+  if (!widget) return undefined;
+  const input = widget.input ?? widget;
+  return input?.selectionInput?.selectedValues?.[0] ?? input?.stringInputs?.value?.[0];
+}
+
+/** Fallback for cards posted before multi-dropdown support: any single value. */
+function anyFormValue(incoming: IncomingMessage): string | undefined {
+  const formInputs = incoming.action?.formInputs;
+  if (!formInputs) return undefined;
+  for (const key of Object.keys(formInputs)) {
+    const widget = formInputs[key];
+    const input = widget?.input ?? widget;
+    const value = input?.selectionInput?.selectedValues?.[0] ?? input?.stringInputs?.value?.[0];
+    if (value) return value;
   }
   return undefined;
+}
+
+/** Read one of a card action's static `parameters` (e.g. which selection's key). */
+function actionParam(incoming: IncomingMessage, key: string): string | undefined {
+  return incoming.action?.parameters?.find((p) => p.key === key)?.value;
 }
 
 /** A built-in slash command handled by the bridge (not sent to pi). */
@@ -71,18 +92,61 @@ const SLASH_COMMANDS: SlashCommand[] = [
         await client.sendMessage(spaceName, "No models configured.", threadName);
         return "ok";
       }
-      // With a conversation, /model switches THIS conversation's model. With
-      // no conversation yet, it just changes the global default for NEW
-      // conversations — starting one here strands the pick on a thread nobody
-      // replies in (and a reply there opens a fresh default-model session).
-      if (router.hasSession(sessionKey)) {
-        const current = await router.currentModel(sessionKey);
-        await client.createCardMessage(spaceName, modelPickerCard(models, sessionKey, current), "Choose a backend model.", threadName);
-        logger.info(`[chat] ${display}: posted model picker (${models.length} models)`);
-      } else {
-        await client.createCardMessage(spaceName, defaultModelCard(models, router.defaultModel()), "Change the default model for new conversations.", threadName);
-        logger.info(`[chat] ${display}: no conversation — posted default-model picker (${models.length} models)`);
+      // With a conversation, /model switches THIS conversation's model and
+      // thinking level. With no conversation yet, the pick STARTS this
+      // conversation on that model (switchModel creates the session there and
+      // restores the global default, so picking here never changes what other
+      // conversations get). Changing the defaults is /settings.
+      const starting = !router.hasSession(sessionKey);
+      const current = starting ? undefined : await router.currentModel(sessionKey);
+      const currentValue = starting ? undefined : await router.currentModelValue(sessionKey);
+      const thinkingLevel = starting ? undefined : await router.currentThinkingLevel(sessionKey);
+      const [curProvider = "", curModelId = ""] = (currentValue ?? "").split("|");
+      const supportedLevels = currentValue
+        ? router.thinkingLevelsForModel(curProvider, curModelId)
+        : undefined;
+      await client.createCardMessage(
+        spaceName,
+        modelPickerCard(models, sessionKey, current, {
+          newConversation: starting,
+          thinkingLevel,
+          supportedLevels,
+          currentValue,
+        }),
+        starting ? "Choose the model for this new conversation." : "Choose the model and thinking level.",
+        threadName,
+      );
+      logger.info(
+        `[chat] ${display}: posted model picker (${models.length} models, thinking=${thinkingLevel ?? "?"}${starting ? ", starts this conversation" : ""})`,
+      );
+      return "ok";
+    },
+  },
+  {
+    // /settings replaces the old /defaultmodel: one card, both defaults (model
+    // + thinking level). /defaultmodel stays as an alias so muscle memory (and
+    // any pinned bookmark of the help card) keeps working.
+    pattern: /^\/(settings|defaultmodel)\b/,
+    interrupt: true,
+    run: async ({ client, router, spaceName, display }) => {
+      const models = await router.listModels();
+      if (models.length === 0) {
+        await client.sendMessage(spaceName, "No models configured.");
+        return "ok";
       }
+      // Posted at the TOP LEVEL (no threadName) on purpose: the defaults are a
+      // space-wide setting, not part of any conversation — nesting the card in
+      // the command's own thread just buries it in a 1-reply sub-thread.
+      const defaults = router.defaultSettings();
+      const supportedLevels = defaults.provider && defaults.modelId
+        ? router.thinkingLevelsForModel(defaults.provider, defaults.modelId)
+        : undefined;
+      await client.createCardMessage(
+        spaceName,
+        settingsCard(models, defaults, { supportedLevels }),
+        "Settings for new conversations.",
+      );
+      logger.info(`[chat] ${display}: posted settings card (${models.length} models)`);
       return "ok";
     },
   },
@@ -94,13 +158,17 @@ const SLASH_COMMANDS: SlashCommand[] = [
     // hasn't been opened yet.
     run: async ({ client, router, sessionKey, spaceName, threadName, display }) => {
       const model = await router.currentModel(sessionKey);
+      const thinkingLevel = model ? await router.currentThinkingLevel(sessionKey) : undefined;
       const context = await router.sessionContextUsage(sessionKey);
       const usage = await router.sessionUsage(sessionKey);
+      const defaults = router.defaultSettings();
       await client.createCardMessage(
         spaceName,
         statusCard({
           model,
-          defaultModel: router.defaultModel(),
+          thinkingLevel,
+          defaultModel: defaults.modelLabel,
+          defaultThinkingLevel: defaults.thinkingLevel,
           context,
           usage,
         }),
@@ -161,7 +229,7 @@ const SLASH_COMMANDS: SlashCommand[] = [
     pattern: /^\/help\b/,
     interrupt: true,
     run: async ({ client, spaceName, threadName, display }) => {
-      await client.createCardMessage(spaceName, helpCard(), "Available commands: /resume, /sessions, /list, /help.", threadName);
+      await client.createCardMessage(spaceName, helpCard(), "Available commands: /model, /settings, /resume, /sessions, /list, /help.", threadName);
       logger.info(`[chat] ${display}: posted help card`);
       return "ok";
     },
@@ -188,51 +256,160 @@ const SLASH_COMMANDS: SlashCommand[] = [
  * so the caller falls through to a normal pi prompt.
  */
 export async function runCommand(ctx: CommandContext): Promise<HandleResult | null> {
-  const { client, router, incoming, sessionKey, actionKey, display, text } = ctx;
+  const { client, router, incoming, sessionKey, actionKey, spaceName, threadName, display, text } = ctx;
 
   // --- Interactive card events (dropdown selection, buttons) ---
   if (incoming.eventType === "CARD_CLICKED") {
+    if (incoming.action?.actionMethodName === THINKING_LEVELS_ACTION) {
+      // A model dropdown changed: Chat submits the form, so we know which model
+      // is now selected and can re-render the SAME card with that model's
+      // thinking levels (they're per-model, so a static card can't show them).
+      const mode = actionParam(incoming, "mode") === "settings" ? "settings" : "model";
+      const picked = formValue(incoming, mode === "settings" ? "default_model_picker" : "model_picker");
+      if (!picked) {
+        // No value in the payload (older client): leave the card untouched
+        // rather than re-rendering it into a possibly-wrong state. Apply still
+        // works — pi clamps whatever level was picked.
+        logger.info(`[chat] ${display}: ${THINKING_LEVELS_ACTION} without a selected value — card left as-is`);
+        return "ok";
+      }
+      const [provider = "", modelId = ""] = picked.split("|");
+      const supportedLevels = router.thinkingLevelsForModel(provider, modelId);
+      const models = await router.listModels();
+      const label = models.find((m) => m.provider === provider && m.id === modelId)?.label ?? modelId;
+      if (mode === "settings") {
+        await client
+          .updateMessageCards(
+            incoming.message.name,
+            settingsCard(models, router.defaultSettings(), { currentValue: picked, supportedLevels }),
+            `Defaults — ${label}: thinking levels ${supportedLevels?.join(", ") ?? "(unknown)"}`,
+          )
+          .catch((err) => logger.error("[chat] card update failed:", (err as Error).message));
+        logger.info(`[chat] ${display}: settings card re-rendered for ${picked} (levels ${supportedLevels?.join(",") ?? "?"})`);
+        return "ok";
+      }
+      // Same conversation-key rule as a model switch, minus session creation: a
+      // re-render must never start a conversation.
+      const targetKey = router.hasSession(actionKey)
+        ? actionKey
+        : sessionKey !== spaceName
+          ? sessionKey
+          : actionKey;
+      const starting = !router.hasSession(targetKey);
+      const thinkingLevel = starting ? undefined : await router.currentThinkingLevel(targetKey);
+      await client
+        .updateMessageCards(
+          incoming.message.name,
+          modelPickerCard(models, targetKey, starting ? undefined : await router.currentModel(targetKey), {
+            newConversation: starting,
+            thinkingLevel,
+            supportedLevels,
+            currentValue: picked,
+          }),
+          `${label}: thinking levels ${supportedLevels?.join(", ") ?? "(unknown)"}`,
+        )
+        .catch((err) => logger.error("[chat] card update failed:", (err as Error).message));
+      logger.info(
+        `[chat] ${display}: model picker re-rendered for ${picked} (levels ${supportedLevels?.join(",") ?? "?"}, key ${targetKey})`,
+      );
+      return "ok";
+    }
     if (incoming.action?.actionMethodName === MODEL_ACTION) {
-      const picked = selectedValue(incoming);
+      const picked = formValue(incoming, "model_picker") ?? anyFormValue(incoming);
       if (!picked) {
         await client
-          .updateMessageCards(incoming.message.name, modelConfirmCard({ ok: false, label: "", error: "No model was selected." }), "No model selected.")
+          .updateMessageCards(
+            incoming.message.name,
+            modelConfirmCard({ ok: false, modelLabel: "", error: "No model was selected." }),
+            "No model selected.",
+          )
           .catch((err) => logger.error("[chat] card update failed:", (err as Error).message));
         return "ok";
       }
       const [provider, modelId] = picked.split("|");
-      // /model only switches an EXISTING conversation's model (with no
-      // conversation it changes the default instead), so no new-conversation
-      // notice is posted here — the card is the confirmation.
-      const result = await router.switchModel(actionKey, provider ?? "", modelId ?? "");
+      // Absent on pre-/thinking cards; "keep" is the dropdown's explicit no-op.
+      const thinkingLevel = formValue(incoming, "thinking_picker");
+      // Which conversation does this pick belong to?
+      //  - The card's `session` parameter names the thread /model was typed in.
+      //    That's the right key whenever a session already exists there.
+      //  - With no session yet the pick STARTS a conversation, and the thread
+      //    it must start in is the thread the CARD lives in (`sessionKey`, from
+      //    the event's thread). Chat can post the picker as a new top-level
+      //    message, giving it a thread of its own — that new thread is where the
+      //    user's next messages arrive, so keying the session by the original
+      //    thread would strand it (the follow-up would open a fresh
+      //    default-model session instead).
+      //  - `sessionKey === spaceName` means the event carried no thread at all;
+      //    fall back to the parameter rather than hijacking the whole space.
+      const targetKey = router.hasSession(actionKey)
+        ? actionKey
+        : sessionKey !== spaceName
+          ? sessionKey
+          : actionKey;
+      const result: ConversationSettingsResult = await router.applyConversationSettings(targetKey, {
+        provider: provider ?? "",
+        modelId: modelId ?? "",
+        thinkingLevel,
+      });
       if (result.error === BUSY) {
         logger.info(`[chat] ${display}: busy, deferring model switch`);
         return "busy"; // leave unacked; retried once the session frees up
       }
+      const summary = result.ok
+        ? `-> ${result.modelLabel} · thinking ${result.thinkingLevel ?? "?"}`
+        : `failed: ${result.error}`;
       await client
-        .updateMessageCards(incoming.message.name, modelConfirmCard(result), `Model switch: ${result.ok ? result.label : result.error}`)
+        .updateMessageCards(incoming.message.name, modelConfirmCard(result), `Model switch: ${summary}`)
         .catch((err) => logger.error("[chat] card update failed:", (err as Error).message));
-      logger.info(`[chat] ${display}: model switch ${result.ok ? "-> " + result.label : "failed: " + result.error}`);
+      logger.info(`[chat] ${display}: model switch ${summary} (key ${targetKey})`);
+      if (result.ok && result.created) {
+        const note = `Starting a new conversation with model **${escapeHtml(result.modelLabel)}**` +
+          (result.thinkingLevel ? ` and thinking level **${escapeHtml(result.thinkingLevel)}**` : "") +
+          "…";
+        await client
+          .sendMessage(spaceName, note, threadName)
+          .catch((err) => logger.error("[chat] new-conversation notice failed:", (err as Error).message));
+        logger.info(`[chat] ${display}: started a new conversation on ${result.modelLabel}`);
+      }
       return "ok";
     }
-    if (incoming.action?.actionMethodName === SET_DEFAULT_MODEL_ACTION) {
-      const picked = selectedValue(incoming);
+    if (
+      incoming.action?.actionMethodName === SETTINGS_ACTION ||
+      // Cards posted by the pre-/settings bridge still send the old action id.
+      incoming.action?.actionMethodName === SET_DEFAULT_MODEL_ACTION
+    ) {
+      const picked =
+        formValue(incoming, "default_model_picker") ??
+        formValue(incoming, "model_picker") ??
+        anyFormValue(incoming);
       if (!picked) {
         await client
-          .updateMessageCards(incoming.message.name, defaultModelConfirmCard({ ok: false, label: "", error: "No model was selected." }), "No model selected.")
+          .updateMessageCards(
+            incoming.message.name,
+            settingsConfirmCard({ ok: false, modelLabel: "", error: "No model was selected." }),
+            "No model selected.",
+          )
           .catch((err) => logger.error("[chat] card update failed:", (err as Error).message));
         return "ok";
       }
       const [provider, modelId] = picked.split("|");
-      const result = await router.setDefaultModel(provider ?? "", modelId ?? "");
+      const thinkingLevel = formValue(incoming, "default_thinking_picker");
+      const result: DefaultSettingsResult = await router.setDefaults({
+        provider: provider ?? "",
+        modelId: modelId ?? "",
+        thinkingLevel,
+      });
+      const summary = result.ok
+        ? `-> ${result.modelLabel} · thinking ${result.thinkingLevel ?? "(unset)"}`
+        : `failed: ${result.error}`;
       await client
-        .updateMessageCards(incoming.message.name, defaultModelConfirmCard(result), `Default model: ${result.ok ? result.label : result.error}`)
+        .updateMessageCards(incoming.message.name, settingsConfirmCard(result), `Defaults: ${summary}`)
         .catch((err) => logger.error("[chat] card update failed:", (err as Error).message));
-      logger.info(`[chat] ${display}: default model ${result.ok ? "-> " + result.label : "failed: " + result.error}`);
+      logger.info(`[chat] ${display}: defaults ${summary}`);
       return "ok";
     }
     if (incoming.action?.actionMethodName === RESUME_ACTION) {
-      const picked = selectedValue(incoming);
+      const picked = formValue(incoming, "session_picker") ?? anyFormValue(incoming);
       if (!picked) {
         await client
           .updateMessageCards(incoming.message.name, errorCard("No session was selected."), "No session selected.")

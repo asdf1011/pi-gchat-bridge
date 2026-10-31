@@ -8,7 +8,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import fs from "node:fs";
 import path from "node:path";
-import { BUSY, SESSION_ABORT_TIMEOUT_MS } from "./constants.js";
+import { BUSY, SESSION_ABORT_TIMEOUT_MS, THINKING_KEEP, THINKING_LEVELS } from "./constants.js";
 import { logger } from "./logger.js";
 import { keyFor, legacySessionFile, sessionFileFor } from "./session-key.js";
 import {
@@ -16,6 +16,7 @@ import {
   contentText,
   readLastCustomEntryFromFile,
   readLastModelIds,
+  readLastThinkingLevel,
   readLatestDisplayName,
   seedNotificationFile,
   sessionFileHasMessagesSync,
@@ -69,6 +70,47 @@ export interface ModelInfo {
   label: string;
 }
 
+/** pi's thinking-level union, derived from the SDK so a change there is a
+ *  compile error here instead of a silent mismatch. Card/dropdown values are
+ *  plain strings; `thinkingLevel()` narrows one (pi validates + clamps anyway). */
+type ThinkingLevel = Parameters<AgentSession["setThinkingLevel"]>[0];
+const thinkingLevel = (level: string): ThinkingLevel => level as ThinkingLevel;
+
+/** The thinking levels a model supports — pi's own rule (pi-ai
+ *  `getSupportedThinkingLevels`, which the SDK doesn't re-export): a
+ *  non-reasoning model is `off` only; otherwise every level except those the
+ *  model's `thinkingLevelMap` nulls out, and `xhigh`/`max` only when mapped. */
+export function supportedThinkingLevels(model: {
+  reasoning?: boolean;
+  thinkingLevelMap?: Record<string, string | null>;
+}): string[] {
+  if (!model.reasoning) return ["off"];
+  return THINKING_LEVELS.filter((level) => {
+    const mapped = model.thinkingLevelMap?.[level];
+    if (mapped === null) return false;
+    if (level === "xhigh" || level === "max") return mapped !== undefined;
+    return true;
+  });
+}
+
+/** pi's clamp rule: the requested level when supported, else the nearest
+ *  supported level ABOVE it, else the nearest below (pi-ai
+ *  `clampThinkingLevel`, also not re-exported). Used to preview what a model
+ *  switch will actually do, so the card never shows a level that can't happen. */
+export function clampToSupported(levels: string[], level: string | undefined): string | undefined {
+  if (!level) return undefined;
+  if (levels.includes(level)) return level;
+  const requestedIndex = THINKING_LEVELS.indexOf(level as (typeof THINKING_LEVELS)[number]);
+  if (requestedIndex === -1) return levels[0];
+  for (let i = requestedIndex; i < THINKING_LEVELS.length; i++) {
+    if (levels.includes(THINKING_LEVELS[i])) return THINKING_LEVELS[i];
+  }
+  for (let i = requestedIndex - 1; i >= 0; i--) {
+    if (levels.includes(THINKING_LEVELS[i])) return THINKING_LEVELS[i];
+  }
+  return levels[0];
+}
+
 /** Result of a model switch. */
 export interface SwitchModelResult {
   ok: boolean;
@@ -76,6 +118,46 @@ export interface SwitchModelResult {
   error?: string;
   /** True when the switch created a brand-new conversation session. */
   created?: boolean;
+}
+
+/** A conversation's model + thinking level, as picked in the /model card. */
+export interface ConversationSettingsRequest {
+  provider: string;
+  modelId: string;
+  /** Requested thinking level, or undefined / "keep" to leave it as it was. */
+  thinkingLevel?: string;
+}
+
+/** Result of applying a conversation's model + thinking level. */
+export interface ConversationSettingsResult {
+  ok: boolean;
+  /** Display label of the model now in use (or the one that failed). */
+  modelLabel: string;
+  /** Effective thinking level after pi clamped it to the model's capabilities. */
+  thinkingLevel?: string;
+  /** The level that was asked for, when pi had to clamp it to something else. */
+  clampedFrom?: string;
+  error?: string;
+  /** True when the pick created a brand-new conversation session. */
+  created?: boolean;
+}
+
+/** The bridge's global defaults for NEW conversations (settings.json). */
+export interface DefaultSettings {
+  provider?: string;
+  modelId?: string;
+  /** Display label of the default model. */
+  modelLabel?: string;
+  /** `defaultThinkingLevel`; unset means pi falls back to "medium". */
+  thinkingLevel?: string;
+}
+
+/** Result of changing the global defaults. */
+export interface DefaultSettingsResult {
+  ok: boolean;
+  modelLabel: string;
+  thinkingLevel?: string;
+  error?: string;
 }
 
 /** Aggregate token usage for a conversation, summed from its session file. */
@@ -170,9 +252,9 @@ export class AgentRouter {
   }
 
   /**
-   * @returns the assistant reply text, or null if the session was busy and the
-   * message was skipped (caller should NOT mark it processed/acked so it is
-   * redelivered later).
+   * @returns the assistant reply text ("" when the turn produced no text), or
+   * null if the session was busy and the message was skipped (caller should NOT
+   * mark it processed/acked so it is redelivered later).
    *
    * If `onDelta` is provided, it is called with each streamed text delta from
    * the assistant, so the caller can render a live reply. `onToolStart` /
@@ -228,7 +310,10 @@ export class AgentRouter {
         reply = `${reply}${reply ? "\n\n" : ""}${this.lastAssistantText(entry.session)}`;
       }
       entry.pendingSteers = [];
-      return reply.trim() || null;
+      // "" (not null) when the turn produced no text at all — e.g. every model
+      // attempt failed with a connection error. null stays reserved for "session
+      // was busy", which callers answer by redelivering the message later.
+      return reply.trim();
     } finally {
       entry.prompting = false;
       unsubscribe?.();
@@ -306,7 +391,8 @@ export class AgentRouter {
   /**
    * Whether the conversation has an active (in-memory) or persisted session —
    * i.e. it's a real conversation, not a brand-new one. Used to decide between
-   * "switch this conversation" (/model) and "start a new conversation with it".
+   * the "switch this conversation" and "start this conversation on the picked
+   * model" wording for /model.
    */
   hasSession(sessionKey: string): boolean {
     if (this.sessions.has(sessionKey)) return true;
@@ -326,7 +412,7 @@ export class AgentRouter {
    */
   async switchModel(sessionKey: string, providerId: string, modelId: string): Promise<SwitchModelResult> {
     // A conversation with no session yet gets one created and started on the
-    // picked model — /model doubles as "start a new conversation with X".
+    // picked model — /model in a fresh thread starts the conversation on X.
     const created = !this.hasSession(sessionKey);
     let entry = this.sessions.get(sessionKey);
     if (!entry) {
@@ -388,34 +474,133 @@ export class AgentRouter {
     return `${model?.name ?? ids.modelId}${ids.provider ? ` (${ids.provider})` : ""}`;
   }
 
-  /** Display label for the global default model (settings.json). */
-  defaultModel(): string | undefined {
-    const settings = SettingsManager.create(this.cwd, getAgentDir(), { projectTrusted: false });
-    const provider = settings.getDefaultProvider();
-    const modelId = settings.getDefaultModel();
-    if (!provider || !modelId) return undefined;
+  /**
+   * The conversation's thinking level: from the open session when there is one
+   * (it holds the clamped, live value), else the last `thinking_level_change`
+   * entry in its file. Undefined when the conversation has neither.
+   */
+  async currentThinkingLevel(sessionKey: string): Promise<string | undefined> {
+    const open = this.sessions.get(sessionKey);
+    if (open) return open.session.thinkingLevel;
+    const file = this.resolvedSessionFile(sessionKey);
+    if (!file) return undefined;
+    return readLastThinkingLevel(file);
+  }
+
+  /** Thinking levels a SPECIFIC model supports — for the picker's preview of a
+   *  model the user just selected (no session needed). */
+  thinkingLevelsForModel(provider: string, modelId: string): string[] | undefined {
     const model = this.modelRuntime?.getModel(provider, modelId);
-    return `${model?.name ?? modelId}${provider ? ` (${provider})` : ""}`;
+    return model ? supportedThinkingLevels(model as Parameters<typeof supportedThinkingLevels>[0]) : undefined;
+  }
+
+  /** `provider|id` of the conversation's current model — the value the picker's
+   *  model dropdown uses, so a re-render keeps the selection. */
+  async currentModelValue(sessionKey: string): Promise<string | undefined> {
+    const ids = await this.currentModelIds(sessionKey);
+    return ids ? `${ids.provider}|${ids.modelId}` : undefined;
   }
 
   /**
-   * Change the GLOBAL default model (settings.json) — affects only NEW
-   * conversations. Existing conversations keep their current model until
-   * switched explicitly with /model in that conversation.
+   * Apply a /model pick: switch the conversation's model and set its thinking
+   * level in one go. Model first — pi re-derives the level on a model switch
+   * (per-model default → global default → clamped), so a picked level has to be
+   * applied after it, and `keep` has to be re-applied after it.
+   *
+   * A level the picked model doesn't support is clamped by pi; `clampedFrom`
+   * reports the requested value so the confirmation can say so.
    */
-  async setDefaultModel(providerId: string, modelId: string): Promise<SwitchModelResult> {
-    if (!this.modelRuntime) return { ok: false, label: modelId, error: "No model runtime" };
+  async applyConversationSettings(
+    sessionKey: string,
+    req: ConversationSettingsRequest,
+  ): Promise<ConversationSettingsResult> {
+    const requested = req.thinkingLevel && req.thinkingLevel !== THINKING_KEEP ? req.thinkingLevel : undefined;
+    // Capture the level to fall back to BEFORE the switch ("keep current").
+    const previousLevel = requested ? undefined : await this.currentThinkingLevel(sessionKey);
+
+    const switched = await this.switchModel(sessionKey, req.provider, req.modelId);
+    if (!switched.ok) {
+      return {
+        ok: false,
+        modelLabel: switched.label,
+        error: switched.error,
+        created: switched.created,
+      };
+    }
+
+    const entry = this.sessions.get(sessionKey);
+    if (entry) {
+      const wanted = requested ?? previousLevel;
+      if (wanted) entry.session.setThinkingLevel(thinkingLevel(wanted));
+    }
+    const effective = entry?.session.thinkingLevel;
+    const clampedFrom = requested && effective && requested !== effective ? requested : undefined;
+    logger.info(
+      `[router] ${sessionKey}: model=${req.provider}/${req.modelId} thinking=${effective ?? "?"}` +
+        (clampedFrom ? ` (requested ${clampedFrom}, clamped)` : ""),
+    );
+    return {
+      ok: true,
+      modelLabel: switched.label,
+      thinkingLevel: effective,
+      clampedFrom,
+      created: switched.created,
+    };
+  }
+
+  /** The global defaults for NEW conversations (settings.json). */
+  defaultSettings(): DefaultSettings {
+    const settings = SettingsManager.create(this.cwd, getAgentDir(), { projectTrusted: false });
+    const provider = settings.getDefaultProvider();
+    const modelId = settings.getDefaultModel();
+    const thinkingLevel = settings.getDefaultThinkingLevel();
+    const model = provider && modelId ? this.modelRuntime?.getModel(provider, modelId) : undefined;
+    return {
+      provider,
+      modelId,
+      modelLabel: modelId ? `${model?.name ?? modelId}${provider ? ` (${provider})` : ""}` : undefined,
+      thinkingLevel,
+    };
+  }
+
+  /** Display label for the global default model (settings.json). */
+  defaultModel(): string | undefined {
+    return this.defaultSettings().modelLabel;
+  }
+
+  /**
+   * Change the GLOBAL defaults (settings.json) — affects only NEW
+   * conversations. Existing conversations keep their own model and thinking
+   * level until switched explicitly with /model in that conversation.
+   *
+   * `defaultThinkingLevel` is model-independent, so a level the chosen default
+   * model doesn't support is clamped when a conversation is created from it.
+   */
+  async setDefaults(req: ConversationSettingsRequest): Promise<DefaultSettingsResult> {
+    const { provider: providerId, modelId } = req;
+    if (!this.modelRuntime) return { ok: false, modelLabel: modelId, error: "No model runtime" };
     const model = this.modelRuntime.getModel(providerId, modelId);
-    if (!model) return { ok: false, label: modelId, error: `Unknown model ${providerId}/${modelId}` };
+    if (!model) return { ok: false, modelLabel: modelId, error: `Unknown model ${providerId}/${modelId}` };
     if (!this.modelRuntime.hasConfiguredAuth(providerId)) {
-      return { ok: false, label: modelId, error: `No auth configured for ${providerId}` };
+      return { ok: false, modelLabel: modelId, error: `No auth configured for ${providerId}` };
     }
     try {
       const settings = SettingsManager.create(this.cwd, getAgentDir(), { projectTrusted: false });
       settings.setDefaultModelAndProvider(providerId, modelId);
-      return { ok: true, label: `${model.name ?? model.id}${providerId ? ` (${providerId})` : ""}` };
+      const requested = req.thinkingLevel && req.thinkingLevel !== THINKING_KEEP ? req.thinkingLevel : undefined;
+      if (requested) settings.setDefaultThinkingLevel(thinkingLevel(requested));
+      const effectiveLevel = settings.getDefaultThinkingLevel();
+      logger.info(
+        `[router] defaults: model=${providerId}/${modelId} thinking=${effectiveLevel ?? "(unset)"}` +
+          (requested ? "" : " (unchanged)"),
+      );
+      return {
+        ok: true,
+        modelLabel: `${model.name ?? model.id}${providerId ? ` (${providerId})` : ""}`,
+        thinkingLevel: effectiveLevel,
+      };
     } catch (err) {
-      return { ok: false, label: modelId, error: (err as Error).message };
+      return { ok: false, modelLabel: modelId, error: (err as Error).message };
     }
   }
 

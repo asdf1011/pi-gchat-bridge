@@ -69,7 +69,7 @@ That's it — the bot now answers messages in any space it's installed in.
   call finishes (tool results land first) and before the next LLM call, so
   pi keeps its tool loop active and addresses your new message alongside the
   original work — "tool call start, message, tool call response". Commands
-  (`/help`, `/model`, `/resume`) instead interrupt the running reply.
+  (`/help`, `/model`, `/settings`, `/resume`) instead interrupt the running reply.
 - **pi extensions & skills work** — the session loads your `~/.pi/agent`
   extensions, so `/commands` and skills behave like in the TUI.
 - **Images & text** — pasted (or uploaded) images are downloaded and passed to
@@ -93,16 +93,39 @@ That's it — the bot now answers messages in any space it's installed in.
   source session elsewhere (e.g. in the TUI) forks the conversation — those
   messages never appear in Chat.
 
-### Model switching and the default
+### Model and thinking level
 
-- **`/model` in a conversation** switches **only that conversation** to the
-  chosen model. The choice is written into the session file (`model_change`
-  entry), so it survives bridge restarts and other conversations are
-  unaffected. It does **not** change the global default.
-- **`/model` in a brand-new conversation** (no session yet) offers to change
-  the **default model** instead — shown with a note that it only affects
-  *new* conversations and that existing ones must be switched individually
-  with `/model` in each conversation.
+- **`/model` in a conversation** switches **only that conversation** — one
+  card with two dropdowns: model and thinking level. Both choices are written
+  into the session file (`model_change` / `thinking_level_change` entries), so
+  they survive bridge restarts and other conversations are unaffected. Neither
+  changes the global defaults.
+- **Thinking in the `/model` card** lists **only the levels the selected
+  model actually supports**, and re-renders when you change the model: the
+  dropdown carries an `onChangeAction`, so Chat submits the form and the
+  bridge patches the same card with that model's levels (they're per-model —
+  pi's rule is `reasoning: false` → `off` only, otherwise everything except
+  what `thinkingLevelMap` nulls out, with `xhigh`/`max` only when mapped).
+  `— keep current —` stays available only when the current level is one of
+  them; otherwise the dropdown pre-selects the level pi would clamp to (e.g.
+  `medium` → `high` on a model that lacks `medium`), so the card never shows a
+  level that can't happen. The confirmation still reports the level that took
+  effect. Non-reasoning models (`reasoning: false` in `models.json`) are
+  always `off`.
+- **`/model` in a brand-new conversation** (no session yet) **starts that
+  conversation** on the model you pick: the session is created on it (written
+  as a `model_change` entry) and the bridge posts a gchat-only notice
+  — *“Starting a new conversation with model …”* — that is never sent to pi.
+  The global defaults are untouched.
+- **`/settings`** (formerly `/defaultmodel`, still accepted as an alias)
+  changes the **defaults for *new* conversations** in settings.json, again as
+  model + thinking level, with the same dynamic thinking list.
+  Existing conversations keep their own model and
+  level — switch those individually with `/model` in each conversation.
+  `defaultThinkingLevel` is model-independent, so it is clamped per model when
+  a new conversation starts from it.
+- **`/status`** shows the conversation's model and thinking level (or, with no
+  conversation yet, the defaults that a new one would use).
 - API access needs an API key scoped to the provider's models, or the model
   will appear in the picker but fail to be selected.
 

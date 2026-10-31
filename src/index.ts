@@ -194,8 +194,18 @@ async function main(): Promise<void> {
 
       const final = reply.trim();
       if (!final) {
+        // pi finished the turn without any text — the usual cause is every
+        // model attempt failing (provider/connection error), which otherwise
+        // leaves only a deleted "Thinking…" stub and no explanation.
         await stream.abandon();
-        logger.info(`[chat] ${display}: empty reply, marker removed`);
+        await client
+          .sendMessage(
+            spaceName,
+            "The model returned no text — it failed to answer (provider or connection error). Check the bridge log, or switch models with **/model**.",
+            threadName,
+          )
+          .catch((err) => logger.error("[chat] empty-reply notice failed:", (err as Error).message));
+        logger.info(`[chat] ${display}: empty reply, posted a failure notice`);
         return "ok";
       }
 

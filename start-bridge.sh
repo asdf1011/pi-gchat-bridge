@@ -56,6 +56,23 @@ else
   log "WARNING: $PROJECT_DIR/../cron/start-cron.sh not found - cron not started"
 fi
 
+# --- Startup services: llama.cpp router (local models on :8090) ---
+# The router is a plain nohup'd llama-server process, so a container restart
+# kills it and nothing else would bring it back — pi models listed under
+# llama-local would then fail every request with "Connection error".
+# `ensure` is idempotent (health check first), so this is a no-op on a plain
+# bridge restart and never leaves two routers running.
+LFM_SERVER="$PROJECT_DIR/../cron/lfm-server.sh"
+if [ -x "$LFM_SERVER" ]; then
+  if "$LFM_SERVER" ensure; then
+    log "llama.cpp router up on :8090"
+  else
+    log "WARNING: llama.cpp router failed to start (see /workspace/logs/lfm-router.log)"
+  fi
+else
+  log "WARNING: $LFM_SERVER not found - local models unavailable"
+fi
+
 log "pi-gchat-bridge starting (log: $LOG_FILE)"
 while true; do
   node dist/index.js >> "$LOG_FILE" 2>&1 &

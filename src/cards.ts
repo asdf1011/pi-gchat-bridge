@@ -1,16 +1,89 @@
 import type { SessionStats } from "@earendil-works/pi-coding-agent";
 import type {
+  ConversationSettingsResult,
+  DefaultSettings,
+  DefaultSettingsResult,
   ModelInfo,
   SessionContext,
   SessionInfo,
   SessionUsage,
-  SwitchModelResult,
 } from "./agent-sessions.js";
-import { MODEL_ACTION, RESUME_ACTION, SET_DEFAULT_MODEL_ACTION } from "./constants.js";
+import { clampToSupported } from "./agent-sessions.js";
+import { MODEL_ACTION, RESUME_ACTION, SETTINGS_ACTION, THINKING_KEEP, THINKING_LEVELS, THINKING_LEVELS_ACTION } from "./constants.js";
 
 /** Escape text for use inside Chat card/message HTML (e.g. user-supplied names). */
 export function escapeHtml(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/**
+ * Items for a thinking-level dropdown.
+ *
+ * `supported` is the picked model's level list (pi's own rule). When it's known
+ * the dropdown lists ONLY those levels, so nothing on the card can't happen, and
+ * "keep current" is offered only if that level is one of them.
+ *
+ * When it's unknown (no session yet / old card) every level is listed and pi
+ * clamps on apply.
+ */
+function thinkingItems(
+  current: string | undefined,
+  opts?: { keep?: boolean; supported?: string[] },
+): { text: string; value: string; selected?: boolean }[] {
+  const supported = opts?.supported && opts.supported.length > 0 ? opts.supported : [...THINKING_LEVELS];
+  // What pi would actually do with `current` on this model (up-clamp first),
+  // so the pre-selection matches reality instead of silently landing on the
+  // dropdown's first item.
+  const effective = current === undefined ? undefined : clampToSupported(supported, current);
+  const items = supported.map((level) => ({
+    text: level,
+    value: level,
+    ...(level === effective ? { selected: true } : {}),
+  }));
+  const offerKeep = opts?.keep === true && (current === undefined || effective === current);
+  if (!offerKeep) return items;
+  return [
+    {
+      text: current ? `— keep current (${current}) —` : "— keep current —",
+      value: THINKING_KEEP,
+      ...(current ? {} : { selected: true }),
+    },
+    ...items,
+  ];
+}
+
+/** One line describing what the thinking dropdown is showing and why. */
+function thinkingHint(current: string | undefined, supported: string[] | undefined): string {
+  if (!supported || supported.length === 0) {
+    return "<br>Thinking levels are clamped to what the chosen model supports.";
+  }
+  const list = supported.map((l) => `<b>${escapeHtml(l)}</b>`).join(", ");
+  const note =
+    current && !supported.includes(current)
+      ? `<br>This model doesn't support <b>${escapeHtml(current)}</b> — the closest supported level will be used.`
+      : "";
+  return `<br>Thinking levels for this model: ${list}.${note}`;
+}
+
+/** onChangeAction for a model dropdown: asks Chat to submit the form so the
+ *  bridge can re-render the card with that model's thinking levels. */
+function levelsOnChange(mode: "model" | "settings", sessionKey?: string): unknown {
+  return {
+    function: THINKING_LEVELS_ACTION,
+    parameters: [
+      { key: "mode", value: mode },
+      ...(sessionKey ? [{ key: "session", value: sessionKey }] : []),
+    ],
+  };
+}
+
+/** "thinking <b>high</b>", or a note when pi had to clamp what was picked. */
+function thinkingSummary(result: ConversationSettingsResult): string {
+  if (!result.thinkingLevel) return "";
+  const level = `<b>${escapeHtml(result.thinkingLevel)}</b>`;
+  return result.clampedFrom
+    ? ` Thinking: ${level} <i>(${escapeHtml(result.clampedFrom)} isn't supported by this model)</i>.`
+    : ` Thinking: ${level}.`;
 }
 
 /** Dropdown + submit button card listing sessions; the button's click carries
@@ -116,18 +189,24 @@ export function sessionStatsCard(stats: SessionStats, name?: string): unknown[] 
   ];
 }
 
-/** Quick status card: current model + conversation token usage. */
+/** Quick status card: current model + thinking level + conversation token usage. */
 export function statusCard(info: {
   model?: string;
+  thinkingLevel?: string;
   defaultModel?: string;
+  defaultThinkingLevel?: string;
   context?: SessionContext;
   usage?: SessionUsage;
 }): unknown[] {
   const lines: string[] = [];
   if (info.model) {
     lines.push(`Model: <b>${escapeHtml(info.model)}</b>`);
+    if (info.thinkingLevel) lines.push(`Thinking: <b>${escapeHtml(info.thinkingLevel)}</b>`);
   } else if (info.defaultModel) {
     lines.push(`Model: <b>${escapeHtml(info.defaultModel)}</b> <i>(default — no conversation here yet)</i>`);
+    if (info.defaultThinkingLevel) {
+      lines.push(`Thinking: <b>${escapeHtml(info.defaultThinkingLevel)}</b> <i>(from /settings)</i>`);
+    }
     lines.push("Send a message to start a conversation with this model.");
   } else {
     lines.push("No model configured.");
@@ -162,21 +241,42 @@ export function statusCard(info: {
   ];
 }
 
-/** Dropdown + submit card listing models to switch THIS conversation to. */
-export function modelPickerCard(models: ModelInfo[], sessionKey: string, current?: string): unknown[] {
+/** Dropdown + submit card listing models + thinking levels to switch THIS
+ *  conversation to. With `newConversation` (no session yet) the same pick starts
+ *  the conversation on that model instead — copy changes, action stays the same.
+ *
+ *  The thinking dropdown lists every level (plus "keep current") rather than
+ *  only the picked model's: the levels depend on the model, which the card
+ *  can't know without a round trip — pi clamps the pick and the confirmation
+ *  reports the level actually in effect. */
+export function modelPickerCard(
+  models: ModelInfo[],
+  sessionKey: string,
+  current?: string,
+  opts?: {
+    newConversation?: boolean;
+    thinkingLevel?: string;
+    supportedLevels?: string[];
+    /** `provider|id` of the model to pre-select (keeps a re-render on-pick). */
+    currentValue?: string;
+  },
+): unknown[] {
+  const starting = opts?.newConversation === true;
   const currentNote = current ? ` (currently <b>${escapeHtml(current)}</b>)` : "";
-  const intro = "Switches the model for <b>this conversation only</b>.";
+  const intro = starting
+    ? "Starts <b>this conversation</b> on the model you pick. The defaults for new conversations are <b>not</b> changed — use <b>/settings</b> to change those."
+    : "Switches the model and thinking level for <b>this conversation only</b>.";
   return [
     {
       cardId: "model-picker",
       card: {
-        header: { title: "Switch backend model" },
+        header: { title: starting ? "Start a new conversation" : "Switch model & thinking" },
         sections: [
           {
             widgets: [
               {
                 textParagraph: {
-                  text: `${intro}${currentNote}`,
+                  text: `${intro}${currentNote}${thinkingHint(opts?.thinkingLevel, opts?.supportedLevels)}`,
                 },
               },
               {
@@ -184,17 +284,32 @@ export function modelPickerCard(models: ModelInfo[], sessionKey: string, current
                   name: "model_picker",
                   label: "Model",
                   type: "DROPDOWN",
+                  // Changing the model re-renders this card with that model's
+                  // thinking levels (Chat submits the form on a change).
+                  onChangeAction: levelsOnChange("model", sessionKey),
                   items: models.map((m) => ({
                     text: m.label,
                     value: `${m.provider}|${m.id}`,
+                    ...(opts?.currentValue === `${m.provider}|${m.id}` ? { selected: true } : {}),
                   })),
+                },
+              },
+              {
+                selectionInput: {
+                  name: "thinking_picker",
+                  label: "Thinking level",
+                  type: "DROPDOWN",
+                  items: thinkingItems(opts?.thinkingLevel, {
+                    keep: true,
+                    supported: opts?.supportedLevels,
+                  }),
                 },
               },
               {
                 buttonList: {
                   buttons: [
                     {
-                      text: "Switch model",
+                      text: starting ? "Start conversation" : "Apply",
                       onClick: {
                         action: {
                           function: MODEL_ACTION,
@@ -213,8 +328,8 @@ export function modelPickerCard(models: ModelInfo[], sessionKey: string, current
   ];
 }
 
-/** Confirmation card after a model switch. */
-export function modelConfirmCard(result: SwitchModelResult): unknown[] {
+/** Confirmation card after a model / thinking-level switch. */
+export function modelConfirmCard(result: ConversationSettingsResult): unknown[] {
   const safe = escapeHtml;
   return [
     {
@@ -228,8 +343,8 @@ export function modelConfirmCard(result: SwitchModelResult): unknown[] {
                 textParagraph: {
                   text: result.ok
                     ? result.created
-                      ? `New conversation on <b>${safe(result.label)}</b>.`
-                      : `Now on <b>${safe(result.label)}</b>.`
+                      ? `New conversation on <b>${safe(result.modelLabel)}</b>.${thinkingSummary(result)}`
+                      : `Now on <b>${safe(result.modelLabel)}</b>.${thinkingSummary(result)}`
                     : `${safe(result.error ?? "Unknown error")}`,
                 },
               },
@@ -241,20 +356,31 @@ export function modelConfirmCard(result: SwitchModelResult): unknown[] {
   ];
 }
 
-/** Card to change the GLOBAL default model (for NEW conversations only). */
-export function defaultModelCard(models: ModelInfo[], current?: string): unknown[] {
-  const currentNote = current ? ` (currently <b>${escapeHtml(current)}</b>)` : "";
+/** Card to change the GLOBAL defaults (model + thinking level) for NEW conversations. */
+export function settingsCard(
+  models: ModelInfo[],
+  defaults: DefaultSettings,
+  opts?: { currentValue?: string; supportedLevels?: string[] },
+): unknown[] {
+  const selectedValue =
+    opts?.currentValue ??
+    (defaults.provider && defaults.modelId ? `${defaults.provider}|${defaults.modelId}` : undefined);
+  const currentNote = defaults.modelLabel ? ` (currently <b>${escapeHtml(defaults.modelLabel)}</b>)` : "";
+  const levelNote = defaults.thinkingLevel
+    ? `Thinking currently <b>${escapeHtml(defaults.thinkingLevel)}</b>.`
+    : "Thinking level is unset — pi's default (<b>medium</b>) is used and clamped per model.";
   return [
     {
-      cardId: "default-model-picker",
+      cardId: "settings",
       card: {
-        header: { title: "Change default model" },
+        header: { title: "Settings for new conversations" },
         sections: [
           {
             widgets: [
               {
                 textParagraph: {
-                  text: `Sets the model for <b>new</b> conversations${currentNote}. Existing conversations are <b>not</b> affected — switch those individually with <b>/model</b> in each conversation.`,
+                  text:
+                    `Sets the defaults for <b>new</b> conversations${currentNote}. Existing conversations are <b>not</b> affected — switch those with <b>/model</b> inside each conversation.<br>${levelNote}${thinkingHint(defaults.thinkingLevel, opts?.supportedLevels)}`,
                 },
               },
               {
@@ -262,18 +388,33 @@ export function defaultModelCard(models: ModelInfo[], current?: string): unknown
                   name: "default_model_picker",
                   label: "Default model",
                   type: "DROPDOWN",
+                  // Same dynamic re-render as /model: the defaults card also
+                  // shows only the picked model's levels.
+                  onChangeAction: levelsOnChange("settings"),
                   items: models.map((m) => ({
                     text: m.label,
                     value: `${m.provider}|${m.id}`,
+                    ...(selectedValue === `${m.provider}|${m.id}` ? { selected: true } : {}),
                   })),
+                },
+              },
+              {
+                selectionInput: {
+                  name: "default_thinking_picker",
+                  label: "Default thinking level",
+                  type: "DROPDOWN",
+                  items: thinkingItems(defaults.thinkingLevel, {
+                    keep: true,
+                    supported: opts?.supportedLevels,
+                  }),
                 },
               },
               {
                 buttonList: {
                   buttons: [
                     {
-                      text: "Set default",
-                      onClick: { action: { function: SET_DEFAULT_MODEL_ACTION } },
+                      text: "Save defaults",
+                      onClick: { action: { function: SETTINGS_ACTION } },
                     },
                   ],
                 },
@@ -286,21 +427,22 @@ export function defaultModelCard(models: ModelInfo[], current?: string): unknown
   ];
 }
 
-/** Confirmation card after changing the default model. */
-export function defaultModelConfirmCard(result: { ok: boolean; label: string; error?: string }): unknown[] {
+/** Confirmation card after changing the global defaults. */
+export function settingsConfirmCard(result: DefaultSettingsResult): unknown[] {
   const safe = escapeHtml;
+  const level = result.thinkingLevel ? ` Thinking: <b>${safe(result.thinkingLevel)}</b>.` : "";
   return [
     {
-      cardId: "default-model-confirm",
+      cardId: "settings-confirm",
       card: {
-        header: { title: result.ok ? "Default model set" : "Couldn't set default model" },
+        header: { title: result.ok ? "Defaults saved" : "Couldn't save defaults" },
         sections: [
           {
             widgets: [
               {
                 textParagraph: {
                   text: result.ok
-                    ? `New conversations will use <b>${safe(result.label)}</b>. Existing conversations are unchanged — switch them with <b>/model</b> in each conversation.`
+                    ? `New conversations will use <b>${safe(result.modelLabel)}</b>.${level} Existing conversations are unchanged — switch them with <b>/model</b> in each conversation.`
                     : `${safe(result.error ?? "Unknown error")}`,
                 },
               },
@@ -315,8 +457,9 @@ export function defaultModelConfirmCard(result: { ok: boolean; label: string; er
 /** Card listing the bridge's slash commands. */
 export function helpCard(): unknown[] {
   const items = [
-    ["<b>/model</b>", "Switch this conversation's model (or set the default when there's no conversation here)"],
-    ["<b>/status</b>", "Show this conversation's model, context usage, and tokens"],
+    ["<b>/model</b>", "Switch this conversation's model and thinking level — or start this conversation on a model if it has none yet"],
+    ["<b>/settings</b>", "Change the default model and thinking level for new conversations (existing ones keep theirs)"],
+    ["<b>/status</b>", "Show this conversation's model, thinking level, context usage, and tokens"],
     ["<b>/resume</b>", "Resume a session (dropdown picker)"],
     ["<b>/sessions</b>", "Same as /resume"],
     ["<b>/list</b>", "Same as /resume"],

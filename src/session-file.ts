@@ -241,6 +241,24 @@ export async function readLastModelIds(file: string): Promise<{ provider: string
   return provider && modelId ? { provider, modelId } : undefined;
 }
 
+/** Latest `thinking_level_change` level for a session, or undefined when the
+ *  file has none (never changed since creation). */
+export async function readLastThinkingLevel(file: string): Promise<string | undefined> {
+  let level: string | undefined;
+  try {
+    await readSessionEntries(file, (entry) => {
+      // Later entries overwrite earlier ones (pi appends chronologically).
+      if (entry.type === "thinking_level_change" && typeof entry.thinkingLevel === "string") {
+        level = entry.thinkingLevel;
+      }
+      return false;
+    });
+  } catch {
+    // unreadable file
+  }
+  return level;
+}
+
 /** Latest `session_info` display name (set via /name), or undefined when unset. */
 export async function readLatestDisplayName(file: string): Promise<string | undefined> {
   let name: string | undefined;

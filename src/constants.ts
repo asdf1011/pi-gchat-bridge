@@ -11,10 +11,27 @@ export const TOOL_STATUS_DELAY_MS = 2000;
 
 /** Card action method for the session picker dropdown. */
 export const RESUME_ACTION = "resume_session";
-/** Card action method for the model picker dropdown. */
+/** Card action method for the model + thinking-level picker. */
 export const MODEL_ACTION = "switch_model";
-/** Card action method for the default-model picker button. */
+/** Card action method for the /settings (global defaults) card. */
+export const SETTINGS_ACTION = "set_defaults";
+/** Card action method for a model dropdown's onChangeAction: rebuilds the
+ *  thinking-level choices for the model that was just selected. Chat submits
+ *  the whole form on a selection change, so the picked model arrives in
+ *  formInputs and the card can be re-rendered server-side with the right
+ *  levels (a static card can't know them — they depend on the model). */
+export const THINKING_LEVELS_ACTION = "thinking_levels_for_model";
+/** Legacy action id of the pre-/settings default-model card — still handled so
+ *  cards posted before an upgrade keep working. */
 export const SET_DEFAULT_MODEL_ACTION = "set_default_model";
+
+/** pi's thinking levels, in pi's own order (off → max). Which of them are
+ *  actually available depends on the model — see `supportedThinkingLevels()`
+ *  in agent-sessions.ts (pi's own rule: `reasoning` + `thinkingLevelMap`). */
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export type ThinkingLevelName = (typeof THINKING_LEVELS)[number];
+/** Dropdown value meaning "don't change the thinking level". */
+export const THINKING_KEEP = "keep";
 
 /** How long to wait for a session abort to clear before force-resetting (ms). */
 export const SESSION_ABORT_TIMEOUT_MS = 15_000;
