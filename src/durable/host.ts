@@ -35,6 +35,7 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 import { logger } from "../logger.js";
 import { BindingsDoc, type BindingsValue, type ConversationBinding } from "./bindings-doc.js";
+import { ChatFormat } from "./extensions/chat-format.js";
 import { harnessSettings } from "./settings.js";
 
 export interface BridgeHostOptions {
@@ -82,9 +83,11 @@ export class BridgeHost {
     const modelRuntime = options.modelRuntime ?? (await ModelRuntime.create());
 
     const registry = createRegistry();
-    // The coding toolset the old bridge gave its sessions. Extension ports
-    // (chat-format, tool policy) land on top of this in a later step.
+    // The coding toolset the old bridge gave its sessions, plus the bridge's own
+    // output rules. Tool policy is not ported: per-conversation tools are
+    // `configure({ tools })` here, which is what the old extension enforced.
     registry.install(CodingTools);
+    registry.install(ChatFormat);
 
     const harness = await Harness.open(
       await openNodeSqliteStorage(options.dbPath),
