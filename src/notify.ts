@@ -57,7 +57,7 @@ export interface NotifyBody {
 export const VERDICT_CUSTOM_TYPE = "cron_notify";
 
 /** Verdict record shape persisted under VERDICT_CUSTOM_TYPE (last entry wins). */
-interface VerdictRecord {
+export interface VerdictRecord {
   verdict?: "YES" | "NO" | "UNCLEAR";
   reason?: string;
   /** True once the post has been confirmed. */
@@ -102,12 +102,12 @@ export function chunkText(text: string, max = MAX_MESSAGE_CHARS): string[] {
   return chunks;
 }
 
-function unauthorized(): NotifyResponse {
+export function unauthorized(): NotifyResponse {
   return { status: 401, json: { ok: false, error: "invalid notify token" } };
 }
 
 /** Post pre-chunked text; the first chunk creates/joins the keyed thread. */
-async function postText(
+export async function postText(
   client: ChatClient,
   space: string,
   chunks: string[],
@@ -134,7 +134,7 @@ export function parseVerdict(reply: string): "YES" | "NO" | undefined {
   return m ? (m[1] as "YES" | "NO") : undefined;
 }
 
-function readVerdict(rec: { data?: Record<string, unknown> } | undefined): VerdictRecord | undefined {
+export function readVerdict(rec: { data?: Record<string, unknown> } | undefined): VerdictRecord | undefined {
   return rec?.data as VerdictRecord | undefined;
 }
 
