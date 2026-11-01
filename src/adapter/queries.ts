@@ -24,8 +24,10 @@ import {
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai/models";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
+import type { ConversationSettingsResult } from "../agent-sessions.js";
 import type { BridgeHost } from "../durable/host.js";
 import { BindingsDoc, type ConversationBinding } from "../durable/bindings-doc.js";
+import { THINKING_KEEP } from "../constants.js";
 
 /** A model as the `/model` card lists it (same shape `cards.ts` already takes). */
 export interface ModelInfo {
@@ -222,4 +224,86 @@ export async function storeUsage(
     models: Record<string, unknown>;
     tools: Record<string, unknown>;
   };
+}
+
+/** Give a conversation a display name (`/name`). Chat-side label only. */
+export async function renameConversation(host: BridgeHost, chatKey: string, name: string): Promise<boolean> {
+  return host.harness.commit(async (tx) => {
+    const doc = await tx.doc(BindingsDoc);
+    const current = doc.byChatKey[chatKey];
+    if (!current) return false;
+    doc.byChatKey[chatKey] = { ...current, name };
+    return true;
+  }, host.context);
+}
+
+/**
+ * Point a Chat key at an existing conversation — `/resume` from the picker.
+ *
+ * The previous binding's display name is kept (it described the thread, not the
+ * transcript); model and thinking level are taken from the target conversation's
+ * own agent, so the card and `/status` describe what will actually run.
+ */
+export async function rebind(host: BridgeHost, chatKey: string, conversationId: number): Promise<boolean> {
+  const conversation = await host.harness.conversation(conversationId as ConversationId, host.context);
+  if (!conversation) return false;
+  const agent = await conversation.agent(host.context);
+  const target = agent.model;
+  if (!target) return false;
+  const level = agent.thinkingLevel;
+
+  return host.harness.commit(async (tx) => {
+    const doc = await tx.doc(BindingsDoc);
+    const previous = doc.byChatKey[chatKey];
+    doc.byChatKey[chatKey] = {
+      conversationId,
+      model: `${target.provider}/${target.modelId}`,
+      ...(level ? { thinking: String(level) } : {}),
+      createdAt: Date.now(),
+      ...(previous?.name ? { name: previous.name } : {}),
+    };
+    return true;
+  }, host.context);
+}
+
+/**
+ * Apply a `/model` pick: switch the conversation, or start it on that model when
+ * the thread has none yet.
+ *
+ * Mirrors the old `applyConversationSettings`, including its `created` flag,
+ * which the caller uses to post the "Starting a new conversation…" notice and to
+ * remember the card for topic titling.
+ */
+export async function applyModelPick(
+  host: BridgeHost,
+  chatKey: string,
+  request: { provider: string; modelId: string; thinkingLevel?: string },
+): Promise<ConversationSettingsResult> {
+  const model = host.modelRuntime.getModel(request.provider, request.modelId);
+  if (!model) return { ok: false, modelLabel: request.modelId, error: `Unknown model ${request.provider}/${request.modelId}` };
+  const label = `${model.name ?? model.id}${request.provider ? ` (${request.provider})` : ""}`;
+  const requested = request.thinkingLevel === THINKING_KEEP ? undefined : request.thinkingLevel;
+  const levels = supportedThinkingLevels(host.modelRuntime, request.provider, request.modelId);
+  // pi clamps to a level the model has; report what it will actually run.
+  const clamped = levels ? clampThinkingLevel(levels, requested) : requested;
+
+  try {
+    const existing = await host.bindingFor(chatKey);
+    if (existing) {
+      const result = await switchModel(host, chatKey, request.provider, request.modelId, clamped);
+      return {
+        ok: true,
+        modelLabel: label,
+        thinkingLevel: result.thinkingLevel,
+        ...(result.thinkingLevel && clamped && result.thinkingLevel !== clamped ? { clampedFrom: clamped } : {}),
+      };
+    }
+    await startConversation(host, chatKey, {
+      model: { provider: request.provider, modelId: request.modelId },
+      ...(clamped ? { thinkingLevel: clamped as never } : {}),
+    });
+    return { ok: true, modelLabel: label, thinkingLevel: clamped, created: true };
+  } catch (error) {
+    return { ok: false, modelLabel: label, error: (error as Error).message };
+  }
 }

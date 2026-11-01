@@ -32,6 +32,12 @@ export type ConversationBinding = {
   thinking?: string;
   /** Epoch ms, so a future `/sessions` can sort by recency without opening each conversation. */
   createdAt: number;
+  /**
+   * Display name set with `/name`. Chat-side only: pi-durable conversations have
+   * no name of their own, and the model never sees this. Optional, so adding it
+   * did not need a document version bump.
+   */
+  name?: string;
 };
 
 // A type alias, not an interface: pi-durable's JsonObject accepts literals with

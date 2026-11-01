@@ -21,6 +21,7 @@ import {
   SETTINGS_ACTION,
   THINKING_LEVELS_ACTION,
 } from "./constants.js";
+import { actionParam, anyFormValue, formValue } from "./card-input.js";
 import { logger } from "./logger.js";
 import type { HandleResult } from "./receiver.js";
 import type { StateStore } from "./state.js";
@@ -39,40 +40,6 @@ export interface CommandContext {
   threadName: string | undefined;
   display: string;
   text: string;
-}
-
-/** Read one widget's value from a CARD_CLICKED event's form inputs, by the
- *  widget's `name`. Needed now that cards carry several dropdowns (model +
- *  thinking level) — reading "the first value" would pick the wrong one.
- *  Selection values only arrive when a BUTTON submits the form — a dropdown's
- *  onChangeAction fires an event with no value. Widget values appear either as
- *  `input.selectionInput.selectedValues[]` / `input.stringInputs.value[]`
- *  (action.formInputs, legacy) or flattened under common.formInputs (new). */
-function formValue(incoming: IncomingMessage, name: string): string | undefined {
-  const formInputs = incoming.action?.formInputs;
-  if (!formInputs) return undefined;
-  const widget = formInputs[name];
-  if (!widget) return undefined;
-  const input = widget.input ?? widget;
-  return input?.selectionInput?.selectedValues?.[0] ?? input?.stringInputs?.value?.[0];
-}
-
-/** Fallback for cards posted before multi-dropdown support: any single value. */
-function anyFormValue(incoming: IncomingMessage): string | undefined {
-  const formInputs = incoming.action?.formInputs;
-  if (!formInputs) return undefined;
-  for (const key of Object.keys(formInputs)) {
-    const widget = formInputs[key];
-    const input = widget?.input ?? widget;
-    const value = input?.selectionInput?.selectedValues?.[0] ?? input?.stringInputs?.value?.[0];
-    if (value) return value;
-  }
-  return undefined;
-}
-
-/** Read one of a card action's static `parameters` (e.g. which selection's key). */
-function actionParam(incoming: IncomingMessage, key: string): string | undefined {
-  return incoming.action?.parameters?.find((p) => p.key === key)?.value;
 }
 
 /** A built-in slash command handled by the bridge (not sent to pi). */

@@ -15,9 +15,12 @@ import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 import { BridgeHost } from "../src/durable/host.js";
 import {
+  applyModelPick,
   clampThinkingLevel,
   conversationStatus,
   listConversations,
+  rebind,
+  renameConversation,
   startConversation,
   supportedThinkingLevels,
   switchModel,
@@ -130,4 +133,68 @@ test("listConversations returns newest first", async () => {
   await startConversation(h, "k2", { model: { provider: "deepseek", modelId: "flash" } });
   const list = await listConversations(h);
   assert.deepEqual(list.map((entry) => entry.chatKey), ["k2", "k1"]);
+});
+
+test("applyModelPick starts a conversation when the thread has none", async () => {
+  const h = await host();
+  const result = await applyModelPick(h, "spaces/sAAA/threads/pick1", {
+    provider: "deepseek",
+    modelId: "flash",
+    thinkingLevel: "high",
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.created, true);
+  assert.equal(result.thinkingLevel, "high");
+
+  const status = await conversationStatus(h, "spaces/sAAA/threads/pick1");
+  assert.equal(status.model, "deepseek/flash");
+});
+
+test("applyModelPick switches an existing conversation and clamps the level", async () => {
+  const h = await host();
+  await startConversation(h, "k", { model: { provider: "deepseek", modelId: "flash" } });
+  const result = await applyModelPick(h, "k", {
+    provider: "llama-local",
+    modelId: "small",
+    thinkingLevel: "high",
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.created, undefined);
+  // The local model has no reasoning levels, so the level clamps to "off"
+  // rather than the card claiming "high".
+  assert.equal(result.thinkingLevel, "off");
+});
+
+test("applyModelPick rejects an unknown model without touching the binding", async () => {
+  const h = await host();
+  const before = await h.bindingFor("k");
+  const result = await applyModelPick(h, "k", { provider: "nope", modelId: "nope" });
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? "", /Unknown model/);
+  assert.deepEqual(await h.bindingFor("k"), before);
+});
+
+test("renameConversation stores a display name without touching the agent", async () => {
+  const h = await host();
+  await startConversation(h, "k", { model: { provider: "deepseek", modelId: "flash" } });
+  assert.equal(await renameConversation(h, "k", "deploy postmortem"), true);
+  assert.equal((await h.bindingFor("k"))?.name, "deploy postmortem");
+  assert.equal(await renameConversation(h, "missing", "x"), false);
+  // The name is a Chat-side label: /status must not report it as a model change.
+  assert.equal((await conversationStatus(h, "k")).model, "deepseek/flash");
+});
+
+test("rebind points a key at another conversation and keeps the display name", async () => {
+  const h = await host();
+  const first = await startConversation(h, "k", { model: { provider: "deepseek", modelId: "flash" } });
+  await renameConversation(h, "k", "old thread");
+  const other = await startConversation(h, "other", { model: { provider: "llama-local", modelId: "small" } });
+
+  assert.equal(await rebind(h, "k", other.conversationId), true);
+  const binding = await h.bindingFor("k");
+  assert.equal(binding?.conversationId, other.conversationId);
+  assert.equal(binding?.model, "llama-local/small");
+  assert.equal(binding?.name, "old thread");
+  assert.notEqual(binding?.conversationId, first.conversationId);
+  assert.equal(await rebind(h, "k", 99_999), false);
 });

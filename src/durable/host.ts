@@ -207,6 +207,11 @@ export class BridgeHost {
     await this.harness.close(this.context);
   }
 
+  /** Working directory conversations start in. */
+  get cwdPath(): string {
+    return this.cwd;
+  }
+
   /** Where the SQLite file lives, resolved, for logs. */
   describeStorage(dbPath: string): string {
     return path.resolve(dbPath);
