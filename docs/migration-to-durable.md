@@ -455,3 +455,25 @@ Still outstanding from M4's original scope: the `/notify` *validation* path (run
 conversation, post only on a YES verdict). It maps to a `conversation` that is created but never bound
 to a Chat thread; the verdict itself can be a `cron_notify` write. Deferred to the wiring step rather
 than guessed at here.
+
+## M5 results (part 1: the query layer)
+
+`src/adapter/queries.ts` — the facts the command cards are fed by, on top of pi-durable. The command
+*dispatch* (which card to post for which command) is still to be written; the data behind it is done.
+
+| Check | Result |
+|---|---|
+| Unit tests (real Harness on MemoryStorage, no model calls) | 9 tests |
+| Thinking-level clamping, live | deepseek-flash supports `off`/`high`/`max`, so `minimal` clamps to `off`; llama-local supports `off`/`high`, so `high` survives |
+| `switchModel` consistency | agent and binding written in one commit; `/status` and the binding agree afterwards |
+| Full suite | 119/119 |
+
+Decisions:
+
+- **Defaults stay in `settings.json`.** `/settings` is shared with the TUI and cron, and pi-durable has
+  no notion of a host-wide default model, so moving it would split the two worlds for no gain.
+- **Session adoption is not a runtime query.** `/resume` of a pi session file becomes the one-shot M7
+  importer instead; durable conversations are listed from the bindings document.
+- **Clamping is pi's rule, not ours.** Asking for a level a model lacks clamps down to the nearest
+  supported level (and to `off` for a non-reasoning model), so the card never shows a level that
+  cannot take effect.
