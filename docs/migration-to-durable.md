@@ -616,3 +616,28 @@ Rollback at any point: stop the durable bridge and put the spaces back in the li
 Stop the live bridge, run the durable one on the *same* subscription, accept ~5 seconds of downtime, and
 be aware that during the test window messages in spaces outside `ALLOWED_SPACES` are pulled and ignored
 — so keep that window short and test in one space. Rollback is starting the other script.
+
+## Decision: thread-fork semantics are out of scope for the migration
+
+Raising the question, and the answer, so it isn't re-litigated mid-cutover.
+
+Today a Chat **space** holds two kinds of conversation: a top-level message is keyed by the space, a reply
+in a thread is keyed by the thread, and the two are unrelated. A thread therefore starts blank — ask
+something at top level, open a thread, say "why?", and the thread has no idea what you mean.
+
+pi-durable can do better: a thread could **fork** the space's conversation, inheriting history up to that
+point and then diverging. It matches what people expect and storage is cheap (a fork shares the prefix).
+
+It is **not** part of this migration:
+
+- it is new behaviour, not parity — the cutover already changes the engine underneath;
+- its cost lands on the first turn of every thread, which is the worst place for a surprise on a local
+  2B model (the 29-minute-prefill regime);
+- Chat does not tell us which message a thread replies to (events carry only `thread.name` and
+  `thread.key`), so the fork point can only be approximated — fork at the space's view when the thread
+  begins — or made exact only for messages that quote another;
+- existing threads have no parent link, so it would apply to new threads only: a mixed state that needs
+  documenting rather than pretending it is uniform.
+
+Revisit after the cutover, as a deliberate behaviour change with its own decision record. The
+approximation is the cheap version; quote-based exact forks would be additive on top.
