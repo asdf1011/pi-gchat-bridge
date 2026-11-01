@@ -115,6 +115,21 @@ export class ReplyStream {
     if (markers.get(sessionKey)?.owner === this.owner) markers.delete(sessionKey);
   }
 
+  /**
+   * Set the streamed text to a whole snapshot and schedule a debounced patch.
+   *
+   * pi-durable commits the in-flight answer as a complete partial rather than as
+   * deltas, so a durable-backed reply uses this instead of `onDelta`. It also
+   * makes a retried or rewritten answer recover: the next snapshot replaces the
+   * text instead of being appended to it.
+   */
+  onSnapshot(full: string): void {
+    if (full === this.streamed) return;
+    this.streamed = full;
+    if (this.streamed.length > MAX_MESSAGE_CHARS) return; // stop patching past the cap
+    if (!this.patchTimer) this.patchTimer = setTimeout(() => void this.patchNow(), PATCH_DEBOUNCE_MS);
+  }
+
   /** Append a streamed text delta and schedule a debounced patch. */
   onDelta(delta: string): void {
     this.streamed += delta;
