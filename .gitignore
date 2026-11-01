@@ -12,3 +12,4 @@ pi-agent/
 # Eval run artifacts (results/summary/report per run)
 evals/runs/
 sessions.pre-1.4.0/
+.env.durable

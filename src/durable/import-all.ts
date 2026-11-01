@@ -27,6 +27,8 @@ import path from "node:path";
 
 import { createHash } from "node:crypto";
 
+import { getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
+
 import { BridgeHost } from "./host.js";
 import { fullReplay, readLegacyMessages } from "./import-legacy.js";
 
@@ -201,7 +203,16 @@ async function main(): Promise<void> {
   }
 }
 
+/**
+ * The configured default model — not `getModels()[0]`, which is alphabetical and
+ * picked a Bedrock model the first time this ran, leaving 109 conversations
+ * configured for a provider with no credentials.
+ */
 function defaultModel(host: BridgeHost): { provider: string; modelId: string } {
+  const settings = SettingsManager.create(host.cwdPath, getAgentDir(), { projectTrusted: false });
+  const provider = settings.getDefaultProvider();
+  const modelId = settings.getDefaultModel();
+  if (provider && modelId) return { provider, modelId };
   const first = host.modelRuntime.getModels()[0];
   if (!first) throw new Error("no models configured");
   return { provider: first.provider, modelId: first.id };
