@@ -456,7 +456,7 @@ conversation, post only on a YES verdict). It maps to a `conversation` that is c
 to a Chat thread; the verdict itself can be a `cron_notify` write. Deferred to the wiring step rather
 than guessed at here.
 
-## M5 results (part 1: the query layer)
+## M5 results (part 2: the command layer) — M5 complete
 
 `src/adapter/queries.ts` — the facts the command cards are fed by, on top of pi-durable. The command
 *dispatch* (which card to post for which command) is still to be written; the data behind it is done.
@@ -477,3 +477,34 @@ Decisions:
 - **Clamping is pi's rule, not ours.** Asking for a level a model lacks clamps down to the nearest
   supported level (and to `off` for a non-reasoning model), so the card never shows a level that
   cannot take effect.
+
+### M5 part 2: the command layer
+
+`src/adapter/commands.ts` (+ `src/card-input.ts` extracted, so the SDK-host and durable paths share
+one set of card form readers while both exist).
+
+| Check | Result |
+|---|---|
+| Dispatch smoke, all commands against a real host with a fake Chat client | `/status`, `/sessions`, `/help`, `/model`, `/session`, `/abort`, `/new`, `/compact` all produce sensible output |
+| Unit tests | 124 total; 5 new for pick semantics, rename and rebind |
+
+Commands: `/model`, `/settings`, `/status`, `/session`, `/name`, `/help`, `/sessions|/resume|/list`,
+plus **new** `/new` and `/compact`.
+
+Three things worth flagging for review:
+
+- **Read-only commands must never create a conversation.** The first draft of `/compact` created one
+  as a side effect on an unbound thread. `/status`, `/abort`, `/compact` and `/name` now check the
+  binding first and say so instead.
+- **`/name` and `/resume` survive.** The name is an optional field on the binding document (no version
+  bump for an optional field), and the picker's value is the conversation id, so `/resume` *rebinds*
+  rather than importing a session file.
+- **`/status` reports different numbers, deliberately.** Durable keeps per-model token and cost totals
+  (`pi.usage`), not a per-session context counter, so the card shows entries + tokens + cost where it
+  used to show context occupancy. If occupancy matters, it needs deriving from the last assistant
+  message's usage — a small follow-up, not a blocker.
+
+`/model`'s "which thread does this pick belong to?" logic is the one piece carried over with reduced
+confidence: the old code had three cases (existing session, card posted in its own new thread, no
+thread at all). The durable version keeps the `chatKey`/`actionKey` distinction but is worth a
+deliberate test against real Chat before the cutover.
