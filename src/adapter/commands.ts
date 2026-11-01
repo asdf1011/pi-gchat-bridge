@@ -225,6 +225,26 @@ const SLASH_COMMANDS: SlashCommand[] = [
     },
   },
   {
+    pattern: /^\/engine\b/,
+    // Read-only, and the one command whose answer is unambiguous about which
+    // bridge replied: the SDK host has no such command, so a reply that says
+    // "engine=durable" cannot have come from it.
+    run: async ({ client, host, chatKey, spaceName, threadName, display }) => {
+      const binding = await host.bindingFor(chatKey);
+      const status = binding ? await conversationStatus(host, chatKey) : undefined;
+      const lines = [
+        "<b>engine=durable</b>",
+        `db: <code>${escapeHtml(host.dbPath)}</code>`,
+        `subscription: <code>${escapeHtml(process.env.PUBSUB_SUBSCRIPTION ?? "(unset)")}</code>`,
+        `spaces: <code>${escapeHtml(process.env.ALLOWED_SPACES || "(all)")}</code>`,
+        `this thread: ${binding ? `conversation ${status?.conversationId} · ${escapeHtml(status?.model ?? "?")}` : "no conversation yet"}`,
+      ];
+      await client.sendMessage(spaceName, lines.join("\n"), threadName);
+      logger.info(`[chat] ${display}: engine report (conversation ${status?.conversationId ?? "none"})`);
+      return "ok";
+    },
+  },
+  {
     pattern: /^\/status\b/,
     run: async ({ client, host, chatKey, spaceName, threadName, display }) => {
       const status = await conversationStatus(host, chatKey);
@@ -311,7 +331,7 @@ const SLASH_COMMANDS: SlashCommand[] = [
       await client.createCardMessage(
         spaceName,
         helpCard(),
-        "Available commands: /model, /settings, /status, /new, /abort, /compact, /session, /name, /resume, /sessions, /help.",
+        "Available commands: /model, /settings, /status, /engine, /new, /abort, /compact, /session, /name, /resume, /sessions, /help.",
         threadName,
       );
       logger.info(`[chat] ${display}: posted help card`);

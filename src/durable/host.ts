@@ -73,6 +73,8 @@ export class BridgeHost {
   private constructor(
     readonly harness: Harness,
     readonly modelRuntime: ModelRuntime,
+    /** SQLite file this harness owns. Exposed so commands can report it. */
+    readonly dbPath: string,
     private readonly cwd: string,
     /** Chord context for host calls (cancellation + telemetry). Exposed for adapters and tools. */
     readonly context: Context,
@@ -116,7 +118,7 @@ export class BridgeHost {
     // store, and the only thing that resumes a run interrupted by a restart.
     harness.resume();
 
-    return new BridgeHost(harness, modelRuntime, options.cwd, context);
+    return new BridgeHost(harness, modelRuntime, options.dbPath, options.cwd, context);
   }
 
   /** Current bindings, for `/sessions` and `/resume`. */
