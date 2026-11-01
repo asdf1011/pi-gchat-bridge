@@ -126,7 +126,7 @@ Rewrite `stream.ts`'s input, keep its Chat-API behaviour.
 
 **Exit:** a plain Chat Q&A and a tool-using turn look identical to today.
 
-### M4 — Routing, dedupe, steering
+### M4 — Routing, dedupe, steering — **DONE** (see [M4 results](#m4-results))
 
 - `src/adapter/router.ts` — replaces `AgentRouter`. `handleMessage(incoming)`:
   - key = `keyFor(space, thread, threadKey)` (unchanged function), looked up in the index doc;
@@ -426,3 +426,32 @@ Two design decisions the tests forced out:
 Tool arguments are the one field pi-durable does not put on `pi.live.tools` (it has `callId`, `name`,
 `status`, `output`), so they are joined from the newest tool-calling assistant entry. That join is the
 fragile part of this milestone and is why the projection is a pure function with its own tests.
+
+## M4 results
+
+`src/adapter/router.ts` — Chat message → durable submission, plus notification writes and interrupt.
+
+| Check | Result |
+|---|---|
+| Router unit tests (structural fake host) | 9 tests: requestId, content blocks, steer flag, write shape, interrupt |
+| Redelivery on a live model | same submission id, no second run |
+| Message sent 400 ms into a run | joined the run (`whenBusy: "steer"`); both submissions settled, 2 user + 2 assistant entries |
+| Notifications | `{type: "write", entry: {kind: "app.notice", model: [...]}}` — no run |
+| Full suite | 110/110 |
+
+Design notes:
+
+- `whenBusy: "steer"` is **unconditional**. pi-durable ignores it when the conversation is idle, so
+  there is no "is it busy?" check — and therefore no check-then-submit race, which the old
+  `isBusy()`/`steerWaitMs` pair had to manage.
+- A notification is a `write`, not an `input`: model content makes it visible to a later reply, and no
+  run starts. This deletes `appendNotificationTurns`, `seedNotificationSession` and the custom-entry
+  verdict bookkeeping in `notify.ts` — the remaining job there is posting to Chat.
+- Commands interrupt (`conversation.abort()`) while plain messages steer, matching `commands.ts`.
+- Images are content blocks; a bare string is kept when there are none, so the transcript stays
+  readable.
+
+Still outstanding from M4's original scope: the `/notify` *validation* path (run a hidden
+conversation, post only on a YES verdict). It maps to a `conversation` that is created but never bound
+to a Chat thread; the verdict itself can be a `cron_notify` write. Deferred to the wiring step rather
+than guessed at here.
