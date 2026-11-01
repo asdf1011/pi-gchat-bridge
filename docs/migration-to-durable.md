@@ -402,3 +402,27 @@ API notes worth carrying forward:
   context that cannot be omitted; the host exposes its own as `host.context`.
 - `conversationFor()` is race-safe for concurrent messages on one thread (an in-flight map), because
   Pub/Sub can deliver two messages for a thread in quick succession.
+
+## M3 results
+
+`src/adapter/{projection,view-sink}.ts` + `ReplyStream.onSnapshot()`. The sink is a translation layer,
+not a rewrite: every Chat-API behaviour in `stream.ts` (placeholder delay, in-place PATCH, 4,000-char
+chunking, code-fence repair, the notification trade-off in `finish()`) is reused unchanged.
+
+| Check | Result |
+|---|---|
+| Projection unit tests (hand-written view values) | 7 tests |
+| Sink unit tests (fake stream + fake view) | 6 tests, incl. attach-mid-run and detach |
+| End-to-end on a real tool turn (deepseek-flash) | status line `bash: date +%Y`, cleared once, final text matches the committed entry |
+| Full suite | 101/101 |
+
+Two design decisions the tests forced out:
+
+- **The sink never paints empty text.** `finish()` owns the final state and deletes the placeholder for
+  an empty or aborted reply. Painting `""` as the run ends would flash a blank message first.
+- **The sink dedupes the tool status itself** rather than leaning on `ReplyStream`'s no-op detection,
+  so progress commits for one long-running tool cannot spam PATCHes.
+
+Tool arguments are the one field pi-durable does not put on `pi.live.tools` (it has `callId`, `name`,
+`status`, `output`), so they are joined from the newest tool-calling assistant entry. That join is the
+fragile part of this milestone and is why the projection is a pure function with its own tests.
