@@ -158,7 +158,10 @@ current tool round; restart mid-run resumes and answers.
 
 **Exit:** every command in the current README works, plus the four new ones.
 
-### M6 — Watchdog, supervisor, parked tasks
+### M6 — Wiring (entrypoint, /notify, health) — **DONE** (see [M6 results](#m6-results))
+
+The harness owns crash recovery now, so the watchdog's remaining job is only a bound on a single model
+request (`settings.stream.timeoutMs`) and surfacing parked tasks.
 
 - Tool/model timeouts: `settings.stream.timeoutMs`, plus a host-side tool watchdog armed from the
   view (same idea as today's `BRIDGE_STALL_TIMEOUT_MS`, and as pi-pocket's tool watchdog).
@@ -536,3 +539,34 @@ durable and should not be relied on without testing.
 
 `~/.pi/agent/thinking-budgets.json` becomes dead config once the bridge and TUI are both on a path
 that ignores it. It is harmless to leave; remove it when the old extension is uninstalled.
+
+## M6 results: wiring
+
+`src/durable/main.ts` (second entrypoint) + `src/durable/notify.ts`. `dist/index.js` is untouched and
+still what the container runs.
+
+| Check | Result |
+|---|---|
+| Full handler with a fake Chat client, live local model | placeholder create → 3 streaming patches → final post → placeholder delete (the same call sequence the SDK host produces for `REPLACE_ON_FINISH=1`) |
+| /notify plain path | posted + recorded as a conversation write |
+| /notify validation path | rejected candidate never posted; already-posted not posted twice; 400/401 guards intact |
+| Full suite | 129/129 |
+
+Design notes:
+
+- **Second entrypoint, not a rewrite.** Switching engines is `node dist/index.js` vs
+  `node dist/durable/main.js`; rollback is the reverse. Only `.env`, the Chat app and the subscription are
+  shared, and only one instance may pull the subscription.
+- **Steering needs no relocation dance.** The old bridge moved the placeholder below a steering message
+  so the reply rendered in reading order. With `whenBusy: "steer"` the message joins the running turn
+  and the placeholder stays put.
+- **`BRIDGE_DB`** (default `./bridge.sqlite`) must be owned by the durable process alone. pi-durable has
+  no cross-process locking by design.
+- **Failure paths are explicit.** A turn that settles not-`done`, and an empty answer, each post a Chat
+  notice rather than leaving a deleted placeholder and silence.
+
+Not wired yet, deliberately:
+
+- **Topic titling** — the background titler reads the old session API; `BRIDGE_TOPIC_SUMMARY` is 0 in
+  this deployment, so it is dead code on the durable path until someone wants titles back.
+- **The replay corpus and cutover (M7).**
