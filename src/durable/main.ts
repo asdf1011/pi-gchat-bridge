@@ -129,6 +129,16 @@ async function main(): Promise<void> {
     logger.info(
       `[chat] ${display} [${incoming.message.name ?? "?"}]: ${incoming.eventType === "CARD_CLICKED" ? `card:${incoming.action?.actionMethodName}` : text.slice(0, 120)}`,
     );
+    if (incoming.eventType === "CARD_CLICKED") {
+      // The one event shape the bridge cannot control: Chat often omits the
+      // thread on a card click, which collapses `chatKey` to the space and makes
+      // the card's own `session` parameter the only reliable hint. Logged so a
+      // keying bug can be diagnosed from the log instead of inferred from
+      // behaviour.
+      logger.info(
+        `[chat] ${display}: card keying thread=${threadName ?? "(none)"} threadKey=${threadKey ?? "(none)"} chatKey=${chatKey} actionKey=${actionKey}${actionKey === chatKey ? "" : " (differ)"}`,
+      );
+    }
 
     const handled = await runDurableCommand({
       client,
