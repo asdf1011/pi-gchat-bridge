@@ -14,7 +14,9 @@
     "evals:regrade": "node evals/regrade.mjs"
   },
   "dependencies": {
+    "@earendil-works/chord": "^1.4.0",
     "@earendil-works/pi-coding-agent": "1.4.0",
+    "@earendil-works/pi-durable": "^1.4.0",
     "dotenv": "^16.4.5"
   },
   "devDependencies": {
