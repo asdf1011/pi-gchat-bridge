@@ -570,3 +570,49 @@ Not wired yet, deliberately:
 - **Topic titling** — the background titler reads the old session API; `BRIDGE_TOPIC_SUMMARY` is 0 in
   this deployment, so it is dead code on the durable path until someone wants titles back.
 - **The replay corpus and cutover (M7).**
+
+## Cutover: how to run the durable bridge beside the live one
+
+Read this before running anything. Two rules make it safe:
+
+1. **One bridge per subscription.** With two instances pulling the same subscription, each message is
+   delivered to only the one that pulls it first — replies get split, which looks like the bot ignoring
+   people at random. So the durable bridge needs its **own subscription on the same topic**.
+2. **One process owns `BRIDGE_DB`.** pi-durable has no cross-process locking; a second opener corrupts
+   rather than shares.
+
+### One-time console setup (2 clicks, Google Cloud)
+
+1. Pub/Sub → the existing topic (`chat-events`) → **Create subscription**, name
+   `chat-events-sub-durable`, delivery type **Pull**.
+2. On the new subscription, grant the bot service account **Pub/Sub Subscriber** (the same binding the
+   existing subscription has). A new subscription does not inherit it.
+
+### Then
+
+```bash
+cd /workspace/pi-gchat-bridge
+
+# .env.durable — only the differences from .env
+cat > .env.durable <<'ENV'
+PUBSUB_SUBSCRIPTION=projects/pi-chat-bridge-v2/subscriptions/chat-events-sub-durable
+BRIDGE_DB=/workspace/pi-gchat-bridge/bridge.sqlite
+ALLOWED_SPACES=<one scratch space name or ID>
+PORT=8081
+ENV
+
+./start-bridge-durable.sh      # leave the live bridge running
+```
+
+Both bridges now receive every event; `ALLOWED_SPACES` keeps exactly one of them answering each space.
+Move your real spaces over one at a time by editing the two allow-lists and restarting each — no message
+is dropped or answered twice, because each space has exactly one responder at every moment.
+
+Rollback at any point: stop the durable bridge and put the spaces back in the live bridge's allow-list.
+`bridge.sqlite` is additive; `state.json` and `sessions/` are never touched by the durable engine.
+
+### Fallback if the console steps are unavailable
+
+Stop the live bridge, run the durable one on the *same* subscription, accept ~5 seconds of downtime, and
+be aware that during the test window messages in spaces outside `ALLOWED_SPACES` are pulled and ignored
+— so keep that window short and test in one space. Rollback is starting the other script.
