@@ -95,7 +95,7 @@ Prove the stack on *this* machine before touching the bridge. All exit criteria 
 
 **Exit:** legacy bridge behaves identically on 1.4.0. This is independently shippable.
 
-### M2 — Durable host skeleton
+### M2 — Durable host skeleton — **DONE** (host + bindings; see [M2 results](#m2-results))
 
 New `src/durable/`:
 
@@ -374,3 +374,31 @@ reminder to test the real consumer path rather than a convenient one.
 
 Rollback: `git revert` the dependency commit and `npm install`; sessions are untouched by the
 upgrade itself (see the hazard note above).
+
+## M2 results
+
+`src/durable/{host,settings,bindings-doc,smoke}.ts` — the harness host and the thread → conversation
+join. Development happens **in place on the `durable` branch**, not in a separate checkout: the
+running bridge executes `dist/index.js`, so editing `src/` does not touch it, and the only dependency
+change is additive (`pi-durable`, `chord`). No restart is needed for M2.
+
+Verified with `npx tsx src/durable/smoke.ts`, twice against one database:
+
+| Check | Result |
+|---|---|
+| First run creates a conversation | conversation 2, bound to the Chat key, answer "Nile" |
+| Second run (new process, same db) | same conversation 2, **no** creation |
+| Same prompt twice | same submission id — `requestId` dedupe holds across processes |
+| Bindings document round-trips | `{conversationId, model, createdAt}` |
+
+API notes worth carrying forward:
+
+- Doc value types must be **type aliases, not interfaces** — `JsonObject` accepts an implicit index
+  signature and interfaces never get one.
+- `ConversationId` is a branded number; store it as `number` in JSON and cast at the call site.
+- `Settings` requires the full shape, not a partial: `compaction`, `steeringMode`, `followUpMode`,
+  `afterFailedRun`, `restartLimit` all need explicit choices. `settings.ts` documents each.
+- `conversation.viewState(context)` and `conversation.commit(change, context)` both take a Chord
+  context that cannot be omitted; the host exposes its own as `host.context`.
+- `conversationFor()` is race-safe for concurrent messages on one thread (an in-flight map), because
+  Pub/Sub can deliver two messages for a thread in quick succession.
