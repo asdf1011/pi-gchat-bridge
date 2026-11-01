@@ -508,3 +508,31 @@ Three things worth flagging for review:
 confidence: the old code had three cases (existing session, card posted in its own new thread, no
 thread at all). The durable version keeps the `chatKey`/`actionKey` distinction but is worth a
 deliberate test against real Chat before the cutover.
+
+## Decision: `thinking-budget` is dropped, not ported
+
+The extension caps thinking tokens per model and level, and it exists for exactly one entry:
+`llama-local/lfm3-vl-2b-q8` at level `high`, capped to 2048. The point was latency on a slow local
+2B, where thinking and the answer share `max_tokens`.
+
+It stays behind because:
+
+- nothing else uses it — no other model has an entry;
+- pi-durable's `GenerationTask.beforeRequest` hook exposes only `messages`, not provider request
+  options, so the request-body patch has no equivalent;
+- the coarse control already exists: `/model` offers only the levels that model supports, and this
+  one supports `off` and `high`.
+
+If the local model becomes noticeably slow again, the reliable fix is one flag on the server, not an
+extension:
+
+```
+--reasoning-budget 2048     # cron/lfm-server.sh, global to the model (only ever served locally)
+```
+
+pi 1.4 does expose `compat.thinkingTokenBudgetField` in `models.json`, but the level→tokens map lives
+in pi's `settings.json`, which pi-durable does not read — so that path is **not** guaranteed under
+durable and should not be relied on without testing.
+
+`~/.pi/agent/thinking-budgets.json` becomes dead config once the bridge and TUI are both on a path
+that ignores it. It is harmless to leave; remove it when the old extension is uninstalled.
