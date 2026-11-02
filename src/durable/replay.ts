@@ -33,6 +33,26 @@ interface Sample {
   expected: string;
 }
 
+
+/**
+ * Is this prompt replayable without its surrounding conversation?
+ *
+ * The first replay run took 36-91s per prompt because it replayed the *last*
+ * pairs of a long thread, which are full of "Let's do it" and "Ok, go ahead" —
+ * prompts whose referent is the previous turn. Stripped of context the model
+ * has to reason about what "it" means, which is slow and tests nothing about
+ * the engine. Real traffic has a referent; a replay that removes it is a worse
+ * test than a shorter, self-contained one.
+ */
+function isSelfContained(text: string): boolean {
+  const trimmed = text.trim();
+  // Injected notifications and harness notices.
+  if (trimmed.startsWith("<")) return false;
+  // Too short to carry its own referent ("Ok", "Go", "Let's do it").
+  if (trimmed.length < 60) return false;
+  return true;
+}
+
 /** Text of a legacy message entry, or "" when it carries none (tool-only turns). */
 function textOf(message: { role?: string; content?: unknown }): string {
   const content = message.content;
@@ -65,9 +85,7 @@ function samplesFrom(file: string, want: number): Sample[] {
     if (!message) continue;
     if (message.role === "user") {
       const text = textOf(message);
-      // Skip notification injections and steering chatter: only a prompt that
-      // looks like a person asking something is a fair replay sample.
-      pendingPrompt = text && !text.startsWith("<") ? text : undefined;
+      pendingPrompt = text && isSelfContained(text) ? text : undefined;
       continue;
     }
     if (message.role === "assistant" && pendingPrompt) {
