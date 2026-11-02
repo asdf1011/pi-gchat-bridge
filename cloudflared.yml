@@ -1,0 +1,49 @@
+# cloudflared configuration for the pi bridge web UI.
+#
+# Install alongside the bridge (same container is fine — cloudflared is a single
+# static binary). It opens OUTBOUND connections to Cloudflare's edge, so there is
+# no port forward, no public IP and no inbound firewall rule: inbound requests
+# are delivered down the connections it already holds.
+#
+#   cloudflared tunnel login
+#   cloudflared tunnel create pi-bridge      # writes <tunnel-id>.json
+#   cloudflared tunnel route dns pi-bridge pi.example.com
+#   cloudflared tunnel --config cloudflared.yml run
+#
+# Then in Cloudflare Zero Trust → Access → Applications, add a self-hosted
+# application for pi.example.com with a policy allowing only your email. Access
+# enforces it at the EDGE: unauthenticated requests never enter the tunnel, so
+# they never reach this machine. Nothing in the bridge implements auth.
+#
+# The bridge must bind loopback only (BRIDGE_BIND=127.0.0.1, the default), or
+# the tunnel is decorative — anything else that can reach the port could submit
+# as the bot, and could send the identity header itself.
+#
+# Every key below is from cloudflared's own config/configuration.go, not from
+# memory: `disableChunkedEncoding` in particular disables chunked transfer
+# encoding, which is the setting that matters for a long-lived event stream.
+# `noHappyEyeballs` exists but is about dual-stack dialling, not buffering — it
+# would have been cargo cult.
+
+tunnel: pi-bridge
+credentials-file: /etc/cloudflared/<tunnel-id>.json
+
+ingress:
+  - hostname: pi.example.com
+    service: http://127.0.0.1:8081
+    originRequest:
+      # SSE carries the live answer. Without this, chunked encoding lets the
+      # edge hold frames until the response ends — and an event stream never
+      # ends, so the page would sit blank while the model streamed.
+      disableChunkedEncoding: true
+      # Must exceed the bridge's 15s keepalive comment, or the edge closes an
+      # otherwise-healthy idle stream between turns.
+      keepAliveTimeout: 90s
+      keepAliveConnections: 8
+      connectTimeout: 30s
+      tlsTimeout: 10s
+      # The bridge serves one hostname; send it the one the browser used.
+      httpHostHeader: pi.example.com
+
+  # Anything not matched above 404s at the edge rather than reaching the bridge.
+  - service: http_status:404

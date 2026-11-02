@@ -33,6 +33,8 @@ import { BridgeHost } from "./host.js";
 import { BridgeLockedError } from "./lock.js";
 import { handleDurableNotify } from "./notify.js";
 import { attachWebClient, webIndex, webSubmit, WEB_PAGE } from "../adapter/web.js";
+import { applyDurableTopicSummary } from "./topic.js";
+import { identify } from "./identity.js";
 import { failureNotice } from "./failure-notice.js";
 import { AgentRouter } from "../agent-sessions.js";
 
@@ -85,6 +87,13 @@ async function main(): Promise<void> {
     const server = http.createServer((req, res) => {
       void (async () => {
         const url = new URL(req.url ?? "/", "http://localhost");
+        // Resolved once per request. The header is only believed when the socket
+        // peer is the configured proxy, so it cannot be forged by anything that
+        // can merely reach the port.
+        const who = identify(req, config.trustedProxy);
+        if (who.untrustedHeader) {
+          logger.warn(`[web] identity header from untrusted peer ${req.socket.remoteAddress} — ignored`);
+        }
         try {
           if (req.method === "GET" && url.pathname === "/healthz") {
             res.writeHead(200, { "Content-Type": "text/plain" });
@@ -217,6 +226,13 @@ async function main(): Promise<void> {
               Number(send[1]),
               text,
             );
+            if (result.ok) {
+              // Who asked, and which conversation: this bridge can run shell
+              // commands, so "who submitted this" belongs in the log.
+              logger.info(
+                `[web] ${who.email ?? "anonymous"}: submitted to conversation ${send[1]} (submission ${result.submissionId})`,
+              );
+            }
             res.writeHead(result.ok ? 202 : 400, { "Content-Type": "application/json" });
             res.end(JSON.stringify(result));
             return;
@@ -232,7 +248,17 @@ async function main(): Promise<void> {
         }
       })();
     });
-    server.listen(config.healthPort, () => logger.info(`[bridge] health + notify on :${config.healthPort}`));
+    server.listen(config.healthPort, config.bindAddress, () => {
+      const where = `${config.bindAddress}:${config.healthPort}`;
+      logger.info(`[bridge] health + notify + web on ${where}`);
+      if (config.bindAddress === "0.0.0.0" || config.bindAddress === "::") {
+        logger.warn(
+          "[bridge] BRIDGE_BIND is all interfaces: anything that can reach this port can submit as the bot. " +
+            "Bind 127.0.0.1 and put the tunnel or proxy in front.",
+        );
+      }
+      if (config.trustedProxy) logger.info(`[bridge] identity headers trusted from ${config.trustedProxy}`);
+    });
   }
 
   // --- One Chat message → one durable submission → one Chat reply. ---
@@ -344,6 +370,24 @@ async function main(): Promise<void> {
       }
 
       await stream.finish(final);
+
+      // Detached: a CPU titler can take minutes, and the reply is already
+      // delivered. Only fires when /model left a pending card for this thread,
+      // so it is free to call on every turn.
+      if (config.topicSummary) {
+        void applyDurableTopicSummary({
+          state,
+          host,
+          client,
+          chatKey,
+          display,
+          config: {
+            baseUrl: config.topicSummaryBaseUrl,
+            model: config.topicSummaryModel,
+            timeoutMs: config.topicSummaryTimeoutMs,
+          },
+        });
+      }
       return "ok";
     } catch (error) {
       const aborted = (error as Error)?.name === "AbortError";

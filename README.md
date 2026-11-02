@@ -116,6 +116,29 @@ twice.
   from a second, blind in-memory harness. Two supervisors cannot run either
   (`.start-bridge.pid`).
 
+### Two local servers, and why
+
+`lfm-server.sh` runs the same model **twice**: the conversation router on
+`:8090` and a titler on `:8091`. That looks wasteful and is deliberate.
+
+- **A title is a one-shot summary.** It is never resumed, so caching its prompt
+  is worthless — but it is long, and on CPU it is expensive to prefill.
+- **Sharing slots is the problem.** Titles used to go to the conversation
+  router. With `-np 2`, every title took a slot and evicted that slot's KV
+  prefix — i.e. it silently destroyed precisely the cache that makes
+  conversations fast. Because the summary is long and the conversation prefix
+  is what got thrown away, this was the single worst way to spend those slots.
+- **Pinning `id_slot` does not fix it.** It protects one slot by permanently
+  spending the other, so a title and a conversation could still never run at
+  the same time — and the pinned slot's contents still get overwritten.
+- **Separate processes cost little and remove it entirely.** The titler runs
+  `-np 1 -c 8192` (a title needs a fraction of the context) for roughly 180 MiB,
+  and the bridge sends `cache_prompt: false` on every title request, so the
+  titler's slot accumulates nothing it will never reuse.
+
+The bridge defaults `BRIDGE_TOPIC_SUMMARY_BASE_URL` to `:8091` for this reason.
+Pointing it back at `:8090` "works" but reintroduces the eviction.
+
 ### Model and thinking level
 
 - **`/model` in a conversation** switches **only that conversation** — one
@@ -209,9 +232,38 @@ work with no base-path configuration. Two proxy settings matter:
 - **Read timeout above ~30 s** — the server sends a `keepalive` comment every
   15 s
 
-**Security.** There is no per-user auth: anyone who can reach the port can read
-every conversation and submit as the bot. Bind it to a tailnet or private
-network, and set `BRIDGE_WEB_TOKEN` if it needs to listen more widely.
+**Security.** The bridge implements **no authentication of its own**, by
+design: it binds `127.0.0.1` (`BRIDGE_BIND`) and expects an identity-aware proxy
+in front of it. Anyone who can reach the port can read every conversation and
+submit as the bot — and this bot can run `bash`. Do not bind `0.0.0.0` unless
+that is genuinely what you want.
+
+### Reaching it without a VPN client
+
+`tailscale serve` is the simplest option if every device can run Tailscale. For
+devices that can't, **Cloudflare Tunnel + Access** gives a public hostname with
+SSO and no client — see [`cloudflared.yml`](cloudflared.yml):
+
+```
+browser → Cloudflare edge → Access policy → tunnel → 127.0.0.1:8081
+```
+
+- **Authentication happens at the edge.** Access evaluates the policy *before*
+  the request enters the tunnel, so unauthenticated traffic never reaches this
+  machine. Nothing in the bridge decides who gets in.
+- Cloudflare then injects `Cf-Access-Authenticated-User-Email`, which the bridge
+  **logs per submission** (`[web] <email>: submitted to conversation N`).
+- Identity headers are honoured only when the socket peer is
+  `BRIDGE_TRUSTED_PROXY` — otherwise they are spoofable by anything that can
+  reach the port, and a warning is logged instead.
+- **`disableChunkedEncoding: true`** in the tunnel config is required for SSE:
+  without it the edge can hold frames until the response ends, and an event
+  stream never ends. `keepAliveTimeout` must exceed the 15 s keepalive the
+  bridge sends.
+
+Cost is $0 for a single user (Zero Trust Free includes 50 seats). The trade is
+that Cloudflare terminates TLS and can see prompts and command output — a real
+decision for a bridge with shell access.
 
 ## Configuration
 
@@ -222,7 +274,9 @@ network, and set `BRIDGE_WEB_TOKEN` if it needs to listen more widely.
 | `PI_CWD` | bridge dir | Working dir for pi tools |
 | `BRIDGE_ENGINE` | `durable` | `durable` (Pi Durable) or `sdk` (the old SDK host, kept for rollback) |
 | `BRIDGE_DB` | `./bridge.sqlite` | The durable store. One process owns it |
-| `BRIDGE_WEB_TOKEN` | — | Bearer token for web writes; empty = no check (tailnet-only) |
+| `BRIDGE_BIND` | `127.0.0.1` | Address the HTTP server binds. Loopback by default; a tunnel or proxy goes in front |
+| `BRIDGE_TRUSTED_PROXY` | — | Address identity headers are trusted from. Empty = trust none, even on loopback |
+| `BRIDGE_WEB_TOKEN` | — | Bearer token for web writes; empty = no check (rely on the proxy) |
 | `BRIDGE_SESSIONS_DIR` | `./sessions` | Legacy JSONL sessions — read by the importer and the old engine only |
 | `BRIDGE_STATE_FILE` | `./state.json` | Legacy dedupe state — superseded by the store's submission ids |
 | `PORT` | `8080` | Health endpoint (0 disables) |
@@ -233,7 +287,7 @@ network, and set `BRIDGE_WEB_TOKEN` if it needs to listen more widely.
 | `ALLOWED_USERS` | — | Comma-separated users (name or ID) allowed to trigger pi; empty = anyone |
 | `BRIDGE_REPLACE_ON_FINISH` | `1` | `1`: post the final answer as a new message (the completion notification), then delete the streaming placeholder (leaves a "Message deleted" stub). `0`: keep the patched placeholder as the answer (no stub; the notification is the one posted when the placeholder appears). |
 | `BRIDGE_TOPIC_SUMMARY` | `1` | Re-title the `/model` "Model switched" card with a local-model topic line once the first reply lands. `0` keeps the plain wording. |
-| `BRIDGE_TOPIC_SUMMARY_BASE_URL` | `http://127.0.0.1:8090/v1` | OpenAI-compatible endpoint of the local model used for titles (llama.cpp). |
+| `BRIDGE_TOPIC_SUMMARY_BASE_URL` | `http://127.0.0.1:8091/v1` | The **titler** server (see [Two local servers](#two-local-servers-and-why)). Not the conversation router. |
 | `BRIDGE_TOPIC_SUMMARY_MODEL` | `lfm3-vl-2b-q8` | Model id requested from that endpoint. |
 | `BRIDGE_TOPIC_SUMMARY_TIMEOUT_MS` | `900000` (15 min) | Give up on a title after this long — CPU inference is slow and the server may have one slot. The job is detached, so waiting is free. |
 
@@ -282,6 +336,7 @@ redelivered by Pub/Sub to the fresh session.
 - [x] Streaming replies (live in-place editing)
 - [x] Pi Durable engine (crash-safe store, one conversation per thread)
 - [x] Web frontend sharing conversations with Chat
+- [x] Topic titles, on a dedicated local titler server
 - [ ] Artifacts (agent-published HTML/Markdown/SVG, versioned per id)
 - [ ] Allowed-users filter (whitelist who can message the bot)
 - [x] Parallel processing: per-thread sessions + concurrent dispatch (threads are independent; serial within a thread)

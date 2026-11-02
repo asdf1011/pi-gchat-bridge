@@ -8,6 +8,19 @@ export interface Config {
   pubsubSubscription: string;
   /** HTTP health endpoint port (0 disables). */
   healthPort: number;
+  /**
+   * Address the HTTP server binds to. Loopback by default: behind a tunnel or
+   * reverse proxy, nothing else should be able to reach the bridge directly,
+   * because the Access headers it trusts can otherwise be forged by anyone who
+   * can open a socket to it.
+   */
+  bindAddress: string;
+  /**
+   * Where Cloudflare Access (or any identity-aware proxy) connects from.
+   * The identity header is honoured only for requests whose socket peer is this
+   * address; empty means never trust it.
+   */
+  trustedProxy: string;
   /** Working directory pi sessions operate in. */
   cwd: string;
   sessionsDir: string;
@@ -80,6 +93,8 @@ export function loadConfig(): Config {
     serviceAccountPath,
     pubsubSubscription: process.env.PUBSUB_SUBSCRIPTION ?? "",
     healthPort: Number(process.env.PORT ?? 8080),
+    bindAddress: process.env.BRIDGE_BIND ?? "127.0.0.1",
+    trustedProxy: process.env.BRIDGE_TRUSTED_PROXY ?? "",
     cwd,
     sessionsDir,
     stateFile,
@@ -92,10 +107,14 @@ export function loadConfig(): Config {
     notifyToken: process.env.BRIDGE_NOTIFY_TOKEN ?? "",
     webToken: process.env.BRIDGE_WEB_TOKEN ?? "",
     topicSummary: (process.env.BRIDGE_TOPIC_SUMMARY ?? "1") !== "0",
-    topicSummaryBaseUrl: process.env.BRIDGE_TOPIC_SUMMARY_BASE_URL ?? "http://127.0.0.1:8090/v1",
+    // The TITLER's own server, not the conversation router. Sharing one meant
+    // every title evicted a conversation's KV prefix, which on a 2-slot server
+    // is the whole cache. Default port 8091 is lfm-server.sh's titler instance.
+    topicSummaryBaseUrl: process.env.BRIDGE_TOPIC_SUMMARY_BASE_URL ?? "http://127.0.0.1:8091/v1",
     topicSummaryModel: process.env.BRIDGE_TOPIC_SUMMARY_MODEL ?? "lfm3-vl-2b-q8",
-    // 15 min: the local server has one slot, so a title can queue behind real
-    // chat before it even starts. It runs detached, so waiting costs nothing.
+    // 15 min: CPU inference is slow, and the titler shares the machine with
+    // whatever conversations are running (it no longer shares their slots).
+    // The job is detached, so waiting costs nothing.
     topicSummaryTimeoutMs: Number(process.env.BRIDGE_TOPIC_SUMMARY_TIMEOUT_MS ?? 15 * 60 * 1000),
     replaceOnFinish: (process.env.BRIDGE_REPLACE_ON_FINISH ?? "1") !== "0",
   };
