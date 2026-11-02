@@ -149,6 +149,16 @@ while true; do
   NODE_PID=$!
   wait "$NODE_PID"
   code=$?
+  # 75 = another process owns the bridge database (see src/durable/main.ts).
+  # That is a refusal, not a crash: the owner is already serving Chat, so
+  # retrying every 5s would bury any real error under identical log lines.
+  # Wait far longer instead — long enough to notice, short enough to recover
+  # on its own once the other process exits.
+  if [ "$code" = "75" ]; then
+    log "bridge refused to start: database owned by another process — retrying in 120s"
+    sleep 120
+    continue
+  fi
   log "bridge exited (code $code) — restarting in 5s"
   sleep 5
 done

@@ -30,15 +30,34 @@ import { DurableRouter } from "../adapter/router.js";
 import { runDurableCommand } from "../adapter/commands.js";
 import { defaultSettings } from "../adapter/commands.js";
 import { BridgeHost } from "./host.js";
+import { BridgeLockedError } from "./lock.js";
 import { handleDurableNotify } from "./notify.js";
 import { AgentRouter } from "../agent-sessions.js";
+
+/**
+ * Exit code for "another process owns the bridge database".
+ *
+ * Distinct from 1 so the supervisor can tell a refused start from a crash. A
+ * crash should restart immediately; a lock conflict means the process holding
+ * the database is already serving, so restarting is pointless and the retry
+ * loop just buries the real error under identical log lines.
+ */
+const EXIT_DB_LOCKED = 75;
 
 async function main(): Promise<void> {
   const config = loadConfig();
   const dbPath = process.env.BRIDGE_DB ?? new URL("../../bridge.sqlite", import.meta.url).pathname;
   logger.info(`[bridge] engine=durable cwd=${config.cwd} db=${dbPath}`);
 
-  const host = await BridgeHost.open({ dbPath, cwd: config.cwd });
+  const host = await BridgeHost.open({ dbPath, cwd: config.cwd }).catch((error: unknown) => {
+    if (error instanceof BridgeLockedError) {
+      // Not a crash: the owner is serving Chat right now. Exiting non-zero-and-
+      // distinct lets the supervisor stop retrying instead of looping forever.
+      logger.error(`[bridge] refusing to start: ${error.message}`);
+      process.exit(EXIT_DB_LOCKED);
+    }
+    throw error;
+  });
   const client = new ChatClient(config.serviceAccountPath);
   const state = new StateStore(config.stateFile);
 
