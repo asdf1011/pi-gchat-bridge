@@ -26,6 +26,8 @@ export interface Config {
   allowedUsers: string[];
   /** Optional shared secret required on POST /notify (Authorization: Bearer …). Empty = no auth. */
   notifyToken: string;
+  /** Bearer token for web writes. Empty means no check (tailnet-only deployment). */
+  webToken: string;
   /** Re-title the /model "Model switched" card with a local-model topic (gchat display only). */
   topicSummary: boolean;
   /** OpenAI-compatible base URL of the LOCAL model used for titles (e.g. llama.cpp). */
@@ -88,6 +90,7 @@ export function loadConfig(): Config {
     allowedSpaces: listEnv("ALLOWED_SPACES"),
     allowedUsers: listEnv("ALLOWED_USERS"),
     notifyToken: process.env.BRIDGE_NOTIFY_TOKEN ?? "",
+    webToken: process.env.BRIDGE_WEB_TOKEN ?? "",
     topicSummary: (process.env.BRIDGE_TOPIC_SUMMARY ?? "1") !== "0",
     topicSummaryBaseUrl: process.env.BRIDGE_TOPIC_SUMMARY_BASE_URL ?? "http://127.0.0.1:8090/v1",
     topicSummaryModel: process.env.BRIDGE_TOPIC_SUMMARY_MODEL ?? "lfm3-vl-2b-q8",

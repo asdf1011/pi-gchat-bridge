@@ -32,6 +32,7 @@ import { defaultSettings } from "../adapter/commands.js";
 import { BridgeHost } from "./host.js";
 import { BridgeLockedError } from "./lock.js";
 import { handleDurableNotify } from "./notify.js";
+import { attachWebClient, webIndex, webSubmit, WEB_PAGE } from "../adapter/web.js";
 import { AgentRouter } from "../agent-sessions.js";
 
 /**
@@ -117,6 +118,90 @@ async function main(): Promise<void> {
             );
             res.writeHead(result.status, { "Content-Type": "application/json" });
             res.end(JSON.stringify(result.json));
+            return;
+          }
+          // --- Web frontend: a second sink on the same conversations. ---
+          if (req.method === "GET" && url.pathname === "/web") {
+            res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+            res.end(WEB_PAGE);
+            return;
+          }
+          if (req.method === "GET" && url.pathname === "/web/api/conversations") {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(await webIndex(host)));
+            return;
+          }
+          const events = /^\/web\/api\/c\/(\d+)\/events$/.exec(url.pathname);
+          if (req.method === "GET" && events) {
+            const conversationId = Number(events[1]);
+            res.writeHead(200, {
+              "Content-Type": "text/event-stream",
+              "Cache-Control": "no-cache",
+              Connection: "keep-alive",
+              // No CORS: the page is served from this origin only.
+            });
+            let alive = true;
+            const client = {
+              open: alive,
+              send(event: string, data: unknown) {
+                if (!alive) return;
+                try {
+                  res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+                } catch {
+                  alive = false;
+                }
+              },
+            };
+            const handle = await attachWebClient(
+              { host, model: defaultModel, ...(config.webToken ? { token: config.webToken } : {}) },
+              conversationId,
+              client,
+            );
+            // A comment line keeps proxies from closing an idle stream.
+            const keepalive = setInterval(() => {
+              if (!alive) return;
+              try {
+                res.write(": keepalive\n\n");
+              } catch {
+                alive = false;
+              }
+            }, 15_000);
+            req.on("close", () => {
+              alive = false;
+              clearInterval(keepalive);
+              handle.close();
+            });
+            return;
+          }
+          const send = /^\/web\/api\/c\/(\d+)\/message$/.exec(url.pathname);
+          if (req.method === "POST" && send) {
+            if (config.webToken && req.headers.authorization !== `Bearer ${config.webToken}`) {
+              res.writeHead(401, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ ok: false, error: "unauthorized" }));
+              return;
+            }
+            const body = await readBody(req, 200_000);
+            if (body === null) {
+              res.writeHead(413, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ ok: false, error: "request body too large" }));
+              return;
+            }
+            let text = "";
+            try {
+              const parsed = JSON.parse(body) as { text?: unknown };
+              text = typeof parsed.text === "string" ? parsed.text : "";
+            } catch {
+              res.writeHead(400, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ ok: false, error: "invalid JSON body" }));
+              return;
+            }
+            const result = await webSubmit(
+              { host, model: defaultModel, ...(config.webToken ? { token: config.webToken } : {}) },
+              Number(send[1]),
+              text,
+            );
+            res.writeHead(result.ok ? 202 : 400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(result));
             return;
           }
           res.writeHead(404, { "Content-Type": "application/json" });
