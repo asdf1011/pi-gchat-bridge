@@ -37,6 +37,7 @@ import { logger } from "../logger.js";
 import { BindingsDoc, type BindingsValue, type ConversationBinding } from "./bindings-doc.js";
 import { ChatFormat } from "./extensions/chat-format.js";
 import { harnessSettings } from "./settings.js";
+import { acquireBridgeLock, type BridgeLock } from "./lock.js";
 
 export interface BridgeHostOptions {
   /** SQLite file. One process owns it (pi-durable has no cross-process locking). */
@@ -78,11 +79,19 @@ export class BridgeHost {
     private readonly cwd: string,
     /** Chord context for host calls (cancellation + telemetry). Exposed for adapters and tools. */
     readonly context: Context,
+    /** Pid file proving this process is the only one on `dbPath`. */
+    private readonly lock: BridgeLock,
   ) {}
 
   static async open(options: BridgeHostOptions): Promise<BridgeHost> {
     const context = options.context ?? BACKGROUND_CONTEXT;
     const modelRuntime = options.modelRuntime ?? (await ModelRuntime.create());
+
+    // Before the harness, and before the Pub/Sub subscription: a second bridge
+    // on the same database would answer the same Chat messages from a fresh
+    // in-memory harness, which `requestId` dedupe cannot see across processes.
+    // Throws BridgeLockedError if another live process owns the file.
+    const lock = acquireBridgeLock(options.dbPath);
 
     const registry = createRegistry();
     // The coding toolset the old bridge gave its sessions, plus the bridge's own
@@ -112,13 +121,18 @@ export class BridgeHost {
         },
       },
       context,
-    );
+    ).catch((error: unknown) => {
+      // Opening failed, so this process will never serve: release the lock or a
+      // crash-restart loop would keep colliding with a lock nobody holds.
+      lock.release();
+      throw error;
+    });
 
     // Continue whatever a previous process left unfinished. Safe on a fresh
     // store, and the only thing that resumes a run interrupted by a restart.
     harness.resume();
 
-    return new BridgeHost(harness, modelRuntime, options.dbPath, options.cwd, context);
+    return new BridgeHost(harness, modelRuntime, options.dbPath, options.cwd, context, lock);
   }
 
   /** Current bindings, for `/sessions` and `/resume`. */
@@ -207,6 +221,7 @@ export class BridgeHost {
 
   async close(): Promise<void> {
     await this.harness.close(this.context);
+    this.lock.release();
   }
 
   /** Working directory conversations start in. */

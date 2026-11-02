@@ -129,16 +129,14 @@ async function main(): Promise<void> {
     logger.info(
       `[chat] ${display} [${incoming.message.name ?? "?"}]: ${incoming.eventType === "CARD_CLICKED" ? `card:${incoming.action?.actionMethodName}` : text.slice(0, 120)}`,
     );
-    if (incoming.eventType === "CARD_CLICKED") {
-      // The one event shape the bridge cannot control: Chat often omits the
-      // thread on a card click, which collapses `chatKey` to the space and makes
-      // the card's own `session` parameter the only reliable hint. Logged so a
-      // keying bug can be diagnosed from the log instead of inferred from
-      // behaviour.
-      logger.info(
-        `[chat] ${display}: card keying thread=${threadName ?? "(none)"} threadKey=${threadKey ?? "(none)"} chatKey=${chatKey} actionKey=${actionKey}${actionKey === chatKey ? "" : " (differ)"}`,
-      );
-    }
+    // Keying is logged for EVERY event, not just card clicks: in a space the
+    // difference between a top-level message (keyed by the space) and a reply in
+    // a thread (keyed by the thread) is the intended model, but it is also the
+    // one thing that looks like "the bot answered in the wrong conversation".
+    // Having both keys in the log turns that from a guess into a lookup.
+    logger.info(
+      `[chat] ${display}: keying ${incoming.eventType ?? "MESSAGE"} thread=${threadName ?? "(none)"} threadKey=${threadKey ?? "(none)"} chatKey=${chatKey} actionKey=${actionKey}${actionKey === chatKey ? "" : " (differ)"}`,
+    );
 
     const handled = await runDurableCommand({
       client,
