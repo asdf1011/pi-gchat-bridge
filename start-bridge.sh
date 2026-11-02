@@ -1,20 +1,60 @@
 #!/usr/bin/env bash
 #
-# pi-gchat-bridge startup script.
+# pi-gchat-bridge startup script. THIS IS THE CONTAINER ENTRYPOINT.
+#
+# Runs the bridge on the Pi Durable engine (dist/durable/main.js).
+#
+# History worth knowing: this file used to launch the SDK host (dist/index.js).
+# The migration to Pi Durable is complete, so the durable engine is now the one
+# on the entrypoint. The SDK host is kept runnable — via BRIDGE_ENGINE=sdk — so
+# rollback is an env change and a restart rather than a git checkout. Anything
+# that reverts this file to the old script will silently take the bridge back to
+# the legacy engine on the next container restart.
+#
+# Keep the container startup path: start-bridge.sh.
+# Do not "fix" the engine choice by editing what the container runs.
 #
 # - Runs the bridge from anywhere (resolves its own project dir).
 # - Restarts the bridge automatically if it exits (crash, OOM, etc.).
 # - Logs to bridge.log in the project dir (override with BRIDGE_LOG_FILE).
 # - Shuts down cleanly on SIGTERM/SIGINT (Docker stop, Synology shutdown).
 #
-# Point your container/startup task at this script's absolute path.
+# Engine selection:
+#   BRIDGE_ENGINE=durable (default)  dist/durable/main.js  — pi-durable harness
+#   BRIDGE_ENGINE=sdk               dist/index.js         — legacy SDK host
+#
+# The durable engine reads `.env.durable` (falling back to `.env`) for its own
+# subscription / database / allow-list, so it does not have to share the legacy
+# settings files. The two engines must never pull the same Pub/Sub subscription:
+# each message goes to whichever instance pulls it first, so sharing one looks
+# like the bot ignoring people at random.
+#
+# Startup services: the llama.cpp router and cron are started here in both
+# engine modes. They are not bridge-engine-specific, and dropping them is what
+# makes local models fail with "Connection error" after a container recreate.
 
 set -u
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR"
 
-LOG_FILE="${BRIDGE_LOG_FILE:-$PROJECT_DIR/bridge.log}"
+ENGINE="${BRIDGE_ENGINE:-durable}"
+case "$ENGINE" in
+  durable) ENTRYPOINT="dist/durable/main.js" ;;
+  sdk)     ENTRYPOINT="dist/index.js" ;;
+  *)
+    echo "$(date '+%F %T') [start] ERROR: BRIDGE_ENGINE must be durable or sdk, got '$ENGINE'" >&2
+    exit 1
+    ;;
+esac
+
+# The durable engine logs beside its own database so the two engines' logs never
+# interleave; the SDK host keeps its historical default.
+if [ "$ENGINE" = "durable" ]; then
+  LOG_FILE="${BRIDGE_LOG_FILE:-$PROJECT_DIR/bridge-durable.log}"
+else
+  LOG_FILE="${BRIDGE_LOG_FILE:-$PROJECT_DIR/bridge.log}"
+fi
 NODE_PID=""
 
 log() {
@@ -30,12 +70,6 @@ shutdown() {
   exit 0
 }
 trap shutdown TERM INT
-
-# Build once if compiled output is missing.
-if [ ! -f dist/index.js ]; then
-  log "dist/index.js missing — building..."
-  npm run build >> "$LOG_FILE" 2>&1
-fi
 
 # Restore pi's global config (~/.pi/agent: provider creds, extensions, skills)
 # from the persistent snapshot if the container was recreated (ephemeral layer
@@ -73,13 +107,48 @@ else
   log "WARNING: $LFM_SERVER not found - local models unavailable"
 fi
 
+# Build once if compiled output is missing or stale.
+NEEDS_BUILD=0
+if [ ! -f "$ENTRYPOINT" ]; then
+  NEEDS_BUILD=1
+else
+  # Any newer source file means stale output. Cheap, and the failure it prevents
+  # is a bridge that silently runs the previous build.
+  if [ -n "$(find src -name '*.ts' -newer "$ENTRYPOINT" -print -quit 2>/dev/null)" ]; then
+    NEEDS_BUILD=1
+  fi
+fi
+if [ "$NEEDS_BUILD" = "1" ]; then
+  log "$ENTRYPOINT missing or stale — building..."
+  npm run build >> "$LOG_FILE" 2>&1 || log "ERROR: build failed (see $LOG_FILE)"
+fi
+
+# Refuse to start when the durable engine has no subscription: it would pull
+# nothing and look healthy while answering no one.
+if [ "$ENGINE" = "durable" ]; then
+  DURABLE_ENV="$PROJECT_DIR/.env.durable"
+  if [ -f "$DURABLE_ENV" ]; then
+    log "loading .env.durable"
+    set -a
+    # shellcheck disable=SC1091
+    . "$DURABLE_ENV"
+    set +a
+  fi
+  if [ -z "${PUBSUB_SUBSCRIPTION:-}" ]; then
+    log "ERROR: PUBSUB_SUBSCRIPTION is not set — the durable engine would pull nothing"
+    exit 1
+  fi
+  log "engine=durable db=${BRIDGE_DB:-$PROJECT_DIR/bridge.sqlite} subscription=$PUBSUB_SUBSCRIPTION spaces=${ALLOWED_SPACES:-(all)}"
+else
+  log "engine=sdk subscription=${PUBSUB_SUBSCRIPTION:-(unset)}"
+fi
+
 log "pi-gchat-bridge starting (log: $LOG_FILE)"
 while true; do
-  node dist/index.js >> "$LOG_FILE" 2>&1 &
+  node "$ENTRYPOINT" >> "$LOG_FILE" 2>&1 &
   NODE_PID=$!
   wait "$NODE_PID"
   code=$?
-  NODE_PID=""
   log "bridge exited (code $code) — restarting in 5s"
   sleep 5
 done
