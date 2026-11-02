@@ -11,7 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 
-import { buildHandoff, readLegacyMessages } from "../src/durable/import-legacy.js";
+import { buildHandoff, readLegacyMessages, readLegacyTranscript } from "../src/durable/import-legacy.js";
 
 function writeSession(lines: string[]): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "import-"));
@@ -38,14 +38,42 @@ test("reads the user and assistant messages of a legacy session, oldest first", 
   ]);
 });
 
-test("skips tool results, non-message entries and a truncated final line", () => {
+test("keeps tool-result rows in the transcript, and out of the handoff prose", () => {
   const file = writeSession([
     header,
     JSON.stringify({ type: "message", message: { role: "toolResult", content: [{ type: "text", text: "output" }] } }),
     JSON.stringify({ type: "message", message: { role: "user", content: "real question" } }),
     '{"type":"message","message":{"role":"assistant","content":[{"type":"te',
   ]);
+  // The replay needs the row: an assistant turn that called a tool is followed by
+  // its result, and providers reject a conversation missing the pairing. The
+  // summary does not — it is prose for a human/model to read.
+  const { messages } = readLegacyTranscript(file);
+  assert.deepEqual(messages.map((message) => message.role), ["toolResult", "user"]);
+  assert.ok(messages[0]?.raw, "the tool result keeps its raw message for verbatim replay");
   assert.deepEqual(readLegacyMessages(file), [{ role: "user", text: "real question" }]);
+});
+
+test("an assistant turn with only tool calls is kept, with no text", () => {
+  const file = writeSession([
+    header,
+    JSON.stringify({
+      type: "message",
+      message: {
+        role: "assistant",
+        api: "openai-completions",
+        provider: "deepseek",
+        model: "deepseek-flash",
+        stopReason: "toolUse",
+        content: [{ type: "toolCall", id: "call_1", name: "read", arguments: { path: "a" } }],
+      },
+    }),
+  ]);
+  const { messages } = readLegacyTranscript(file);
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0]?.text, "", "no prose to summarise");
+  assert.ok(messages[0]?.raw, "but the tool_use id survives for the replay");
+  assert.doesNotMatch(buildHandoff(messages, { tail: 12, perMessageChars: 100 }), /Assistant/);
 });
 
 test("a handoff keeps the tail and says how much it dropped", () => {

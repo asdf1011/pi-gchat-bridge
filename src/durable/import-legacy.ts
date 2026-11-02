@@ -109,6 +109,17 @@ export interface LegacyMessage2 {
    * model that actually generated it.
    */
   model?: LegacyModel;
+  /**
+   * The raw pi-ai message, when replaying it verbatim is better than rebuilding
+   * it from `text`.
+   *
+   * Set for everything that is not plain prose: `toolResult` messages (the
+   * `tool_use` → `tool_result` pairing a provider validates) and `system` turns.
+   * A tool row has no text, so the old reader dropped 14,159 of them — 104 of
+   * 116 legacy files had tool traffic — and what survived was an assistant
+   * claiming "let me check X" with the check missing.
+   */
+  raw?: unknown;
 }
 
 /**
@@ -135,16 +146,23 @@ export function readLegacyTranscript(file: string): { messages: LegacyMessage2[]
       continue;
     }
     if (entry.type !== "message" || !entry.message) continue;
-    const role = entry.message.role === "user" ? "user" : entry.message.role === "assistant" ? "assistant" : undefined;
-    if (!role) continue;
-    messages.push({ role, text: messageText(entry.message), model: role === "assistant" ? current : undefined });
+    const rawRole = entry.message.role;
+    if (rawRole !== "user" && rawRole !== "assistant" && rawRole !== "system" && rawRole !== "toolResult") continue;
+    const role = rawRole === "toolResult" ? "toolResult" : rawRole;
+    const text = messageText(entry.message);
+    // Keep a row the text flattener cannot represent faithfully: a tool result,
+    // or an assistant turn whose only content is tool calls and thinking.
+    const raw = role === "toolResult" || role === "system" || (role === "assistant" && !text) ? entry.message : undefined;
+    messages.push({ role, text, model: role === "assistant" ? current : undefined, ...(raw ? { raw } : {}) });
   }
   return { messages, finalModel: current };
 }
 
 /** Text-bearing messages only, for callers that do not care about provenance. */
 export function readLegacyMessages(file: string): { role: string; text: string }[] {
-  return readLegacyTranscript(file).messages.map(({ role, text }) => ({ role, text }));
+  return readLegacyTranscript(file)
+    .messages.filter((message) => !message.raw)
+    .map(({ role, text }) => ({ role, text }));
 }
 
 /**
@@ -190,14 +208,32 @@ export async function fullReplay(
 
   let count = 0;
   for (const message of messages) {
-    if (!message.text.trim()) continue;
+    // A raw row (tool result, system turn) is kept even without text: that is
+    // the point of keeping it. Prose still needs to say something.
+    if (!message.raw && !message.text.trim()) continue;
     // Prefer the model recorded alongside the message; fall back to the
     // conversation's current model only for transcripts that never recorded
     // one (three sessions predate the first `model_change`).
     const provenance = message.model ?? (ref ? { provider: ref.provider, modelId: ref.modelId } : undefined);
-    const model =
-      message.role === "user"
-        ? [{ role: "user" as const, content: message.text, timestamp: at }]
+    const raw = message.raw as { api?: string; provider?: string; model?: string; usage?: unknown; stopReason?: string } | undefined;
+    let kind: string;
+    let model: unknown[];
+    if (message.role === "user") {
+      kind = "pi.user";
+      model = [{ role: "user" as const, content: message.text, timestamp: at }];
+    } else if (message.role === "toolResult") {
+      kind = "pi.toolResult";
+      model = [message.raw];
+    } else if (message.role === "system") {
+      kind = "pi.system";
+      model = [message.raw];
+    } else {
+      kind = "pi.assistant";
+      // A pure tool-call turn keeps its blocks (the tool_use ids a following
+      // tool_result must reference); a prose turn is rebuilt from text so the
+      // request metadata the adapters read is present.
+      model = message.raw
+        ? [{ ...raw, provider: raw?.provider ?? provenance?.provider ?? "imported", model: raw?.model ?? provenance?.modelId ?? "imported", usage: raw?.usage ?? usage, stopReason: raw?.stopReason ?? "toolUse", timestamp: at }]
         : [{
             role: "assistant" as const,
             content: [{ type: "text" as const, text: message.text }],
@@ -208,9 +244,10 @@ export async function fullReplay(
             stopReason: "stop" as const,
             timestamp: at,
           }];
+    }
     await host.harness.commit(async (tx) => {
       await tx.appendEntry(conversation.id as never, {
-        kind: message.role === "user" ? "pi.user" : "pi.assistant",
+        kind,
         data: { imported: true, source, ...(provenance ? { model: `${provenance.provider}/${provenance.modelId}` } : {}) },
         model: model as never,
       });
@@ -232,12 +269,15 @@ async function main(): Promise<void> {
     process.exit(2);
   }
 
-  const messages = readLegacyMessages(sessionFile);
+  const { messages } = readLegacyTranscript(sessionFile);
   const handoff = buildHandoff(messages, { tail, perMessageChars: 1_200 });
   const chars = messages.reduce((total, message) => total + message.text.length, 0);
+  const nonProse = messages.filter((message) => message.raw).length;
   console.log(
-    `[import] ${path.basename(sessionFile)}: ${messages.length} message(s), ${chars.toLocaleString()} chars` +
-      (full ? ` (full replay ≈ ${Math.round(chars / 4).toLocaleString()} tokens)` : `, handoff ${handoff.length} chars`),
+    `[import] ${path.basename(sessionFile)}: ${messages.length} message(s)` +
+      (nonProse ? ` (${nonProse} tool/call row(s) replayed verbatim)` : "") +
+      `, ${chars.toLocaleString()} chars` +
+      (full ? ` (full replay ≈ ${Math.round(chars / 4).toLocaleString()} tokens, + tool traffic)` : `, handoff ${handoff.length} chars`),
   );
 
   if (dry) {
