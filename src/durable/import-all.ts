@@ -30,7 +30,7 @@ import { createHash } from "node:crypto";
 import { getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
 
 import { BridgeHost } from "./host.js";
-import { fullReplay, readLegacyMessages } from "./import-legacy.js";
+import { fullReplay, readLegacyMessages, readLegacyTranscript } from "./import-legacy.js";
 
 interface Entry {
   key: string;
@@ -193,7 +193,11 @@ async function main(): Promise<void> {
         continue; // idempotent: never replay twice
       }
       const binding = await host.conversationFor(entry.key, { model: defaultModel(host) });
-      const written = await fullReplay(host, binding.conversation, readLegacyMessages(entry.file), path.basename(entry.file));
+      // readLegacyTranscript, not readLegacyMessages: only the former carries the
+      // per-message model, and dropping it here is what left every imported turn
+      // attributed to whatever the conversation happened to be configured with.
+      const { messages } = readLegacyTranscript(entry.file);
+      const written = await fullReplay(host, binding.conversation, messages, path.basename(entry.file));
       imported += 1;
       console.log(`  ${entry.key} -> conversation ${binding.binding.conversationId} (${written} entries)`);
     }

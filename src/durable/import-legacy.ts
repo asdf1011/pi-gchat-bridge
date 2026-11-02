@@ -90,22 +90,61 @@ export function buildHandoff(messages: { role: string; text: string }[], options
 }
 
 /** Every message of a legacy session file, oldest first. */
-export function readLegacyMessages(file: string): { role: string; text: string }[] {
-  const out: { role: string; text: string }[] = [];
+export interface LegacyModel {
+  provider: string;
+  modelId: string;
+}
+
+export interface LegacyMessage2 {
+  role: string;
+  text: string;
+  /**
+   * The model this message was produced under, as recorded by the legacy
+   * session's `model_change` entries. `undefined` for user messages, and for
+   * sessions that predate the first `model_change`.
+   *
+   * Provenance, not decoration: a thread that ran on the local 2B and was later
+   * switched to deepseek must not have its whole history stamped with the model
+   * the importer happened to be configured with. The assistant turn carries the
+   * model that actually generated it.
+   */
+  model?: LegacyModel;
+}
+
+/**
+ * Everything the importer needs from a legacy transcript: the text-bearing
+ * messages, in order, each tagged with the model in force when it happened.
+ *
+ * `model_change` is a state machine, not a per-message field: it sets the
+ * current model until the next change. So the model is tracked while walking
+ * the file, which is also why this cannot be a separate pass over the JSONL.
+ */
+export function readLegacyTranscript(file: string): { messages: LegacyMessage2[]; finalModel?: LegacyModel } {
+  const messages: LegacyMessage2[] = [];
+  let current: LegacyModel | undefined;
   for (const line of fs.readFileSync(file, "utf8").split("\n")) {
     if (!line.trim()) continue;
-    let entry: { type?: string; message?: LegacyMessage };
+    let entry: { type?: string; message?: LegacyMessage; provider?: string; modelId?: string };
     try {
       entry = JSON.parse(line);
     } catch {
       continue; // a truncated tail line is expected after a crash
     }
+    if (entry.type === "model_change" && entry.provider && entry.modelId) {
+      current = { provider: entry.provider, modelId: entry.modelId };
+      continue;
+    }
     if (entry.type !== "message" || !entry.message) continue;
     const role = entry.message.role === "user" ? "user" : entry.message.role === "assistant" ? "assistant" : undefined;
     if (!role) continue;
-    out.push({ role, text: messageText(entry.message) });
+    messages.push({ role, text: messageText(entry.message), model: role === "assistant" ? current : undefined });
   }
-  return out;
+  return { messages, finalModel: current };
+}
+
+/** Text-bearing messages only, for callers that do not care about provenance. */
+export function readLegacyMessages(file: string): { role: string; text: string }[] {
+  return readLegacyTranscript(file).messages.map(({ role, text }) => ({ role, text }));
 }
 
 /**
@@ -116,13 +155,24 @@ export function readLegacyMessages(file: string): { role: string; text: string }
  * `message.content.filter is not a function`, because an AssistantMessage carries
  * content *blocks* plus the request metadata the provider adapters read.
  *
- * One commit for the whole transcript: either the thread arrives complete or not
- * at all, and hundreds of separate transactions buy nothing.
+ * ONE COMMIT PER MESSAGE, deliberately. Batching the whole transcript into one
+ * commit looked like the obvious optimisation and was wrong: entries written in
+ * the same commit share a `commit_seq`, and within a tie the order falls back to
+ * entry ids, which do not follow call order inside a transaction. 44 of 109
+ * conversations imported with their first exchange reversed because of it
+ * (`assistant` before `user`), and any transcript could have been scrambled
+ * internally with no way to tell from the outside. Distinct `commit_seq` values
+ * are what make the replay order the transcript order, and 3k local SQLite
+ * commits cost seconds — cheaper than a history you cannot trust.
+ *
+ * A message that fails to write is counted, not ignored: a partial import has to
+ * be visible, because the caller skips conversations that already have bindings
+ * and would otherwise never retry them.
  */
 export async function fullReplay(
   host: BridgeHost,
   conversation: { id: ConversationId },
-  messages: { role: string; text: string }[],
+  messages: LegacyMessage2[],
   source: string,
 ): Promise<number> {
   const usage = {
@@ -138,32 +188,36 @@ export async function fullReplay(
   const agent = await handle.agent(host.context);
   const ref = agent.model;
 
-  return host.harness.commit(async (tx) => {
-    let count = 0;
-    for (const message of messages) {
-      if (!message.text.trim()) continue;
-      const model =
-        message.role === "user"
-          ? [{ role: "user" as const, content: message.text, timestamp: at }]
-          : [{
-              role: "assistant" as const,
-              content: [{ type: "text" as const, text: message.text }],
-              api: "openai-completions",
-              provider: ref?.provider ?? "imported",
-              model: ref?.modelId ?? "imported",
-              usage,
-              stopReason: "stop" as const,
-              timestamp: at,
-            }];
+  let count = 0;
+  for (const message of messages) {
+    if (!message.text.trim()) continue;
+    // Prefer the model recorded alongside the message; fall back to the
+    // conversation's current model only for transcripts that never recorded
+    // one (three sessions predate the first `model_change`).
+    const provenance = message.model ?? (ref ? { provider: ref.provider, modelId: ref.modelId } : undefined);
+    const model =
+      message.role === "user"
+        ? [{ role: "user" as const, content: message.text, timestamp: at }]
+        : [{
+            role: "assistant" as const,
+            content: [{ type: "text" as const, text: message.text }],
+            api: "openai-completions",
+            provider: provenance?.provider ?? "imported",
+            model: provenance?.modelId ?? "imported",
+            usage,
+            stopReason: "stop" as const,
+            timestamp: at,
+          }];
+    await host.harness.commit(async (tx) => {
       await tx.appendEntry(conversation.id as never, {
         kind: message.role === "user" ? "pi.user" : "pi.assistant",
-        data: { imported: true, source },
+        data: { imported: true, source, ...(provenance ? { model: `${provenance.provider}/${provenance.modelId}` } : {}) },
         model: model as never,
       });
-      count += 1;
-    }
-    return count;
-  }, host.context);
+    }, host.context);
+    count += 1;
+  }
+  return count;
 }
 
 async function main(): Promise<void> {
