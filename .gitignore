@@ -13,3 +13,13 @@ pi-agent/
 evals/runs/
 sessions.pre-1.4.0/
 .env.durable
+
+# Pi Durable store and its runtime companions. The database is the live bridge
+# state: never commit it, and never commit SQLite's WAL/SHM or the pid lock.
+bridge.sqlite
+bridge.sqlite-shm
+bridge.sqlite-wal
+bridge.sqlite.lock
+# Legacy session backups taken before the 1.4.0 upgrade and the cutover.
+sessions.pre-1.4.0/
+backups/
