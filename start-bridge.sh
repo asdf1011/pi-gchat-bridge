@@ -71,6 +71,37 @@ shutdown() {
 }
 trap shutdown TERM INT
 
+# --- One supervisor per project directory ---
+#
+# Nothing used to stop a second copy of this script existing, and one did: pid 1
+# was this script, and a second copy ran as its child, each spawning a bridge.
+# The bridge's own database lock refused the duplicate, so it retried forever --
+# 1,138 restart lines, one attempt every 5s at 100% CPU, burying a real model
+# failure in the log. The bridge lock cannot fix this because the pointless
+# process is the *supervisor*, not the bridge.
+#
+# This is a pid file on the script itself. A stale one (container killed) is
+# taken over; a live one exits immediately.
+SUPERVISOR_LOCK="$PROJECT_DIR/.start-bridge.pid"
+if [ -f "$SUPERVISOR_LOCK" ]; then
+  OTHER="$(cat "$SUPERVISOR_LOCK" 2>/dev/null || true)"
+  if [ -n "$OTHER" ] && [ "$OTHER" != "$$" ] && kill -0 "$OTHER" 2>/dev/null; then
+    echo "$(date '+%F %T') [start] another supervisor is already running (pid $OTHER) — exiting" >&2
+    exit 0
+  fi
+fi
+echo "$$" > "$SUPERVISOR_LOCK"
+SUPERVISOR_CLEANUP=0
+cleanup_supervisor() {
+  if [ "$SUPERVISOR_CLEANUP" = "0" ]; then
+    SUPERVISOR_CLEANUP=1
+    if [ "$(cat "$SUPERVISOR_LOCK" 2>/dev/null)" = "$$" ]; then
+      rm -f "$SUPERVISOR_LOCK"
+    fi
+  fi
+}
+trap cleanup_supervisor EXIT
+
 # Restore pi's global config (~/.pi/agent: provider creds, extensions, skills)
 # from the persistent snapshot if the container was recreated (ephemeral layer
 # is wiped on recreate, only survives plain restarts).
