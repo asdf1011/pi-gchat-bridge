@@ -33,6 +33,7 @@ import { BridgeHost } from "./host.js";
 import { BridgeLockedError } from "./lock.js";
 import { handleDurableNotify } from "./notify.js";
 import { attachWebClient, webIndex, webSubmit, WEB_PAGE } from "../adapter/web.js";
+import { failureNotice } from "./failure-notice.js";
 import { AgentRouter } from "../agent-sessions.js";
 
 /**
@@ -85,9 +86,19 @@ async function main(): Promise<void> {
       void (async () => {
         const url = new URL(req.url ?? "/", "http://localhost");
         try {
-          if (req.method === "GET" && (url.pathname === "/healthz" || url.pathname === "/")) {
+          if (req.method === "GET" && url.pathname === "/healthz") {
             res.writeHead(200, { "Content-Type": "text/plain" });
             res.end("ok");
+            return;
+          }
+          // A proxy that mounts us at /pi/ and strips the prefix asks for "/".
+          // Serve the app there, because a browser following a bookmark to the
+          // mount root should land on the app, not on a bare "ok". Health checks
+          // use /healthz, so nothing is lost. A HEAD probe gets the page's
+          // headers too, which is how some proxies smoke-test an upstream.
+          if (req.method === "GET" && (url.pathname === "/" || url.pathname === "")) {
+            res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+            res.end(WEB_PAGE);
             return;
           }
           if (req.method === "POST" && url.pathname === "/notify") {
@@ -296,7 +307,9 @@ async function main(): Promise<void> {
       // Attach the sink *before* waiting: the answer may already be streaming.
       sink = await attachViewSink({ conversation: bound.conversation, context: host.context, stream });
 
+      const turnStarted = Date.now();
       const settled = await submission.wait(host.context);
+      const turnMs = Date.now() - turnStarted;
       await sink.detach();
       sink = undefined;
 
@@ -310,17 +323,23 @@ async function main(): Promise<void> {
         .trim();
 
       if (!final) {
+        // A failure here used to log only the status, so "unanswered after 9s"
+        // and "unanswered after 154s" were indistinguishable, and the reason
+        // pi-durable records (aborted / provider error / ...) was thrown away.
+        // Diagnosing a real failure from that took twenty minutes of log
+        // archaeology; these four facts make it a single line.
+        const reason = settled.status === "unanswered" ? settled.reason : undefined;
+        const detail = settled.status === "unanswered" ? settled.detail : undefined;
+        logger.info(
+          `[chat] ${display}: no answer text status=${settled.status}` +
+            `${reason ? ` reason=${reason}` : ""}` +
+            ` after ${turnMs}ms conversation=${bound.binding.conversationId}` +
+            (detail === undefined ? "" : ` detail=${JSON.stringify(detail).slice(0, 300)}`),
+        );
         await stream.abandon();
         await client
-          .sendMessage(
-            spaceName,
-            settled.status === "done"
-              ? "The model returned no text — check the bridge log, or switch models with **/model**."
-              : `That turn did not finish (${settled.status}). The conversation is intact — send it again.`,
-            threadName,
-          )
+          .sendMessage(spaceName, failureNotice(settled.status, reason, turnMs), threadName)
           .catch((error) => logger.error("[chat] empty-reply notice failed:", (error as Error).message));
-        logger.info(`[chat] ${display}: no answer text (${settled.status})`);
         return "ok";
       }
 
