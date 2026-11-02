@@ -56,6 +56,7 @@ else
   LOG_FILE="${BRIDGE_LOG_FILE:-$PROJECT_DIR/bridge.log}"
 fi
 NODE_PID=""
+TUNNEL_PID=""
 
 log() {
   echo "$(date '+%F %T') [start] $*" >> "$LOG_FILE"
@@ -66,6 +67,12 @@ shutdown() {
   if [ -n "$NODE_PID" ]; then
     kill "$NODE_PID" 2>/dev/null
     wait "$NODE_PID" 2>/dev/null
+  fi
+  # The tunnel is useless without the bridge, and leaving it up would keep a
+  # public hostname pointed at a dead port.
+  if [ -n "$TUNNEL_PID" ]; then
+    kill "$TUNNEL_PID" 2>/dev/null
+    wait "$TUNNEL_PID" 2>/dev/null
   fi
   exit 0
 }
@@ -174,7 +181,48 @@ else
   log "engine=sdk subscription=${PUBSUB_SUBSCRIPTION:-(unset)}"
 fi
 
+# --- Cloudflare Tunnel (optional) ---
+#
+# Only for the durable engine, and only when a config and credentials exist. The
+# tunnel is what makes the web UI reachable without a Tailscale client, so it is
+# started here rather than by a separate unit: if the bridge dies, the public
+# hostname must stop answering rather than 502.
+CF_CONFIG="$PROJECT_DIR/cloudflared.yml"
+CF_BIN="${CLOUDFLARED_BIN:-}"
+start_tunnel() {
+  if [ "$ENGINE" != "durable" ]; then return 0; fi
+  if [ ! -f "$CF_CONFIG" ]; then
+    log "cloudflared: no $CF_CONFIG — tunnel not started"
+    return 0
+  fi
+  if [ -z "$CF_BIN" ]; then
+    CF_BIN="$(command -v cloudflared 2>/dev/null || true)"
+  fi
+  if [ -z "$CF_BIN" ] || [ ! -x "$CF_BIN" ]; then
+    log "cloudflared: binary not found (set CLOUDFLARED_BIN) — tunnel not started"
+    return 0
+  fi
+  # Refuse to expose a bridge that is listening on every interface: the tunnel
+  # is only a security boundary if it is the ONLY way in.
+  if [ "${BRIDGE_BIND:-127.0.0.1}" != "127.0.0.1" ]; then
+    log "cloudflared: WARNING BRIDGE_BIND=${BRIDGE_BIND} — the bridge is reachable WITHOUT the tunnel and its Access policy"
+  fi
+  # Without credentials cloudflared exits in about a second, so starting it
+  # would mean a respawn every 5s — the log-flooding pattern that buried a real
+  # model failure earlier. Require the credential file to exist first.
+  local creds
+  creds="$(sed -n 's/^credentials-file:[[:space:]]*//p' "$CF_CONFIG" | head -1)"
+  if [ -n "$creds" ] && [ ! -f "$creds" ]; then
+    log "cloudflared: credentials-file $creds missing — tunnel not started (run 'cloudflared tunnel create')"
+    return 0
+  fi
+  log "cloudflared: starting tunnel ($CF_CONFIG)"
+  "$CF_BIN" tunnel --config "$CF_CONFIG" run >> "$PROJECT_DIR/cloudflared.log" 2>&1 &
+  TUNNEL_PID=$!
+}
+
 log "pi-gchat-bridge starting (log: $LOG_FILE)"
+start_tunnel
 while true; do
   node "$ENTRYPOINT" >> "$LOG_FILE" 2>&1 &
   NODE_PID=$!
@@ -191,5 +239,13 @@ while true; do
     continue
   fi
   log "bridge exited (code $code) — restarting in 5s"
+  # The tunnel outlives a bridge restart on purpose (cloudflared reconnects and
+  # the edge returns 502 for a few seconds, which is better than a DNS change).
+  # But if cloudflared itself died, bring it back.
+  if [ -n "$TUNNEL_PID" ] && ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
+    log "cloudflared exited — restarting"
+    TUNNEL_PID=""
+    start_tunnel
+  fi
   sleep 5
 done
