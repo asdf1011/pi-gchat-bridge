@@ -1,9 +1,8 @@
 /**
  * Who is making this request?
  *
- * Behind Cloudflare Access (or oauth2-proxy, or any identity-aware proxy) the
- * browser never authenticates to the bridge — the edge does it, and forwards
- * the answer as a header. That is a good split: the policy lives where it can
+ * Behind Cloudflare Access the browser never authenticates to the bridge — the
+ * edge does it, and forwards the answer as a header. That is a good split: the policy lives where it can
  * be changed without a deploy, and the bridge does not implement auth.
  *
  * The header is only trustworthy if the request provably came from the proxy.
@@ -15,18 +14,18 @@
 import type { IncomingMessage } from "node:http";
 
 /**
- * Headers identity-aware proxies use, most specific first.
+ * The one header Cloudflare Access sets.
  *
- * Cloudflare Access sends the email and a signed JWT; oauth2-proxy and
- * Authentik send X-Auth-Request-Email / X-Forwarded-Email. All are read, in
- * this order, and the first non-empty one wins.
+ * Deliberately the only one. Accepting several proxy dialects meant accepting
+ * headers that are also widely user-controllable (`X-Forwarded-Email` in
+ * particular), which is a far larger surface than the deployment needs. This is
+ * a Cloudflare Tunnel and nothing else.
+ *
+ * Access also sends `Cf-Access-Jwt-Assertion`; it is not used, because the JWT
+ * only adds value when the origin can be reached some other way, and the bridge
+ * binds loopback so it cannot.
  */
-const IDENTITY_HEADERS = [
-  "cf-access-authenticated-user-email",
-  "x-auth-request-email",
-  "x-forwarded-email",
-  "x-authentik-username",
-] as const;
+const IDENTITY_HEADER = "cf-access-authenticated-user-email";
 
 export interface RequestIdentity {
   /** The verified identity, when the request came from a trusted proxy. */
@@ -51,10 +50,8 @@ export function peerAddress(req: IncomingMessage): string | undefined {
  * every request as anonymous rather than to believe a spoofable header.
  */
 export function identify(req: IncomingMessage, trustedProxy: string): RequestIdentity {
-  const header = IDENTITY_HEADERS.map((name) => req.headers[name]).find(
-    (value) => typeof value === "string" && value.trim().length > 0,
-  );
-  if (typeof header !== "string") return { untrustedHeader: false };
+  const header = req.headers[IDENTITY_HEADER];
+  if (typeof header !== "string" || header.trim().length === 0) return { untrustedHeader: false };
 
   const peer = peerAddress(req);
   if (!trustedProxy || peer !== trustedProxy) {

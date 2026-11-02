@@ -252,7 +252,9 @@ browser → Cloudflare edge → Access policy → tunnel → 127.0.0.1:8081
   the request enters the tunnel, so unauthenticated traffic never reaches this
   machine. Nothing in the bridge decides who gets in.
 - Cloudflare then injects `Cf-Access-Authenticated-User-Email`, which the bridge
-  **logs per submission** (`[web] <email>: submitted to conversation N`).
+  **logs per submission** (`[web] <email>: submitted to conversation N`). That is
+  the only identity header the bridge reads — other proxies' variants are
+  deliberately ignored, since some (`X-Forwarded-Email`) are user-controllable.
 - Identity headers are honoured only when the socket peer is
   `BRIDGE_TRUSTED_PROXY` — otherwise they are spoofable by anything that can
   reach the port, and a warning is logged instead.

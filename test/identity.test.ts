@@ -45,10 +45,16 @@ test("no header at all is anonymous and unflagged", () => {
   assert.equal(who.untrustedHeader, false);
 });
 
-test("oauth2-proxy and Authentik headers are recognised too", () => {
-  assert.equal(identify(req({ "x-auth-request-email": "a@b.c" }), "127.0.0.1").email, "a@b.c");
-  assert.equal(identify(req({ "x-forwarded-email": "a@b.c" }), "127.0.0.1").email, "a@b.c");
-  assert.equal(identify(req({ "x-authentik-username": "bob" }), "127.0.0.1").email, "bob");
+test("other proxy dialects are not an identity", () => {
+  // Cloudflare Tunnel only. These headers are exactly the ones other software
+  // sets, and some are user-controllable -- accepting them would widen the
+  // surface for no deployment that exists.
+  assert.equal(identify(req({ "x-auth-request-email": "a@b.c" }), "127.0.0.1").email, undefined);
+  assert.equal(identify(req({ "x-forwarded-email": "a@b.c" }), "127.0.0.1").email, undefined);
+  assert.equal(identify(req({ "x-authentik-username": "bob" }), "127.0.0.1").email, undefined);
+  // ... and they are not flagged as a spoofing attempt either, because the
+  // bridge never asked for them.
+  assert.equal(identify(req({ "x-forwarded-email": "a@b.c" }), "127.0.0.1").untrustedHeader, false);
 });
 
 test("an empty header value is not an identity", () => {
@@ -56,12 +62,17 @@ test("an empty header value is not an identity", () => {
   assert.equal(who.email, undefined);
 });
 
-test("Cloudflare's header wins when several are present", () => {
+test("a Cloudflare header alongside other dialects still wins", () => {
   const who = identify(
     req({ "cf-access-authenticated-user-email": "cf@example.com", "x-forwarded-email": "spoof@example.com" }),
     "127.0.0.1",
   );
   assert.equal(who.email, "cf@example.com");
+});
+
+test("a spoofable header alone does not become an identity", () => {
+  const who = identify(req({ "x-forwarded-email": "spoof@example.com" }), "127.0.0.1");
+  assert.equal(who.email, undefined);
 });
 
 test("IPv4-mapped IPv6 peers compare equal to the plain IPv4 proxy address", () => {
