@@ -163,6 +163,13 @@ export const WEB_PAGE = `<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>pi bridge</title>
+<!--
+  Resolve everything against this document's own URL, not the origin root. The
+  page may be served at /web/ directly or behind a reverse proxy at /pi/, and a
+  hard-coded leading slash would point at the proxy's root instead of ours.
+  With <base> and relative URLs the same build works at both, with no config.
+-->
+<base href="">
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
@@ -190,16 +197,33 @@ export const WEB_PAGE = `<!doctype html>
   </form>
 </div>
 <script>
-let current = null, source = null;
-const log = document.getElementById('log');
-const tool = document.getElementById('tool');
+/**
+ * A URL relative to wherever this page was served from.
+ *
+ * The base tag handles the normal case, but it resolves against the full URL,
+ * so at "/pi" (no trailing slash) a relative path becomes "/api/x" -- the
+ * proxy's root, not the app's. Appending the slash first makes both "/pi" and
+ * "/pi/" work.
+ */
+/**
+ * Resolve an API path against this page's own directory.
+ *
+ * The page may be served at /web, /pi/web or /pi/web/, depending on the reverse
+ * proxy, so no URL here is absolute. 'api/...' from a page at /pi/web resolves
+ * to /pi/api/... which is wrong -- hence the explicit base of the directory the
+ * page was served *from*, normalised to end in '/'.
+ */
+function rel(path) {
+  const here = location.pathname.replace(/[^/]*$/, '');
+  return here + path;
+}
 
 function open(id) {
   if (source) source.close();
   current = id;
   log.textContent = '';
   tool.textContent = '';
-  source = new EventSource('/web/api/c/' + id + '/events');
+  source = new EventSource(rel('api/c/' + id + '/events'));
   source.addEventListener('text', (e) => {
     const d = JSON.parse(e.data);
     log.textContent = d.text;
@@ -216,7 +240,7 @@ function open(id) {
 }
 
 async function load() {
-  const rows = await (await fetch('/web/api/conversations')).json();
+  const rows = await (await fetch(rel('api/conversations'))).json();
   const list = document.getElementById('list');
   list.innerHTML = '';
   for (const row of rows) {
@@ -240,15 +264,21 @@ document.getElementById('send').onsubmit = async (e) => {
   const text = box.value.trim();
   if (!text || !current) return;
   box.value = '';
-  await fetch('/web/api/c/' + current + '/message', {
+  await fetch(rel('api/c/' + current + '/message'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text }),
   });
 };
 
-load();
-setInterval(load, 30000);
+// A page served at ".../web" (no trailing slash) resolves relative paths one
+// level too high. Normalise once, preserving any query string.
+if (!location.pathname.endsWith('/')) {
+  location.replace(location.pathname + '/' + location.search);
+} else {
+  load();
+  setInterval(load, 30000);
+}
 </script>
 </body>
 </html>`;

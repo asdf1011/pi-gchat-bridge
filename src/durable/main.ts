@@ -121,17 +121,23 @@ async function main(): Promise<void> {
             return;
           }
           // --- Web frontend: a second sink on the same conversations. ---
-          if (req.method === "GET" && url.pathname === "/web") {
+          //
+          // Mount-agnostic on purpose. A reverse proxy may hand us "/pi/web"
+          // (prefix passed through) or "/web" (prefix stripped), and the HTML
+          // cannot know which -- so routes strip an optional prefix and the page
+          // uses relative URLs throughout. That makes both proxy styles work
+          // without a build-time or config-time base path.
+          if (req.method === "GET" && (webPath(url.pathname) === "/web" || webPath(url.pathname) === "/web/")) {
             res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
             res.end(WEB_PAGE);
             return;
           }
-          if (req.method === "GET" && url.pathname === "/web/api/conversations") {
+          if (req.method === "GET" && webPath(url.pathname) === "/web/api/conversations") {
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify(await webIndex(host)));
             return;
           }
-          const events = /^\/web\/api\/c\/(\d+)\/events$/.exec(url.pathname);
+          const events = /^\/web\/api\/c\/(\d+)\/events$/.exec(webPath(url.pathname));
           if (req.method === "GET" && events) {
             const conversationId = Number(events[1]);
             res.writeHead(200, {
@@ -173,7 +179,7 @@ async function main(): Promise<void> {
             });
             return;
           }
-          const send = /^\/web\/api\/c\/(\d+)\/message$/.exec(url.pathname);
+          const send = /^\/web\/api\/c\/(\d+)\/message$/.exec(webPath(url.pathname));
           if (req.method === "POST" && send) {
             if (config.webToken && req.headers.authorization !== `Bearer ${config.webToken}`) {
               res.writeHead(401, { "Content-Type": "application/json" });
@@ -359,6 +365,18 @@ main().catch((error) => {
   logger.error("[bridge] fatal:", error);
   process.exit(1);
 });
+
+/**
+ * Strip a reverse proxy's mount prefix, so route matching is independent of
+ * whether the proxy passes "/pi/web/..." or rewrites it to "/web/...".
+ *
+ * Only leading segments before "/web" are removed, so a conversation id or any
+ * other late path component is never touched.
+ */
+function webPath(pathname: string): string {
+  const at = pathname.indexOf("/web");
+  return at > 0 ? pathname.slice(at) : pathname;
+}
 
 /** Read a request body up to `maxBytes`; returns null when the cap is exceeded. */
 function readBody(req: http.IncomingMessage, maxBytes: number): Promise<string | null> {
