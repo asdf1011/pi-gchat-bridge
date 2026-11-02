@@ -5,7 +5,8 @@
   "type": "module",
   "description": "Bridge between Google Chat and the pi coding agent",
   "scripts": {
-    "start": "tsx src/index.ts",
+    "start": "tsx src/durable/main.ts",
+    "start:sdk": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc",

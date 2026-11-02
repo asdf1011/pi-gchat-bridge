@@ -19,6 +19,13 @@ endpoint, no tunnel, works for DMs *and* spaces. The bridge pulls events,
 hands them to pi, and replies by posting a placeholder message that is **edited
 in place** as pi streams, so you watch the answer appear live.
 
+The bridge runs on **[Pi Durable](https://earendil.com/posts/pi-durable/)** — an
+append-only, crash-safe conversation runtime. One process owns a SQLite store
+(`bridge.sqlite`); Chat is a *client* of it, not the owner. That is what makes
+**two frontends on one conversation** possible: the same conversation can be
+watched and driven from Chat and from a browser at the same time (see
+[Web frontend](#web-frontend)).
+
 ## One-time setup (Google Cloud Console)
 
 1. **Create a project** at <https://console.cloud.google.com/projectcreate> (or reuse one).
@@ -47,10 +54,15 @@ cd pi-gchat-bridge
 npm install
 cp .env.example .env
 # edit .env: point GOOGLE_SERVICE_ACCOUNT_JSON at your key file
-npm start
+npm start            # runs the durable engine (tsx src/durable/main.ts)
 ```
 
-That's it — the bot now answers messages in any space it's installed in.
+For production, point your container at `./start-bridge.sh`, which supervises
+the process, restarts it on crash, and starts cron and the local-model router.
+`npm run start:sdk` runs the old SDK host instead.
+
+That's it — the bot now answers messages in any space it's installed in, and
+the same conversations are visible at `/web`.
 
 ## How it behaves
 
@@ -59,17 +71,17 @@ That's it — the bot now answers messages in any space it's installed in.
   reply appear live. The patched text is sent with `markupSyntax: MARKDOWN`, so
   Markdown renders *while* it streams (code fences, bold, lists), not just at the
   end.
-- **One pi session per thread** — conversations persist across bridge
-  restarts (JSONL files under `sessions/`, keyed by thread; non-threaded DMs
-  key by space). Threads are fully independent conversations. See
-  [Session model & persistence](#session-model--persistence) for how sessions
-  are named, adopted, and kept across restarts.
+- **One conversation per thread** — keyed by thread, or by space for a
+  non-threaded DM. Threads are fully independent conversations. Conversations
+  live in the durable store, so they survive restarts *and* crashes: an
+  interrupted turn is resumed, not lost. See
+  [Session model & persistence](#session-model--persistence).
 - **Interleaved messages (steer)** — sending a message while pi is working
-  queues it into the *running* turn: it's delivered after the current tool
-  call finishes (tool results land first) and before the next LLM call, so
-  pi keeps its tool loop active and addresses your new message alongside the
-  original work — "tool call start, message, tool call response". Commands
-  (`/help`, `/model`, `/settings`, `/resume`) instead interrupt the running reply.
+  joins the *running* turn (`whenBusy: "steer"`): it is delivered after the
+  current tool call finishes and before the next model call, so pi keeps its
+  tool loop active and addresses your new message alongside the original work.
+  Commands (`/help`, `/model`, `/settings`, `/resume`) instead interrupt the
+  running reply.
 - **pi extensions & skills work** — the session loads your `~/.pi/agent`
   extensions, so `/commands` and skills behave like in the TUI.
 - **Images & text** — pasted (or uploaded) images are downloaded and passed to
@@ -84,22 +96,35 @@ That's it — the bot now answers messages in any space it's installed in.
 
 ## Session model & persistence
 
-- **`/resume`, `/sessions`, `/list`** — manually adopt *any* session file
-  (bridge store or pi's global store) into the current thread. The binding
-  (conversation → session file) is **persisted in `state.json`**, so it
-  survives bridge restarts. Resuming a conversation's own derived file
-  reverts it to the default. The adopted session must still exist on disk —
-  the binding stores a path, not a copy. After resuming, continuing the
-  source session elsewhere (e.g. in the TUI) forks the conversation — those
-  messages never appear in Chat.
+Conversations live in **`bridge.sqlite`**, written by exactly one process. The
+store is append-only: every model call, tool call and document change is a
+commit, so an interrupted run resumes rather than being lost, and a message
+that Pub/Sub redelivers is recognised by its id instead of being answered
+twice.
+
+- **The binding is a document, not a file.** A session-scoped document maps
+  `chatKey → conversationId`, written in the *same commit* that creates the
+  conversation, so a crash cannot leave a conversation no thread points at.
+- **`/sessions`** lists conversations; **`/resume`** rebinds a thread to one of
+  them. `/name` gives one a display name (Chat-side label only).
+- **Legacy history was imported once.** `src/durable/import-all.ts` replays old
+  JSONL sessions into the store. It is a one-shot migration tool, lossy by
+  design (thinking, tool calls and branches stay in the JSONL files, which are
+  never modified), not a live fallback.
+- **One process owns the database.** `bridge.sqlite.lock` is a pid file: a
+  second bridge refuses to start rather than serving the same Chat messages
+  from a second, blind in-memory harness. Two supervisors cannot run either
+  (`.start-bridge.pid`).
 
 ### Model and thinking level
 
 - **`/model` in a conversation** switches **only that conversation** — one
-  card with two dropdowns: model and thinking level. Both choices are written
-  into the session file (`model_change` / `thinking_level_change` entries), so
-  they survive bridge restarts and other conversations are unaffected. Neither
-  changes the global defaults.
+  card with two dropdowns: model and thinking level. Both are applied with
+  `conversation.configure()`, so they survive restarts and other conversations
+  are unaffected. Neither changes the global defaults.
+  > Switching models in a thread with a turn in flight **interrupts** that turn
+  > (the new model cannot apply mid-turn). The following message then runs on
+  > the new model.
 - **Thinking in the `/model` card** lists **only the levels the selected
   model actually supports**, and re-renders when you change the model: the
   dropdown carries an `onChangeAction`, so Chat submits the form and the
@@ -152,6 +177,42 @@ That's it — the bot now answers messages in any space it's installed in.
 - API access needs an API key scoped to the provider's models, or the model
   will appear in the picker but fail to be selected.
 
+## Web frontend
+
+The same conversations, in a browser. The bridge serves a small page (no build
+step) at `/web` — or under whatever prefix a reverse proxy gives it.
+
+- **`GET /web`** — the page
+- **`GET /web/api/conversations`** — the index, newest first
+- **`GET /web/api/c/:id/events`** — `text/event-stream`: whole snapshots plus
+  the current tool status
+- **`POST /web/api/c/:id/message`** — submit a message (`whenBusy: "steer"`)
+
+**Why this is in-process, not a separate app.** Pi Durable's `viewState()` and
+`subscribe()` are in-memory fan-out: any number of clients can attach to a
+conversation *inside the process that owns it*. Its storage has no cross-process
+change notification, so a server in another process could never see a Chat turn
+commit. Chat and the browser are therefore two sinks on one conversation — a
+turn started in Chat streams into the browser and vice versa — rather than two
+conversations being replicated. This is also why a standalone web app (e.g.
+`pi-pocket`) cannot be pointed at this store: it takes the store exclusively.
+
+One `viewState()` per connected browser, seeded from its snapshot, so a client
+connecting mid-turn paints the in-progress answer instead of a blank page.
+
+**Reverse proxy.** The page is mount-agnostic: every URL is resolved relative to
+the page's own directory, and the server strips an optional prefix before
+`/web`, so both `/pi/web` (prefix passed through) and `/web` (prefix stripped)
+work with no base-path configuration. Two proxy settings matter:
+
+- **Buffer off** for `/web/api/` — otherwise SSE frames arrive in clumps
+- **Read timeout above ~30 s** — the server sends a `keepalive` comment every
+  15 s
+
+**Security.** There is no per-user auth: anyone who can reach the port can read
+every conversation and submit as the bot. Bind it to a tailnet or private
+network, and set `BRIDGE_WEB_TOKEN` if it needs to listen more widely.
+
 ## Configuration
 
 | Env var | Default | Meaning |
@@ -159,8 +220,11 @@ That's it — the bot now answers messages in any space it's installed in.
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | — (required) | Path to service account key |
 | `PUBSUB_SUBSCRIPTION` | — (required) | `projects/.../subscriptions/...` |
 | `PI_CWD` | bridge dir | Working dir for pi tools |
-| `BRIDGE_SESSIONS_DIR` | `./sessions` | Per-space pi session files |
-| `BRIDGE_STATE_FILE` | `./state.json` | Message dedupe state |
+| `BRIDGE_ENGINE` | `durable` | `durable` (Pi Durable) or `sdk` (the old SDK host, kept for rollback) |
+| `BRIDGE_DB` | `./bridge.sqlite` | The durable store. One process owns it |
+| `BRIDGE_WEB_TOKEN` | — | Bearer token for web writes; empty = no check (tailnet-only) |
+| `BRIDGE_SESSIONS_DIR` | `./sessions` | Legacy JSONL sessions — read by the importer and the old engine only |
+| `BRIDGE_STATE_FILE` | `./state.json` | Legacy dedupe state — superseded by the store's submission ids |
 | `PORT` | `8080` | Health endpoint (0 disables) |
 | `BRIDGE_STALL_TIMEOUT_MS` | `1200000` (20 min) | Watchdog: force-reset a session streaming with no agent activity for this long (0 disables) |
 | `BRIDGE_WATCHDOG_INTERVAL_MS` | `30000` | Watchdog scan interval |
@@ -179,9 +243,11 @@ That's it — the bot now answers messages in any space it's installed in.
 npm test
 ```
 
-Runs the unit test suite (Node's built-in runner via tsx) against the pure
-logic: session-key derivation, allow-list matching, and the session-file
-reader/writer (including the watchdog's incomplete-tail truncation).
+Runs the unit test suite (Node's built-in runner via `tsx`). It covers the pure
+logic: projection of a durable view into a Chat reply, the Chat sink, the
+router's dedupe/steering contract, the command layer's query semantics, the
+web sink, and failure notices. Tests never open the live database or call a
+model — the harness is reached through structural fakes.
 
 ```bash
 npm run evals                             # local-model evals (topic titles)
@@ -193,11 +259,17 @@ currently the `/model` card titler. Cases are mined from real conversations in
 `sessions/` and graded deterministically first, with an optional LLM judge for
 the judgement calls. See `evals/README.md`.
 
-### Stuck-session watchdog
+### Stuck turns
 
-If a session's tool call hangs (e.g. the agent runs a network fetch without a
-timeout), the session streams forever and every message in that conversation is
-deferred as "busy" — exactly what happened with the 22:43 `PY3n26MpvnI` hang.
+The old watchdog (`BRIDGE_STALL_TIMEOUT_MS`) forced a hung *session* to reset.
+On the durable engine this is the harness's job: a run that stops making
+progress is parked and resumed on the next start, and `harness.resume()` runs
+at startup. A turn that ends without an answer is now logged with its status,
+reason, duration and conversation id, and Chat is told which of those it was —
+*a stopped turn*, a *finished-but-empty* one, or a *failed* one — because those
+need different responses from a person.
+
+The historical case, kept for context:
 The watchdog checks each streaming session for agent activity (any emitted
 event) and, after `BRIDGE_STALL_TIMEOUT_MS` of silence, aborts the stuck run,
 drops the incomplete trailing turn from the session file (so the hung tool call
@@ -208,6 +280,9 @@ redelivered by Pub/Sub to the fresh session.
 
 - [x] Pub/Sub receiver (DMs + spaces, no public endpoint)
 - [x] Streaming replies (live in-place editing)
+- [x] Pi Durable engine (crash-safe store, one conversation per thread)
+- [x] Web frontend sharing conversations with Chat
+- [ ] Artifacts (agent-published HTML/Markdown/SVG, versioned per id)
 - [ ] Allowed-users filter (whitelist who can message the bot)
 - [x] Parallel processing: per-thread sessions + concurrent dispatch (threads are independent; serial within a thread)
 

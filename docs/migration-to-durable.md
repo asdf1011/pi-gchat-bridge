@@ -641,3 +641,60 @@ It is **not** part of this migration:
 
 Revisit after the cutover, as a deliberate behaviour change with its own decision record. The
 approximation is the cheap version; quote-based exact forks would be additive on top.
+
+## Status: complete and live
+
+Written after the fact, from the actual outcome.
+
+**Cut over.** The container entrypoint (`start-bridge.sh`) runs the durable
+engine; `BRIDGE_ENGINE=sdk` keeps the old engine runnable, so rollback is an env
+change and a restart rather than a checkout. The space-split (two subscriptions,
+one allow-list each) was used for the canary and is still how a gradual rollout
+would work.
+
+**History imported.** 109 conversations from `sessions/*.jsonl`, full replay
+(~477k tokens total across all of them; the largest is ~37k, well inside
+DeepSeek's window). Two importer faults were found by reading the database back
+before trusting it: the default model came from `getModels()[0]` (alphabetical —
+Bedrock) instead of the configured default, and replay dropped each message's
+model. Both fixed; `import-all.ts` is a one-shot tool, not a live path.
+
+**Web frontend shipped (M8a).** In-process, one `viewState()` per browser, SSE.
+Measured 8 concurrent subscribers with identical frames and zero drift. This is
+the payoff the migration was for: Chat and the browser are two sinks on one
+conversation.
+
+**Deviations from the plan, and why:**
+
+- **`thinking-budget` was dropped, not ported.** It capped one local model's
+  thinking at 2048 tokens for latency. Not worth code; `/model`'s thinking
+  dropdown is the coarse control, and llama.cpp's `--reasoning-budget` is the
+  server-side fix if it ever matters.
+- **Thread-fork semantics deferred.** A thread currently starts its own
+  conversation rather than forking the space's. Forking is closer to what people
+  expect, but it changes what every thread's first turn costs, and Chat does not
+  tell us which message a thread replies to. Post-cutover change.
+- **Topic titling not ported.** `BRIDGE_TOPIC_SUMMARY` was 0 on this deployment,
+  so there was nothing to preserve.
+
+**Two bugs worth remembering** — both found in production, neither by tests:
+
+1. **Two supervisors.** A second copy of `start-bridge.sh` ran as a child of pid
+   1, each spawning a bridge. The database lock refused the duplicate, but the
+   pointless process was the *supervisor*, so the lock could not stop it: 1,138
+   restarts at ~100% CPU, which buried a real model failure in the log. Now a
+   pid file on the supervisor itself.
+2. **Silent turn failures.** A turn that produced no text logged only
+   `no answer text (unanswered)` — a terminal status, not a cause. `unanswered`
+   carries a `reason` that was being discarded, so a 9-second abort and a
+   154-second slow model were indistinguishable. Now status, reason, duration
+   and conversation id are logged, and the Chat notice distinguishes
+   stopped / empty / failed.
+
+The general lesson: a `RequestId`-style dedupe and a database lock both protect
+*data*, but neither protects *liveness*. The supervisor needed its own guard.
+
+**Still open:** deleting the legacy path (`agent-sessions.ts`, `session-file.ts`,
+`state.ts`, `dist/index.js`) after the canary. Not a clean `git rm` — the kept
+files (`stream.ts`, `cards.ts`, `commands.ts`) still import them, so it is a
+refactor of code that stays.
