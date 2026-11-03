@@ -1,7 +1,7 @@
 /**
  * `secret-get.js`: the one place the supervisor reads the store.
  *
- * `start-bridge.sh` needs TUNNEL_TOKEN before the bridge exists, so it shells out
+ * `start-bridge.sh` needs CLOUDFLARE_TUNNEL_TOKEN before the bridge exists, so it shells out
  * to this script instead of parsing `secrets.json` itself. That choice is what
  * these tests protect: if the store's format ever changes, the script follows it
  * for free, and the supervisor keeps working — whereas a bash `jq` would have
@@ -39,8 +39,8 @@ function tempStore(): string {
 
 test("prints a stored value on stdout and nothing else", () => {
   const file = tempStore();
-  new SecretStore(file).set("TUNNEL_TOKEN", "eyJhIjoix", "alice");
-  const { out, code } = run(file, "TUNNEL_TOKEN");
+  new SecretStore(file).set("CLOUDFLARE_TUNNEL_TOKEN", "eyJhIjoix", "alice");
+  const { out, code } = run(file, "CLOUDFLARE_TUNNEL_TOKEN");
   assert.equal(code, 0);
   // Exact: a trailing newline would end up inside a shell variable.
   assert.equal(out, "eyJhIjoix");
@@ -60,7 +60,7 @@ test("a file-backed secret resolves to its contents", () => {
 test("a missing secret exits 1 with a message naming it, not a value", () => {
   const file = tempStore();
   new SecretStore(file).set("OTHER", "some-other-value", "alice");
-  const { out, code } = run(file, "TUNNEL_TOKEN");
+  const { out, code } = run(file, "CLOUDFLARE_TUNNEL_TOKEN");
   assert.equal(code, 1);
   assert.equal(out, "");
 });
@@ -93,7 +93,7 @@ test("a store written by an older build still resolves", () => {
   const file = tempStore();
   fs.writeFileSync(
     file,
-    JSON.stringify({ version: 1, secrets: { TUNNEL_TOKEN: { value: "legacy-value", addedAt: 1, addedBy: "a" } } }),
+    JSON.stringify({ version: 1, secrets: { CLOUDFLARE_TUNNEL_TOKEN: { value: "legacy-value", addedAt: 1, addedBy: "a" } } }),
   );
-  assert.equal(run(file, "TUNNEL_TOKEN").out, "legacy-value");
+  assert.equal(run(file, "CLOUDFLARE_TUNNEL_TOKEN").out, "legacy-value");
 });

@@ -26,10 +26,10 @@
 # would have been cargo cult.
 
 tunnel: pi-bridge
-# Credentials: either a tunnel token (TUNNEL_TOKEN, read by start-bridge.sh and
-# passed with --token) or a credentials file. Only one is needed; the token wins
-# if both are present. The credentials-file line is kept commented so the file
-# path is documented without making its absence an error:
+# Credentials: the tunnel token, held in the bridge's secret store as
+# CLOUDFLARE_TUNNEL_TOKEN (set with `/secret set CLOUDFLARE_TUNNEL_TOKEN` in Chat)
+# and passed here with --token by start-bridge.sh. The credentials-file line is
+# kept commented so the alternative is documented without becoming an error:
 #
 #credentials-file: /etc/cloudflared/<tunnel-id>.json
 #

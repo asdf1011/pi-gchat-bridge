@@ -2,8 +2,8 @@
 /**
  * Print one secret's value, for a supervisor that cannot import TypeScript.
  *
- * `start-bridge.sh` needs `TUNNEL_TOKEN` before the bridge process exists, so it
- * cannot ask the running bridge. It could parse `secrets.json` in bash — but that
+ * `start-bridge.sh` needs a token before the bridge process exists, so it cannot
+ * ask the running bridge. It could parse `secrets.json` in bash — but that
  * duplicates the store's on-disk format in a second language, and the whole point
  * of `source`/migration logic is that the format is the store's business.
  *
@@ -11,8 +11,8 @@
  * same migration, same `O_NOFOLLOW` handling for file-backed secrets — no second
  * implementation to drift.
  *
- *   node dist/scripts/secret-get.js TUNNEL_TOKEN
- *     → the value on stdout, exit 0
+ *   node dist/scripts/secret-get.js CLOUDFLARE_TUNNEL_TOKEN
+ *     → the value on stdout, exit 0  (any stored name works)
  *     → nothing on stdout, exit 1, reason on stderr
  *
  * Deliberate choices:
