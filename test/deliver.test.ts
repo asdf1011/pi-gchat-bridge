@@ -158,3 +158,14 @@ test("toRegistered produces the redaction shape from the same source", () => {
   // exist — a value that is delivered but not redacted would leak on echo.
   assert.deepEqual(toRegistered([BRAVE]), [{ name: "BRAVE_API_KEY", value: "BSAB5H-xxx" }]);
 });
+
+// --- File-backed secrets deliver the same way ---------------------------------
+
+test("a file-backed secret is delivered by mention, like a value-backed one", () => {
+  // Delivery does not care where the bytes came from: `prepare` receives an
+  // already-resolved value. This asserts the seam holds for the PEM/JSON case,
+  // which is the whole reason the file form exists.
+  const pem = "-----BEGIN PRIVATE KEY-----\nMIIabc\n-----END PRIVATE KEY-----\n";
+  const env = envForCommand("curl --cert $PEM_KEY", [{ name: "PEM_KEY", value: pem }], 7);
+  assert.equal(env.PEM_KEY, pem);
+});

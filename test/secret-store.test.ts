@@ -139,3 +139,110 @@ test("the default path is outside the bridge directory", () => {
   assert.equal(resolved.includes("pi-gchat-bridge/secrets.json"), false);
   assert.match(resolved, /\.pi-bridge/);
 });
+
+// --- File-backed secrets -----------------------------------------------------
+
+test("a file-backed secret resolves its contents at use time", () => {
+  const { store, dir } = tempStore();
+  const file = path.join(dir, "key.pem");
+  fs.writeFileSync(file, "-----BEGIN KEY-----\nabcdef\n-----END KEY-----\n");
+  store.setFile("PEM_KEY", file, "alice");
+  const [secret] = store.registrySecrets();
+  assert.equal(secret?.name, "PEM_KEY");
+  assert.equal(secret?.value.includes("BEGIN KEY"), true);
+});
+
+test("multi-line content is accepted through a file, though a card would refuse it", () => {
+  // This is the gap the file form exists to fill: valueProblem() rejects a
+  // newline, so a PEM or a service-account JSON has to arrive as a path.
+  const { store, dir } = tempStore();
+  const file = path.join(dir, "sa.json");
+  fs.writeFileSync(file, JSON.stringify({ type: "service_account", private_key: "x".repeat(40) }, null, 2));
+  assert.throws(() => store.set("SA", JSON.stringify({ a: 1 }, null, 2), "alice"), /single-line/);
+  store.setFile("SA", file, "alice");
+  assert.match(store.registrySecrets()[0]?.value ?? "", /service_account/);
+});
+
+test("a rotation is picked up without re-storing", () => {
+  const { store, dir } = tempStore();
+  const file = path.join(dir, "cert");
+  fs.writeFileSync(file, "first-value-here");
+  store.setFile("CERT", file, "alice");
+  fs.writeFileSync(file, "second-value-here");
+  assert.equal(store.registrySecrets()[0]?.value, "second-value-here");
+});
+
+test("a relative path is refused", () => {
+  // Relative would resolve against PI_CWD — the agent's own directory.
+  const { store } = tempStore();
+  assert.throws(() => store.setFile("K", "secrets/key", "alice"), /absolute/);
+  assert.throws(() => store.setFile("K", "./key", "alice"), /absolute/);
+});
+
+test("a missing file is refused at set time", () => {
+  const { store, dir } = tempStore();
+  assert.throws(() => store.setFile("K", path.join(dir, "nope"), "alice"), /cannot read/);
+});
+
+test("a symlink is refused, even when it points at a readable file", () => {
+  // O_NOFOLLOW: otherwise a path could be swapped for a link into /proc or an
+  // attacker-chosen file, turning "read the key" into "read anything".
+  const { store, dir } = tempStore();
+  const real = path.join(dir, "real");
+  fs.writeFileSync(real, "a-real-secret-value");
+  const link = path.join(dir, "link");
+  fs.symlinkSync(real, link);
+  assert.throws(() => store.setFile("K", link, "alice"), /cannot read/);
+});
+
+test("a file too short to redact safely is refused", () => {
+  const { store, dir } = tempStore();
+  const file = path.join(dir, "tiny");
+  fs.writeFileSync(file, "ab");
+  assert.throws(() => store.setFile("K", file, "alice"), /cannot read/);
+});
+
+test("a file that becomes unreadable is skipped, not mis-redacted", () => {
+  // An empty pattern would match every character; skipping is the safe failure.
+  const { store, dir } = tempStore();
+  const file = path.join(dir, "gone");
+  fs.writeFileSync(file, "value-then-deleted");
+  store.setFile("K", file, "alice");
+  fs.rmSync(file);
+  assert.deepEqual(store.registrySecrets(), []);
+});
+
+test("the listing shows the path, never the contents", () => {
+  const { store, dir } = tempStore();
+  const file = path.join(dir, "sa.json");
+  fs.writeFileSync(file, '{"private_key":"supersecretvalue"}');
+  store.setFile("SA", file, "alice");
+  const [row] = store.list();
+  assert.equal(row?.from, file);
+  assert.equal(row?.tail, undefined);
+  assert.equal(JSON.stringify(row).includes("supersecretvalue"), false);
+});
+
+// --- Format migration --------------------------------------------------------
+
+test("a store written before file-backed secrets is still read", () => {
+  // The on-disk shape changed from `{value}` to `{source}`. Rather than force a
+  // re-entry, the old shape is read as what it always meant.
+  const { store, file } = tempStore();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(
+    file,
+    JSON.stringify({
+      version: 1,
+      secrets: { OLD_KEY: { value: "old-value-here", addedAt: 1, addedBy: "alice" } },
+    }),
+  );
+  assert.deepEqual(store.registrySecrets(), [{ name: "OLD_KEY", value: "old-value-here" }]);
+});
+
+test("an unrecognisable entry is dropped rather than guessed at", () => {
+  const { store, file } = tempStore();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ version: 1, secrets: { BAD: { nonsense: true } } }));
+  assert.deepEqual(store.registrySecrets(), []);
+});

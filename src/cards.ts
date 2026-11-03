@@ -626,12 +626,17 @@ export function secretConfirmCard(opts: {
  * `/secret` and `/secret set NAME` converge on one path.
  */
 export function secretPanelCard(
-  secrets: { name: string; tail: string; addedAt: number; addedBy: string }[],
+  secrets: { name: string; tail?: string; from?: string; addedAt: number; addedBy: string }[],
 ): unknown[] {
   const rows = secrets.map((secret) => ({
     textParagraph: {
       text:
-        `<b>${escapeHtml(secret.name)}</b> — <code>${escapeHtml(secret.tail)}</code>` +
+        `<b>${escapeHtml(secret.name)}</b> — ` +
+        // A file-backed secret shows its path: a path is not the secret, and
+        // seeing it is how an operator confirms the right file was recorded.
+        (secret.from !== undefined
+          ? `file <code>${escapeHtml(secret.from)}</code>`
+          : `<code>${escapeHtml(secret.tail ?? "")}</code>`) +
         ` · added ${new Date(secret.addedAt).toISOString().slice(0, 10)} by ${escapeHtml(secret.addedBy)}`,
     },
   }));
@@ -697,7 +702,7 @@ export function secretPanelCard(
 }
 
 /** Picker for removing a secret, so deletion needs no typed command. */
-export function secretRemoveCard(secrets: { name: string; tail: string }[]): unknown[] {
+export function secretRemoveCard(secrets: { name: string; tail?: string; from?: string }[]): unknown[] {
   return [
     {
       cardId: "secret-remove",
@@ -716,7 +721,10 @@ export function secretRemoveCard(secrets: { name: string; tail: string }[]): unk
                   name: "secret_remove_picker",
                   label: "Secret",
                   type: "DROPDOWN",
-                  items: secrets.map((s) => ({ text: `${s.name} (${s.tail})`, value: s.name })),
+                  items: secrets.map((s) => ({
+                    text: `${s.name} (${s.from !== undefined ? "file" : (s.tail ?? "")})`,
+                    value: s.name,
+                  })),
                 },
               },
               {

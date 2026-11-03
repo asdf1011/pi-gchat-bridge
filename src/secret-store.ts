@@ -35,10 +35,31 @@ import { logger } from "./logger.js";
 import type { RegisteredSecret } from "./durable/extensions/redact.js";
 import { MIN_SECRET_LENGTH } from "./durable/extensions/redact.js";
 
-/** One stored secret: the literal value plus where it came from. */
+/**
+ * Where a secret's bytes come from.
+ *
+ * Two kinds, because they answer different problems and one of them cannot be a
+ * card input at all:
+ *
+ *  - `value`: the literal, typed on a card. Single-line only — a card has no
+ *    multi-line input, and the redaction variants do not model newlines.
+ *  - `file`: a path to read at use time. This is what a PEM or a
+ *    service-account JSON needs, and it is also the *better* option for any
+ *    long-lived credential: the bytes never pass through Chat, never sit in the
+ *    store, and stay where the operator already controls permissions.
+ *
+ * A path is not itself secret, so storing one is safe in a way storing a value
+ * is not — `/secret set cert --file /etc/cloudflared/tunnel.json` is a
+ * reasonable thing to record.
+ */
+export type SecretSource =
+  | { readonly kind: "value"; readonly value: string }
+  | { readonly kind: "file"; readonly path: string };
+
+/** One stored secret: where it comes from, plus provenance. */
 export interface StoredSecret {
   /** Environment-variable-style name, also the redaction marker's payload. */
-  readonly value: string;
+  readonly source: SecretSource;
   /** Epoch ms, for `/secret list` and the store's own bookkeeping. */
   readonly addedAt: number;
   /** Who entered it (Chat display name), for the audit line a human reads. */
@@ -57,6 +78,38 @@ interface StoreFile {
 }
 
 const EMPTY: StoreFile = { version: 1, secrets: {} };
+
+/**
+ * Bring an older entry up to the `source` shape.
+ *
+ * Before file-backed secrets, an entry was `{ value, addedAt, addedBy, scopes }`.
+ * Rather than bump the version and force a re-entry, the old shape is read as
+ * what it always meant — a literal value — so a store written by a previous
+ * build keeps working. Anything unrecognisable is dropped, because guessing at a
+ * credential's shape is worse than forgetting it.
+ */
+function migrate(raw: Record<string, unknown>): Record<string, StoredSecret> {
+  const out: Record<string, StoredSecret> = {};
+  for (const [name, entry] of Object.entries(raw)) {
+    if (!entry || typeof entry !== "object") continue;
+    const e = entry as Record<string, unknown>;
+    const addedAt = typeof e.addedAt === "number" ? e.addedAt : 0;
+    const addedBy = typeof e.addedBy === "string" ? e.addedBy : "unknown";
+    const scopes = Array.isArray(e.scopes) ? (e.scopes.filter((x) => typeof x === "string") as string[]) : undefined;
+    const withScopes = scopes?.length ? { scopes } : {};
+
+    const source = e.source as SecretSource | undefined;
+    if (source?.kind === "value" && typeof source.value === "string") {
+      out[name] = { source, addedAt, addedBy, ...withScopes };
+    } else if (source?.kind === "file" && typeof source.path === "string") {
+      out[name] = { source, addedAt, addedBy, ...withScopes };
+    } else if (typeof e.value === "string") {
+      // Pre-file-backed entry.
+      out[name] = { source: { kind: "value", value: e.value }, addedAt, addedBy, ...withScopes };
+    }
+  }
+  return out;
+}
 
 /** Names that must not be captured: they would break the shell or pi itself. */
 const RESERVED = new Set([
@@ -94,6 +147,22 @@ export function valueProblem(value: string): string | undefined {
   return undefined;
 }
 
+/**
+ * Why a file path is unusable, or undefined when it is acceptable.
+ *
+ * Absolute only: a relative path would be resolved against `PI_CWD`, which is
+ * the agent's own working directory — so the agent could pick the target.
+ * Symlinks are rejected (see `assertReadable`) rather than followed here, since
+ * only the resolved check can tell.
+ */
+export function pathProblem(filePath: string): string | undefined {
+  if (!filePath.trim()) return "empty path";
+  if (!path.isAbsolute(filePath)) {
+    return "must be absolute — a relative path would resolve inside the agent's working directory";
+  }
+  return undefined;
+}
+
 /** The last few characters, for `/secret list`. Never enough to be the value. */
 export function tail(value: string): string {
   // Always leave at least one character unshown: the tail is shown in a Chat
@@ -127,7 +196,7 @@ export class SecretStore {
         logger.error(`[secrets] ${this.file} is not a version 1 store — ignoring it`);
         return EMPTY;
       }
-      return { version: 1, secrets: candidate.secrets as Record<string, StoredSecret> };
+      return { version: 1, secrets: migrate(candidate.secrets as Record<string, unknown>) };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return EMPTY;
       // A corrupt store must not silently disable redaction: say so loudly and
@@ -147,15 +216,30 @@ export class SecretStore {
     fs.renameSync(temp, this.file);
   }
 
-  /** Names and metadata only — never a value. */
-  list(): { name: string; addedAt: number; addedBy: string; tail: string }[] {
+  /**
+   * Names and metadata only — never a value.
+   *
+   * For a file-backed secret there IS no tail to show, so `tail` is undefined
+   * and `from` carries the path instead. Showing a path is safe: a path is not
+   * the secret, and knowing it is what lets an operator confirm the right file
+   * was recorded.
+   */
+  list(): {
+    name: string;
+    addedAt: number;
+    addedBy: string;
+    tail?: string;
+    from?: string;
+  }[] {
     const store = this.read();
     return Object.entries(store.secrets)
       .map(([name, secret]) => ({
         name,
         addedAt: secret.addedAt,
         addedBy: secret.addedBy,
-        tail: tail(secret.value),
+        ...(secret.source.kind === "value"
+          ? { tail: tail(secret.source.value) }
+          : { from: secret.source.path }),
       }))
       .sort((a, b) => a.name.localeCompare(b.name));
   }
@@ -178,28 +262,91 @@ export class SecretStore {
    * the bug where `/secret set` appeared to do nothing.
    */
   registrySecrets(): RegisteredSecret[] {
-    return Object.entries(this.read().secrets).map(([name, secret]) => ({
-      name,
-      value: secret.value,
-      ...(secret.scopes?.length ? { scopes: secret.scopes } : {}),
-    }));
+    const out: RegisteredSecret[] = [];
+    for (const [name, secret] of Object.entries(this.read().secrets)) {
+      const value = this.resolve(secret);
+      // A file-backed secret whose file is unreadable is skipped rather than
+      // mis-redacted: an empty pattern would match every character.
+      if (value === undefined) {
+        logger.error(`[secrets] ${name}: file unreadable, not redacting it`);
+        continue;
+      }
+      out.push({ name, value, ...(secret.scopes?.length ? { scopes: secret.scopes } : {}) });
+    }
+    return out;
   }
 
+  /**
+   * The bytes a secret stands for, or undefined if they cannot be read.
+   *
+   * Read on every call rather than cached. For a file-backed secret that means a
+   * rotated certificate is picked up without a restart — which is the whole
+   * reason to point at a file instead of storing a value.
+   *
+   * `O_NOFOLLOW` refuses a symlink: the store is operator-owned, but a path that
+   * can be swapped for a link into `/proc` or an attacker-chosen file turns
+   * "read the key" into "read anything". Rejecting rather than resolving keeps
+   * the failure visible.
+   */
+  private resolve(secret: StoredSecret): string | undefined {
+    if (secret.source.kind === "value") return secret.source.value;
+    try {
+      const fd = fs.openSync(secret.source.path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+      try {
+        const value = fs.readFileSync(fd, "utf8");
+        return value.length >= MIN_SECRET_LENGTH ? value : undefined;
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Store a literal value, typed on a card. Single-line only. */
   set(name: string, value: string, addedBy: string, scopes?: readonly string[]): void {
     if (!isValidSecretName(name)) throw new Error(`"${name}" is not a usable secret name`);
     const problem = valueProblem(value);
     if (problem) throw new Error(problem);
 
+    this.put(name, { kind: "value", value }, addedBy, scopes);
+    // Count and name only. A log line is a transcript with a different owner.
+    logger.info(`[secrets] stored ${name} (${value.length} chars, by ${addedBy})`);
+  }
+
+  /**
+   * Store a path to read at use time.
+   *
+   * The file is checked at set time so a typo is caught while a human is
+   * looking, and read again at every use so a rotation is picked up. Its
+   * contents are never copied into the store.
+   */
+  setFile(name: string, filePath: string, addedBy: string, scopes?: readonly string[]): void {
+    if (!isValidSecretName(name)) throw new Error(`"${name}" is not a usable secret name`);
+    const problem = pathProblem(filePath);
+    if (problem) throw new Error(problem);
+
+    const trimmed = filePath.trim();
+    // Read once now: catches a missing file, a symlink, and a permissions
+    // problem at the moment the operator can still fix it.
+    const probe = this.resolve({ source: { kind: "file", path: trimmed } } as StoredSecret);
+    if (probe === undefined) {
+      throw new Error(`cannot read ${trimmed} (missing, unreadable, a symlink, or under ${MIN_SECRET_LENGTH} bytes)`);
+    }
+
+    this.put(name, { kind: "file", path: trimmed }, addedBy, scopes);
+    logger.info(`[secrets] stored ${name} as a path (${trimmed}, by ${addedBy})`);
+  }
+
+  private put(name: string, source: SecretSource, addedBy: string, scopes?: readonly string[]): void {
     const store = this.read();
     this.write({
       version: 1,
       secrets: {
         ...store.secrets,
-        [name]: { value, addedAt: Date.now(), addedBy, ...(scopes?.length ? { scopes } : {}) },
+        [name]: { source, addedAt: Date.now(), addedBy, ...(scopes?.length ? { scopes } : {}) },
       },
     });
-    // Count and name only. A log line is a transcript with a different owner.
-    logger.info(`[secrets] stored ${name} (${value.length} chars, by ${addedBy})`);
   }
 
   remove(name: string): boolean {

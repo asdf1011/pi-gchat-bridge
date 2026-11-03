@@ -347,7 +347,7 @@ const SLASH_COMMANDS: SlashCommand[] = [
     // the whole point of the card is that the value stays out of the model's way.
     interrupt: true,
     run: async (ctx) => {
-      const { client, spaceName, threadName, display, text } = ctx;
+      const { client, host, chatKey, spaceName, threadName, display, text } = ctx;
       const secrets = ctx.secrets;
       if (!isAllowed(display, ctx.secretUsers ?? [])) {
         // Deliberately vague: an unauthorised user should not learn whether
@@ -369,7 +369,11 @@ const SLASH_COMMANDS: SlashCommand[] = [
 
       if (verb === "set" || verb === "add") {
         if (!name) {
-          await client.sendMessage(spaceName, "Usage: **/secret set NAME** — then enter the value on the card.", threadName);
+          await client.sendMessage(
+            spaceName,
+            "Usage: **/secret set NAME** (value on a card) or **/secret set NAME --file /abs/path**.",
+            threadName,
+          );
           return "ok";
         }
         if (!isValidSecretName(name)) {
@@ -381,6 +385,37 @@ const SLASH_COMMANDS: SlashCommand[] = [
           );
           return "ok";
         }
+
+        // `--file /abs/path` points at bytes instead of storing them. This is
+        // the only way to record a multi-line secret (a PEM, a service-account
+        // JSON) — a card has no multi-line input — and it is the better option
+        // for any long-lived credential, because the bytes never pass through
+        // Chat, never enter the store, and a rotation is picked up on next use.
+        const fileFlag = rest.findIndex((arg) => arg === "--file" || arg === "--path");
+        if (fileFlag !== -1) {
+          const filePath = rest[fileFlag + 1] ?? "";
+          const scope = await host.bindingFor(chatKey);
+          try {
+            secrets.setFile(name, filePath, display, scope ? [String(scope.conversationId)] : undefined);
+            await client.sendMessage(
+              spaceName,
+              `Stored **${escapeHtml(name)}** as a path: \`${escapeHtml(filePath)}\`. ` +
+                "Its contents are read at use time, never copied into the bridge.",
+              threadName,
+            );
+            logger.info(`[chat] ${display}: secret ${name} stored as a path`);
+          } catch (error) {
+            // No value in the message: the failure is about the path, not the bytes.
+            await client.sendMessage(
+              spaceName,
+              `Could not store **${escapeHtml(name)}**: ${escapeHtml((error as Error).message)}`,
+              threadName,
+            );
+            logger.info(`[chat] ${display}: secret ${name} path rejected: ${(error as Error).message}`);
+          }
+          return "ok";
+        }
+
         await client.createCardMessage(
           spaceName,
           secretValueCard(name, { replacing: secrets.has(name) }),
