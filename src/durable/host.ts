@@ -36,6 +36,7 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { logger } from "../logger.js";
 import { BindingsDoc, type BindingsValue, type ConversationBinding } from "./bindings-doc.js";
 import { ChatFormat } from "./extensions/chat-format.js";
+import { SecretRedactor } from "./extensions/secret-redactor.js";
 import { harnessSettings } from "./settings.js";
 import { acquireBridgeLock, type BridgeLock } from "./lock.js";
 
@@ -99,6 +100,12 @@ export class BridgeHost {
     // `configure({ tools })` here, which is what the old extension enforced.
     registry.install(CodingTools);
     registry.install(ChatFormat);
+    // Installed last, deliberately: hooks compose, and redaction should see the
+    // final tool output and the final request. It reads its values from the
+    // environment (PI_SECRETS_NAMES / PI_SECRETS_VALUES_JSON) at construction,
+    // so a secret captured after startup needs a `/reload` — documented in
+    // extensions/secret-redactor.ts rather than guessed at here.
+    registry.install(SecretRedactor);
 
     const harness = await Harness.open(
       await openNodeSqliteStorage(options.dbPath),
