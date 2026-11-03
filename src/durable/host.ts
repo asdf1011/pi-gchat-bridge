@@ -26,7 +26,7 @@ import {
   type ModelRef,
   type Settings,
 } from "@earendil-works/pi-durable";
-import { CodingTools } from "@earendil-works/pi-durable/tools";
+
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -36,7 +36,9 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { logger } from "../logger.js";
 import { BindingsDoc, type BindingsValue, type ConversationBinding } from "./bindings-doc.js";
 import { ChatFormat } from "./extensions/chat-format.js";
+import { createCodingToolsWithDelivery } from "./extensions/coding-tools.js";
 import { createSecretRedactor, secretsFromEnvironment } from "./extensions/secret-redactor.js";
+import type { RegisteredSecret } from "./extensions/redact.js";
 import type { SecretStore } from "../secret-store.js";
 import { harnessSettings } from "./settings.js";
 import { acquireBridgeLock, type BridgeLock } from "./lock.js";
@@ -104,7 +106,15 @@ export class BridgeHost {
     // The coding toolset the old bridge gave its sessions, plus the bridge's own
     // output rules. Tool policy is not ported: per-conversation tools are
     // `configure({ tools })` here, which is what the old extension enforced.
-    registry.install(CodingTools);
+    // The tool set is rebuilt rather than installed from `CodingTools`, so `bash`
+    // can carry the secret-delivery `prepare` hook. It is otherwise identical.
+    registry.install(
+      createCodingToolsWithDelivery({
+        // Resolved per command, so a secret captured a moment ago is usable now.
+        // Scoping is applied inside, against the call's own conversation id.
+        secrets: () => options.secrets?.registrySecrets() ?? [],
+      }),
+    );
     registry.install(ChatFormat);
     // Installed last, deliberately: hooks compose, and redaction should see the
     // final tool output and the final request.
@@ -115,14 +125,18 @@ export class BridgeHost {
     // the entry point a human used deliberately, and it is the one the card
     // showed a confirmation for.
     //
-    // Built once here, so a secret captured after startup needs a restart. That
-    // is a deliberate trade: rebuilding per request would re-read a file on
-    // every turn, and pi-durable's `beforeRequest` runs on every retry too.
-    const stored = options.secrets?.registrySecrets() ?? [];
-    const fromEnv = secretsFromEnvironment();
-    const storedNames = new Set(stored.map((secret) => secret.name));
-    const registrySecrets = [...stored, ...fromEnv.filter((secret) => !storedNames.has(secret.name))];
-    registry.install(createSecretRedactor({ secrets: registrySecrets }));
+    // Resolved per call rather than once, because `/secret set` must take effect
+    // in a running bridge. A snapshot taken at startup meant a captured secret
+    // was stored but neither redacted nor usable until a restart — which reads
+    // as "the card did nothing". The cost is one small JSON read per request and
+    // per command.
+    const resolveSecrets = (): RegisteredSecret[] => {
+      const stored = options.secrets?.registrySecrets() ?? [];
+      const storedNames = new Set(stored.map((secret) => secret.name));
+      // Environment values are additive and lower priority: a stored name wins.
+      return [...stored, ...secretsFromEnvironment().filter((secret) => !storedNames.has(secret.name))];
+    };
+    registry.install(createSecretRedactor({ secrets: resolveSecrets }));
 
     const harness = await Harness.open(
       await openNodeSqliteStorage(options.dbPath),

@@ -187,24 +187,63 @@ export async function protectMessages(
 
 export interface SecretRedactorOptions {
   /**
-   * The literals to scrub. Preferred over `registry`: the host builds this list
-   * from the secret store plus the environment, so it can apply its own
-   * precedence (store wins on a name collision) before the registry is built.
+   * The literals to scrub, resolved per call.
+   *
+   * A function, not an array: a secret captured through `/secret` in a running
+   * bridge must be redacted on the very next request. Snapshotting at
+   * construction meant the card appeared to do nothing until a restart.
+   *
+   * The registry is rebuilt only when the resolved list actually differs, so a
+   * conversation with no changes pays one small read and no re-sorting.
    */
-  secrets?: readonly RegisteredSecret[];
-  /** Override the registry directly (tests). Wins over `secrets` when both are given. */
+  secrets?: () => readonly RegisteredSecret[];
+  /** A fixed list, for tests and simple hosts. Wrapped into a resolver. */
+  fixedSecrets?: readonly RegisteredSecret[];
+  /** Override the registry directly (tests). Wins over both of the above. */
   registry?: SecretRegistry;
   /** Disable the optional prctj.app guard even when installed. */
   useOutboundGuard?: boolean;
 }
 
+/**
+ * Rebuilds a `SecretRegistry` when its inputs change.
+ *
+ * Keyed on a cheap fingerprint (names plus value lengths) rather than deep
+ * equality: a value change that preserves length is exotic, and the failure
+ * mode of a missed rebuild is one stale request, whereas comparing every value
+ * on every request is a cost paid always.
+ */
+class RegistryCache {
+  private current: SecretRegistry | undefined;
+  private fingerprint = "";
+
+  constructor(private readonly resolve: () => readonly RegisteredSecret[]) {}
+
+  get(): SecretRegistry {
+    const secrets = this.resolve();
+    const fingerprint = secrets.map((s) => `${s.name}:${s.value.length}`).join("\u0000");
+    if (!this.current || fingerprint !== this.fingerprint) {
+      this.current = new SecretRegistry(secrets);
+      this.fingerprint = fingerprint;
+    }
+    return this.current;
+  }
+}
+
 export function createSecretRedactor(options: SecretRedactorOptions = {}) {
-  const registry = options.registry ?? new SecretRegistry(options.secrets ?? secretsFromEnvironment());
+  const resolve: () => readonly RegisteredSecret[] =
+    options.secrets ??
+    (() => options.fixedSecrets ?? secretsFromEnvironment());
+  const cache = options.registry ? undefined : new RegistryCache(resolve);
+  const fixed = options.registry;
+  /** The registry for this call: fixed, or rebuilt if the inputs changed. */
+  const registryFor = (): SecretRegistry => fixed ?? cache!.get();
   const useGuard = options.useOutboundGuard ?? true;
 
-  if (registry.size > 0) {
+  const initial = registryFor();
+  if (initial.size > 0) {
     // Count only. Names are safe; values never reach a log line.
-    logger.info(`[redactor] ${registry.size} redaction pattern(s) from the environment`);
+    logger.info(`[redactor] ${initial.size} redaction pattern(s) active`);
   }
 
   return defineExtension({
@@ -220,7 +259,7 @@ export function createSecretRedactor(options: SecretRedactorOptions = {}) {
          */
         beforeRequest: async (request) => {
           const guard = useGuard ? await loadOutboundGuard() : null;
-          const messages = await protectMessages(request.messages, registry, guard);
+          const messages = await protectMessages(request.messages, registryFor(), guard);
           // Returning `undefined` would mean "unchanged"; when nothing matched,
           // returning undefined keeps the prompt cache warm.
           return messages === request.messages ? undefined : { messages };
@@ -238,7 +277,7 @@ export function createSecretRedactor(options: SecretRedactorOptions = {}) {
          */
         afterTool: (_call, result): ToolExecutionResult | undefined => {
           if (result.output === undefined) return undefined;
-          const output = redactToolOutput(result.output, registry);
+          const output = redactToolOutput(result.output, registryFor());
           if (output === result.output) return undefined;
           // structuredOutput is program-facing and validated against the tool's
           // declared schema; rewriting its strings would break that contract.

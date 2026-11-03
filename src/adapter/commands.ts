@@ -729,7 +729,10 @@ export async function runDurableCommand(ctx: DurableCommandContext): Promise<Han
         return "ok";
       }
       try {
-        secrets.set(name, value, display, [chatKey]);
+        // Scope to this conversation, not every conversation on the bridge. The
+        // id is what a bash `prepare` hook can see; the chatKey is not.
+        const binding = await host.bindingFor(chatKey);
+        secrets.set(name, value, display, binding ? [String(binding.conversationId)] : undefined);
         await client
           .updateMessageCards(
             incoming.message.name,

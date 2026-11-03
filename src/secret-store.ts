@@ -165,14 +165,24 @@ export class SecretStore {
   }
 
   /**
-   * Values for the redaction registry.
+   * Plaintext for the redaction registry, and for delivery.
    *
-   * This is the only method that returns plaintext, and its one caller is
-   * `host.ts` at startup. Anything that wants a value at use time must ask for
-   * substitution instead; see the note on `StoredSecret`.
+   * A redaction word list and a credential store are different things, so this
+   * returns both: the redactor needs every value (to scrub output), while
+   * delivery needs the value *and* the scope (to decide whether a command in
+   * this conversation may have it). One read, two consumers, and the caller
+   * decides which. Nothing else returns plaintext.
+   *
+   * Read per call by `host.ts`, not cached: a secret captured a minute ago must
+   * be usable without a restart, and re-reading a small JSON is cheaper than
+   * the bug where `/secret set` appeared to do nothing.
    */
   registrySecrets(): RegisteredSecret[] {
-    return Object.entries(this.read().secrets).map(([name, secret]) => ({ name, value: secret.value }));
+    return Object.entries(this.read().secrets).map(([name, secret]) => ({
+      name,
+      value: secret.value,
+      ...(secret.scopes?.length ? { scopes: secret.scopes } : {}),
+    }));
   }
 
   set(name: string, value: string, addedBy: string, scopes?: readonly string[]): void {
