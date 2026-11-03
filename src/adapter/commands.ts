@@ -23,6 +23,8 @@ import {
   modelConfirmCard,
   modelPickerCard,
   pickerCard,
+  secretConfirmCard,
+  secretValueCard,
   settingsCard,
   settingsConfirmCard,
   statusCard,
@@ -33,11 +35,14 @@ import {
   BUSY,
   MODEL_ACTION,
   RESUME_ACTION,
+  SECRET_ACTION,
   SET_DEFAULT_MODEL_ACTION,
+  SET_SECRET_ACTION,
   SETTINGS_ACTION,
   THINKING_KEEP,
   THINKING_LEVELS_ACTION,
 } from "../constants.js";
+import { isValidSecretName, SecretStore, valueProblem } from "../secret-store.js";
 import type { DurableRouter } from "./router.js";
 import { logger } from "../logger.js";
 import type { HandleResult } from "../receiver.js";
@@ -63,6 +68,8 @@ export interface DurableCommandContext {
   router: DurableRouter;
   /** Remembered `/model` card for the background topic titler. */
   state: StateStore;
+  /** Secret store for `/secret`. Built by the host so tests can point it at a temp file. */
+  secrets?: SecretStore;
   incoming: IncomingMessage;
   /** Chat conversation key, from `keyFor()`. */
   chatKey: string;
@@ -325,6 +332,93 @@ const SLASH_COMMANDS: SlashCommand[] = [
     },
   },
   {
+    pattern: /^\/secret\b/,
+    // Interrupt: a value typed mid-run could be echoed by the running turn, and
+    // the whole point of the card is that the value stays out of the model's way.
+    interrupt: true,
+    run: async (ctx) => {
+      const { client, spaceName, threadName, display, text } = ctx;
+      const secrets = ctx.secrets;
+      if (!secrets) {
+        await client.sendMessage(spaceName, "No secret store is configured on this bridge.", threadName);
+        return "ok";
+      }
+
+      // `/secret` — list. `/secret set NAME` — post the value card.
+      // `/secret remove NAME` — delete. Names are shown; values never are.
+      const args = text.trim().replace(/^\/secret\s*/, "").trim();
+      const [verb = "", ...rest] = args.split(/\s+/).filter(Boolean);
+      const name = (rest[0] ?? "").toUpperCase();
+
+      if (verb === "set" || verb === "add") {
+        if (!name) {
+          await client.sendMessage(spaceName, "Usage: **/secret set NAME** — then enter the value on the card.", threadName);
+          return "ok";
+        }
+        if (!isValidSecretName(name)) {
+          await client.sendMessage(
+            spaceName,
+            `<b>${escapeHtml(name)}</b> is not a usable name: letters, digits and _ only, starting with a letter; ` +
+              "PATH/HOME/PI_* are refused.",
+            threadName,
+          );
+          return "ok";
+        }
+        await client.createCardMessage(
+          spaceName,
+          secretValueCard(name, { replacing: secrets.has(name) }),
+          `Enter the value for ${name}.`,
+          threadName,
+        );
+        logger.info(`[chat] ${display}: secret value card posted for ${name}`);
+        return "ok";
+      }
+
+      if (verb === "remove" || verb === "delete" || verb === "rm") {
+        if (!name) {
+          await client.sendMessage(spaceName, "Usage: **/secret remove NAME**.", threadName);
+          return "ok";
+        }
+        const removed = secrets.remove(name);
+        await client.sendMessage(
+          spaceName,
+          removed ? `Removed **${escapeHtml(name)}**.` : `No stored secret called **${escapeHtml(name)}**.`,
+          threadName,
+        );
+        return "ok";
+      }
+
+      if (verb && verb !== "list") {
+        await client.sendMessage(
+          spaceName,
+          "Usage: **/secret** · **/secret set NAME** · **/secret remove NAME**.",
+          threadName,
+        );
+        return "ok";
+      }
+
+      const list = secrets.list();
+      const lines = list.length
+        ? list.map(
+            (s) =>
+              `<code>${escapeHtml(s.name)}</code> — ${escapeHtml(s.tail)} · added ${new Date(s.addedAt).toISOString().slice(0, 10)} by ${escapeHtml(s.addedBy)}`,
+          )
+        : ["No secrets stored yet."];
+      await client.sendMessage(
+        spaceName,
+        [
+          "<b>Stored secrets</b> (values are never shown):",
+          ...lines,
+          "",
+          "Add one with **/secret set NAME**; it is used as <code>$NAME</code> in shell commands and redacted everywhere else.",
+        ].join("\n"),
+        threadName,
+      );
+      logger.info(`[chat] ${display}: listed ${list.length} secret(s)`);
+      return "ok";
+    },
+  },
+  {
     pattern: /^\/help\b/,
     interrupt: true,
     run: async ({ client, spaceName, threadName, display }) => {
@@ -500,6 +594,88 @@ export async function runDurableCommand(ctx: DurableCommandContext): Promise<Han
         )
         .catch((err) => logger.error("[chat] card update failed:", (err as Error).message));
       logger.info(`[chat] ${display}: resume -> ${bound ? conversationId : "failed"}`);
+      return "ok";
+    }
+
+    if (incoming.action?.actionMethodName === SECRET_ACTION) {
+      // The panel's "add" button: ask for a name, then post the value card.
+      const name = (actionParam(incoming, "name") ?? "").trim().toUpperCase();
+      if (!name) {
+        await client
+          .updateMessageCards(incoming.message.name, errorCard("No name given."), "No name given.")
+          .catch((err) => logger.error("[chat] card update failed:", (err as Error).message));
+        return "ok";
+      }
+      if (!isValidSecretName(name)) {
+        await client
+          .updateMessageCards(
+            incoming.message.name,
+            errorCard(`${name} is not a usable name (A-Z, 0-9 and _; not PATH/HOME/PI_*).`),
+            "Invalid secret name.",
+          )
+          .catch((err) => logger.error("[chat] card update failed:", (err as Error).message));
+        return "ok";
+      }
+      await client
+        .updateMessageCards(
+          incoming.message.name,
+          secretValueCard(name, { replacing: ctx.secrets?.has(name) }),
+          `Enter the value for ${name}.`,
+        )
+        .catch((err) => logger.error("[chat] card update failed:", (err as Error).message));
+      logger.info(`[chat] ${display}: secret prompt posted for ${name}`);
+      return "ok";
+    }
+
+    if (incoming.action?.actionMethodName === SET_SECRET_ACTION) {
+      const name = (actionParam(incoming, "name") ?? "").trim().toUpperCase();
+      const value = formValue(incoming, "secret_value") ?? "";
+      const secrets = ctx.secrets;
+      // The value must not survive into a log line, a notice, or a card body.
+      // Everything logged below is the name and a size — never the value.
+      if (!secrets) {
+        await client
+          .updateMessageCards(incoming.message.name, errorCard("No secret store configured."), "No secret store.")
+          .catch((err) => logger.error("[chat] card update failed:", (err as Error).message));
+        return "ok";
+      }
+      const problem = !name
+        ? "no name on the card"
+        : !isValidSecretName(name)
+          ? `${name} is not a usable name`
+          : valueProblem(value);
+      if (problem) {
+        await client
+          .updateMessageCards(
+            incoming.message.name,
+            secretConfirmCard({ ok: false, name: name || "(unnamed)", action: "failed", detail: problem }),
+            "Secret not saved.",
+          )
+          .catch((err) => logger.error("[chat] card update failed:", (err as Error).message));
+        logger.info(`[chat] ${display}: secret ${name || "(unnamed)"} rejected: ${problem}`);
+        return "ok";
+      }
+      try {
+        secrets.set(name, value, display, [chatKey]);
+        await client
+          .updateMessageCards(
+            incoming.message.name,
+            secretConfirmCard({ ok: true, name, action: "stored" }),
+            `Stored ${name}.`,
+          )
+          .catch((err) => logger.error("[chat] card update failed:", (err as Error).message));
+        logger.info(`[chat] ${display}: secret ${name} stored (${value.length} chars)`);
+      } catch (error) {
+        const detail = (error as Error).message;
+        await client
+          .updateMessageCards(
+            incoming.message.name,
+            secretConfirmCard({ ok: false, name, action: "failed", detail }),
+            "Secret not saved.",
+          )
+          .catch((err) => logger.error("[chat] card update failed:", (err as Error).message));
+        logger.error(`[chat] ${display}: secret ${name} failed: ${detail}`);
+      }
       return "ok";
     }
 

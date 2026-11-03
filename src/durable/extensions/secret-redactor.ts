@@ -186,14 +186,20 @@ export async function protectMessages(
 }
 
 export interface SecretRedactorOptions {
-  /** Override the registry (tests, or a future `/secret` store). Default: the environment. */
+  /**
+   * The literals to scrub. Preferred over `registry`: the host builds this list
+   * from the secret store plus the environment, so it can apply its own
+   * precedence (store wins on a name collision) before the registry is built.
+   */
+  secrets?: readonly RegisteredSecret[];
+  /** Override the registry directly (tests). Wins over `secrets` when both are given. */
   registry?: SecretRegistry;
   /** Disable the optional prctj.app guard even when installed. */
   useOutboundGuard?: boolean;
 }
 
 export function createSecretRedactor(options: SecretRedactorOptions = {}) {
-  const registry = options.registry ?? new SecretRegistry(secretsFromEnvironment());
+  const registry = options.registry ?? new SecretRegistry(options.secrets ?? secretsFromEnvironment());
   const useGuard = options.useOutboundGuard ?? true;
 
   if (registry.size > 0) {
@@ -243,11 +249,3 @@ export function createSecretRedactor(options: SecretRedactorOptions = {}) {
     ],
   });
 }
-
-/**
- * The extension with default options — what `host.ts` installs.
- *
- * Built lazily: `createSecretRedactor()` reads the environment and logs, and the
- * host creates its registry during startup, not at module load.
- */
-export const SecretRedactor = createSecretRedactor();

@@ -37,6 +37,7 @@ import { applyDurableTopicSummary } from "./topic.js";
 import { identify } from "./identity.js";
 import { failureNotice } from "./failure-notice.js";
 import { AgentRouter } from "../agent-sessions.js";
+import { SecretStore } from "../secret-store.js";
 
 /**
  * Exit code for "another process owns the bridge database".
@@ -53,7 +54,13 @@ async function main(): Promise<void> {
   const dbPath = process.env.BRIDGE_DB ?? new URL("../../bridge.sqlite", import.meta.url).pathname;
   logger.info(`[bridge] engine=durable cwd=${config.cwd} db=${dbPath}`);
 
-  const host = await BridgeHost.open({ dbPath, cwd: config.cwd }).catch((error: unknown) => {
+  // One store per process, next to the database rather than in PI_CWD: the
+  // agent's tools run in PI_CWD, and a secrets file there is one `cat` away
+  // from a tool result. The host reads it at startup to seed the redaction
+  // registry; the /secret command writes it.
+  const secrets = new SecretStore(SecretStore.defaultPath(dbPath));
+
+  const host = await BridgeHost.open({ dbPath, cwd: config.cwd, secrets }).catch((error: unknown) => {
     if (error instanceof BridgeLockedError) {
       // Not a crash: the owner is serving Chat right now. Exiting non-zero-and-
       // distinct lets the supervisor stop retrying instead of looping forever.
@@ -290,6 +297,7 @@ async function main(): Promise<void> {
       host,
       router,
       state,
+      secrets,
       incoming,
       chatKey,
       actionKey,

@@ -9,7 +9,16 @@ import type {
   SessionUsage,
 } from "./agent-sessions.js";
 import { clampToSupported } from "./agent-sessions.js";
-import { MODEL_ACTION, RESUME_ACTION, SETTINGS_ACTION, THINKING_KEEP, THINKING_LEVELS, THINKING_LEVELS_ACTION } from "./constants.js";
+import {
+  MODEL_ACTION,
+  RESUME_ACTION,
+  SECRET_ACTION,
+  SETTINGS_ACTION,
+  SET_SECRET_ACTION,
+  THINKING_KEEP,
+  THINKING_LEVELS,
+  THINKING_LEVELS_ACTION,
+} from "./constants.js";
 
 /** Escape text for use inside Chat card/message HTML (e.g. user-supplied names). */
 export function escapeHtml(text: string): string {
@@ -473,6 +482,7 @@ export function helpCard(): unknown[] {
     ["<b>/list</b>", "Same as /resume"],
     ["<b>/name</b>", "Show or set this conversation's session name"],
     ["<b>/session</b>", "Show this conversation's session stats (tokens, cost)"],
+    ["<b>/secret</b>", "List stored secrets; <b>/secret set NAME</b> to add one (value entered on a card, never in chat)"],
     ["<b>/help</b>", "This card"],
     ["<b>anything else</b>", "Chats with pi (tools, skills, images)"],
   ];
@@ -489,6 +499,104 @@ export function helpCard(): unknown[] {
                   text: items.map(([cmd, desc]) => `${cmd} — ${desc}`).join("<br>"),
                 },
               },
+            ],
+          },
+        ],
+      },
+    },
+  ];
+}
+
+/**
+ * The `/secret set` card: name (already decided) plus a masked-looking value.
+ *
+ * Chat has no password widget, so the value is visible while it is typed. That
+ * is a real limitation, and it is why the card's text says so: the point of the
+ * card is that the value never becomes a *message* — not that it is unseeable
+ * on a screen the operator is already looking at.
+ *
+ * `onlyVisibleTo` is not available on widget-level inputs in the Chat API, so
+ * the card is posted into the same thread and the value travels back through
+ * the Pub/Sub event as form input rather than as message text. That is the
+ * boundary this design can actually deliver.
+ */
+export function secretValueCard(name: string, opts?: { replacing?: boolean; hint?: string }): unknown[] {
+  const title = opts?.replacing ? "Replace secret" : "Store secret";
+  return [
+    {
+      cardId: "secret-value",
+      card: {
+        header: { title, subtitle: name },
+        sections: [
+          {
+            widgets: [
+              {
+                textParagraph: {
+                  text:
+                    `Value for <b>${escapeHtml(name)}</b>${opts?.hint ? ` — ${escapeHtml(opts.hint)}` : ""}.<br>` +
+                    "It is stored on the bridge and never enters the conversation. " +
+                    "Visible while you type: Google Chat has no password field.",
+                },
+              },
+              {
+                textInput: {
+                  name: "secret_value",
+                  label: "Value",
+                  type: "SINGLE_LINE",
+                },
+              },
+              {
+                buttonList: {
+                  buttons: [
+                    {
+                      text: opts?.replacing ? "Replace" : "Store",
+                      onClick: {
+                        action: {
+                          function: SET_SECRET_ACTION,
+                          parameters: [{ key: "name", value: name }],
+                        },
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      },
+    },
+  ];
+}
+
+/** Confirmation after storing, replacing, or removing a secret. */
+export function secretConfirmCard(opts: {
+  ok: boolean;
+  name: string;
+  action: "stored" | "removed" | "failed";
+  detail?: string;
+}): unknown[] {
+  const title = opts.ok ? "Secret saved" : "Secret not saved";
+  const body = opts.ok
+    ? `${opts.action === "removed" ? "Removed" : "Stored"} <b>${escapeHtml(opts.name)}</b>.`
+    : `Could not ${opts.action === "removed" ? "remove" : "store"} <b>${escapeHtml(opts.name)}</b>: ${escapeHtml(opts.detail ?? "unknown error")}`;
+  return [
+    {
+      cardId: "secret-confirm",
+      card: {
+        header: { title },
+        sections: [
+          {
+            widgets: [
+              { textParagraph: { text: body } },
+              ...(opts.ok
+                ? [
+                    {
+                      textParagraph: {
+                        text: "<i>New values take effect after the bridge restarts, or on /reload where supported.</i>",
+                      },
+                    },
+                  ]
+                : []),
             ],
           },
         ],

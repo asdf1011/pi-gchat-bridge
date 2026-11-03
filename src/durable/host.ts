@@ -36,7 +36,8 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { logger } from "../logger.js";
 import { BindingsDoc, type BindingsValue, type ConversationBinding } from "./bindings-doc.js";
 import { ChatFormat } from "./extensions/chat-format.js";
-import { SecretRedactor } from "./extensions/secret-redactor.js";
+import { createSecretRedactor, secretsFromEnvironment } from "./extensions/secret-redactor.js";
+import type { SecretStore } from "../secret-store.js";
 import { harnessSettings } from "./settings.js";
 import { acquireBridgeLock, type BridgeLock } from "./lock.js";
 
@@ -49,6 +50,11 @@ export interface BridgeHostOptions {
   modelRuntime?: ModelRuntime;
   settings?: Settings;
   context?: Context;
+  /**
+   * Secrets entered through `/secret`. Read once at startup to seed the
+   * redaction registry; absent means "environment only".
+   */
+  secrets?: SecretStore;
 }
 
 /** A created conversation plus the binding that records it. */
@@ -101,11 +107,22 @@ export class BridgeHost {
     registry.install(CodingTools);
     registry.install(ChatFormat);
     // Installed last, deliberately: hooks compose, and redaction should see the
-    // final tool output and the final request. It reads its values from the
-    // environment (PI_SECRETS_NAMES / PI_SECRETS_VALUES_JSON) at construction,
-    // so a secret captured after startup needs a `/reload` — documented in
-    // extensions/secret-redactor.ts rather than guessed at here.
-    registry.install(SecretRedactor);
+    // final tool output and the final request.
+    //
+    // Values come from two places. The store holds what `/secret` captured; the
+    // environment holds what an operator exported (and what a child pi process
+    // inherited via PI_SECRETS_NAMES). The store wins on a name collision: it is
+    // the entry point a human used deliberately, and it is the one the card
+    // showed a confirmation for.
+    //
+    // Built once here, so a secret captured after startup needs a restart. That
+    // is a deliberate trade: rebuilding per request would re-read a file on
+    // every turn, and pi-durable's `beforeRequest` runs on every retry too.
+    const stored = options.secrets?.registrySecrets() ?? [];
+    const fromEnv = secretsFromEnvironment();
+    const storedNames = new Set(stored.map((secret) => secret.name));
+    const registrySecrets = [...stored, ...fromEnv.filter((secret) => !storedNames.has(secret.name))];
+    registry.install(createSecretRedactor({ secrets: registrySecrets }));
 
     const harness = await Harness.open(
       await openNodeSqliteStorage(options.dbPath),

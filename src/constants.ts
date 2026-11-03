@@ -38,3 +38,9 @@ export const SESSION_ABORT_TIMEOUT_MS = 15_000;
 
 /** `SwitchModelResult.error` value meaning the conversation is busy (redeliver later). */
 export const BUSY = "busy";
+
+/** Card action: `/secret` panel's "add" button — asks for a name first. */
+export const SECRET_ACTION = "secret_prompt";
+
+/** Card action: store the value submitted by a `secretValueCard`. */
+export const SET_SECRET_ACTION = "secret_set";
