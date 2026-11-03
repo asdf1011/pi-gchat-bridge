@@ -176,37 +176,33 @@ if [ "$ENGINE" = "durable" ]; then
     log "ERROR: PUBSUB_SUBSCRIPTION is not set — the durable engine would pull nothing"
     exit 1
   fi
-  # Where the tunnel token comes from, in priority order:
+  # The tunnel token comes from the secret store and nowhere else:
   #
-  #   1. `/secret set TUNNEL_TOKEN` — read through the bridge's own store, so the
-  #      value never sits in a file the shell sources and never appears in
-  #      `.env.durable`.
-  #   2. `TUNNEL_TOKEN` in `.env.durable` — kept for a fresh deployment where the
-  #      bridge has not run yet and there is no store to read.
+  #     /secret set TUNNEL_TOKEN            (value on a card)
+  #     /secret set TUNNEL_TOKEN --file /etc/cloudflared/token
   #
-  # Either way it must not stay in the environment: `set -a` above exported
-  # everything from `.env.durable`, and the bridge (plus every `bash` tool call it
-  # runs) inherits that. It is a supervisor credential, not an agent one.
-  TUNNEL_TOKEN_SAVED="${TUNNEL_TOKEN:-}"
-  unset TUNNEL_TOKEN
-  if [ -z "${TUNNEL_TOKEN_SAVED:-}" ]; then
-    # `node` because the store's format is the store's business: this asks
-    # SecretStore rather than re-parsing secrets.json in bash, so migration and
-    # file-backed secrets behave identically here and in the bridge.
-    getter="$PROJECT_DIR/dist/scripts/secret-get.js"
-    if [ -f "$getter" ] && command -v node >/dev/null 2>&1; then
-      if TUNNEL_TOKEN_SAVED="$(BRIDGE_DB="${BRIDGE_DB:-$PROJECT_DIR/bridge.sqlite}" \
-          node "$getter" TUNNEL_TOKEN 2>/dev/null)"; then
-        if [ -n "$TUNNEL_TOKEN_SAVED" ]; then
-          log "cloudflared: TUNNEL_TOKEN read from the secret store"
-        fi
-      else
-        TUNNEL_TOKEN_SAVED=""
-      fi
-    fi
+  # No environment fallback on purpose. A token in `.env.durable` would be
+  # exported by the `set -a` above into the bridge and inherited by every `bash`
+  # tool call the agent runs — the exact exposure the store exists to avoid. If
+  # the secret is absent the tunnel simply does not start, which is a supported
+  # state: the bridge is reachable other ways.
+  #
+  # Read through `secret-get`, which uses SecretStore, rather than re-parsing
+  # secrets.json here: one format, one implementation, so migration and
+  # file-backed secrets behave identically in the supervisor and the bridge.
+  TUNNEL_TOKEN_SAVED=""
+  getter="$PROJECT_DIR/dist/scripts/secret-get.js"
+  if [ -f "$getter" ] && command -v node >/dev/null 2>&1; then
+    TUNNEL_TOKEN_SAVED="$(BRIDGE_DB="${BRIDGE_DB:-$PROJECT_DIR/bridge.sqlite}" \
+      node "$getter" TUNNEL_TOKEN 2>/dev/null)" || TUNNEL_TOKEN_SAVED=""
   else
-    log "cloudflared: TUNNEL_TOKEN present in .env.durable (removed from the bridge environment)"
+    log "cloudflared: $getter missing (run 'npm run build') — cannot read TUNNEL_TOKEN"
   fi
+  if [ -n "$TUNNEL_TOKEN_SAVED" ]; then
+    log "cloudflared: TUNNEL_TOKEN found in the secret store"
+  fi
+  # Absence is reported by start_tunnel(), which is also what decides not to
+  # start. Logging it here too made every start say it twice.
   log "engine=durable db=${BRIDGE_DB:-$PROJECT_DIR/bridge.sqlite} subscription=$PUBSUB_SUBSCRIPTION spaces=${ALLOWED_SPACES:-(all)}"
 else
   log "engine=sdk subscription=${PUBSUB_SUBSCRIPTION:-(unset)}"
@@ -238,30 +234,22 @@ start_tunnel() {
   if [ "${BRIDGE_BIND:-127.0.0.1}" != "127.0.0.1" ]; then
     log "cloudflared: WARNING BRIDGE_BIND=${BRIDGE_BIND} — the bridge is reachable WITHOUT the tunnel and its Access policy"
   fi
-  # Token auth. `--config` is passed even though the token supplies credentials:
-  # without it cloudflared pulls ingress from the Cloudflare dashboard, which has
-  # no `disableChunkedEncoding` — and without that the edge buffers the /web
-  # event stream, so the page stays blank while the model replies.
-  if [ -n "${TUNNEL_TOKEN_SAVED:-}" ]; then
-    log "cloudflared: starting tunnel with TUNNEL_TOKEN + local ingress ($CF_CONFIG)"
-    TUNNEL_TOKEN="$TUNNEL_TOKEN_SAVED" \
-      "$CF_BIN" tunnel --config "$CF_CONFIG" run --token "$TUNNEL_TOKEN_SAVED" \
-      >> "$PROJECT_DIR/cloudflared.log" 2>&1 &
-    TUNNEL_PID=$!
+  # No token means no tunnel. That is a supported state, not a failure: the
+  # bridge is reachable through Google Chat regardless, so a missing secret must
+  # not stop the process or flood the log with respawns.
+  if [ -z "${TUNNEL_TOKEN_SAVED:-}" ]; then
+    log "cloudflared: no TUNNEL_TOKEN secret — tunnel not started (set it with /secret in Chat)"
     return 0
   fi
 
-  # Without credentials cloudflared exits in about a second, so starting it
-  # would mean a respawn every 5s — the log-flooding pattern that buried a real
-  # model failure earlier. Require the credential file to exist first.
-  local creds
-  creds="$(sed -n 's/^credentials-file:[[:space:]]*//p' "$CF_CONFIG" | head -1)"
-  if [ -n "$creds" ] && [ ! -f "$creds" ]; then
-    log "cloudflared: no TUNNEL_TOKEN and credentials-file $creds missing — tunnel not started"
-    return 0
-  fi
-  log "cloudflared: starting tunnel ($CF_CONFIG)"
-  "$CF_BIN" tunnel --config "$CF_CONFIG" run >> "$PROJECT_DIR/cloudflared.log" 2>&1 &
+  # `--config` is passed even though the token supplies credentials: without it
+  # cloudflared pulls ingress from the Cloudflare dashboard, which has no
+  # `disableChunkedEncoding` — and without that the edge buffers the /web event
+  # stream, so the page stays blank while the model replies.
+  log "cloudflared: starting tunnel with TUNNEL_TOKEN + local ingress ($CF_CONFIG)"
+  TUNNEL_TOKEN="$TUNNEL_TOKEN_SAVED" \
+    "$CF_BIN" tunnel --config "$CF_CONFIG" run --token "$TUNNEL_TOKEN_SAVED" \
+    >> "$PROJECT_DIR/cloudflared.log" 2>&1 &
   TUNNEL_PID=$!
 }
 
