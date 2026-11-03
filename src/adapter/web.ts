@@ -218,6 +218,14 @@ function rel(path) {
   return here + path;
 }
 
+// State for the single open conversation. Declared here because the functions
+// below assign them: without these the first click threw
+// "ReferenceError: source is not defined" and the pane stayed blank.
+let current;
+let source;
+const log = document.getElementById('log');
+const tool = document.getElementById('tool');
+
 function open(id) {
   if (source) source.close();
   current = id;
