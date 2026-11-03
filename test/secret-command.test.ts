@@ -24,7 +24,7 @@ import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { BridgeHost } from "../src/durable/host.js";
 import { DurableRouter } from "../src/adapter/router.js";
 import { runDurableCommand } from "../src/adapter/commands.js";
-import { SECRET_ACTION, SET_SECRET_ACTION } from "../src/constants.js";
+import { REMOVE_SECRET_ACTION, SECRET_ACTION, SET_SECRET_ACTION } from "../src/constants.js";
 import { SecretStore } from "../src/secret-store.js";
 import type { IncomingMessage } from "../src/types.js";
 
@@ -63,6 +63,8 @@ async function setup() {
     context: BACKGROUND_CONTEXT,
     modelRuntime: modelRuntime(),
     cwd: "/tmp",
+    // `/engine` reports the store path; the real host always has one.
+    dbPath: path.join(os.tmpdir(), "bridge.sqlite"),
   });
 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-bridge-secret-cmd-"));
@@ -202,21 +204,29 @@ test("without a store the command reports it rather than pretending", async () =
 
 // --- Listing and removing ----------------------------------------------------
 
-test("/secret lists names and a tail, never a value", async () => {
+test("/secret posts a card listing names and a tail, never a value", async () => {
   const ctx = await setup();
   await run(ctx, valueSubmission("STRIPE_KEY", KEY));
 
   await run(ctx, secretMessage("/secret"));
-  const listing = ctx.sent.join("\n");
-  assert.match(listing, /STRIPE_KEY/);
-  assert.match(listing, /••••/);
-  assert.equal(listing.includes(KEY), false);
+  // A card, not a text reply: a text listing looks like any other answer the
+  // bot posts and gives no evidence that /secret is bridge-handled.
+  const card = JSON.stringify(ctx.cards.at(-1));
+  assert.match(card, /secret-panel/);
+  assert.match(card, /STRIPE_KEY/);
+  assert.match(card, /••••/);
+  assert.equal(card.includes(KEY), false, "the value must not reach the panel");
 });
 
-test("/secret with nothing stored says so", async () => {
+test("/secret with nothing stored still posts the panel", async () => {
   const ctx = await setup();
   await run(ctx, secretMessage("/secret"));
-  assert.match(ctx.sent.join("\n"), /No secrets stored yet/);
+  // The empty state must be a card too: the panel is how a value gets entered,
+  // so hiding it when empty would leave no discoverable way in.
+  const card = JSON.stringify(ctx.cards.at(-1));
+  assert.match(card, /secret-panel/);
+  assert.match(card, /No secrets stored yet/);
+  assert.match(card, /secret_name/);
 });
 
 test("/secret set posts a value card", async () => {
@@ -280,4 +290,120 @@ test("the add-card action rejects a reserved name", async () => {
   };
   await run(ctx, incoming);
   assert.match(JSON.stringify(ctx.cards.at(-1)), /not a usable name/);
+});
+
+// --- Message formatting ------------------------------------------------------
+
+/**
+ * `sendMessage` sends `markupSyntax: MARKDOWN`, so HTML tags are rendered
+ * literally. A `/secret` listing shipped with `<b>` and `<code>` in it and
+ * arrived as the text "<b>Stored secrets</b>" in Chat — verified in a
+ * screenshot before this test existed.
+ *
+ * Every other text command had the same bug, so the check covers the whole
+ * command layer rather than just `/secret`.
+ */
+test("no text reply uses HTML tags, which Markdown mode renders literally", async () => {
+  const ctx = await setup();
+  await run(ctx, valueSubmission("STRIPE_KEY", KEY));
+  await run(ctx, secretMessage("/secret"));
+  await run(ctx, secretMessage("/secret set 9BAD"));
+  await run(ctx, secretMessage("/session"));
+  await run(ctx, secretMessage("/engine"));
+
+  assert.ok(ctx.sent.length > 0, "expected some text replies");
+  for (const text of ctx.sent) {
+    assert.equal(
+      /<\/?(b|i|code|br|u|s)\b/i.test(text),
+      false,
+      `HTML tag in a Markdown message: ${text.slice(0, 120)}`,
+    );
+  }
+});
+
+test("the panel explains that values bypass the model", async () => {
+  const ctx = await setup();
+  await run(ctx, secretMessage("/secret"));
+  const card = JSON.stringify(ctx.cards.at(-1));
+  // The operator-facing promise, stated where a key is about to be typed.
+  assert.match(card, /never/);
+  assert.match(card, /model/);
+});
+
+// --- The panel's own controls ------------------------------------------------
+
+/** The panel's "Enter value on a card" button, name typed into the text input. */
+function panelAdd(typedName: string): IncomingMessage {
+  return {
+    eventType: "CARD_CLICKED",
+    space: { name: SPACE },
+    message: { name: `${SPACE}/messages/card`, threadName: THREAD },
+    action: {
+      actionMethodName: SECRET_ACTION,
+      formInputs: { secret_name: { stringInputs: { value: [typedName] } } },
+    },
+  };
+}
+
+function removeClick(picked?: string): IncomingMessage {
+  return {
+    eventType: "CARD_CLICKED",
+    space: { name: SPACE },
+    message: { name: `${SPACE}/messages/card`, threadName: THREAD },
+    action: {
+      actionMethodName: REMOVE_SECRET_ACTION,
+      ...(picked ? { formInputs: { secret_remove_picker: { selectionInput: { selectedValues: [picked] } } } } : {}),
+    },
+  };
+}
+
+test("a name typed into the panel opens the value card", async () => {
+  const ctx = await setup();
+  await run(ctx, panelAdd("my_token"));
+  const card = JSON.stringify(ctx.cards.at(-1));
+  assert.match(card, /MY_TOKEN/);
+  assert.match(card, /secret_value/);
+});
+
+test("the panel refuses a reserved name typed into it", async () => {
+  const ctx = await setup();
+  await run(ctx, panelAdd("PATH"));
+  assert.match(JSON.stringify(ctx.cards.at(-1)), /not a usable name/);
+});
+
+test("the Remove button renders a picker without deleting anything", async () => {
+  const ctx = await setup();
+  await run(ctx, valueSubmission("STRIPE_KEY", KEY));
+  await run(ctx, removeClick());
+  const card = JSON.stringify(ctx.cards.at(-1));
+  assert.match(card, /secret-remove/);
+  assert.match(card, /STRIPE_KEY/);
+  // Nothing removed yet — the button only opens the picker.
+  assert.equal(
+    ctx.secrets.list().some((s) => s.name === "STRIPE_KEY"),
+    true,
+  );
+});
+
+test("Remove with a picked name deletes it", async () => {
+  const ctx = await setup();
+  await run(ctx, valueSubmission("STRIPE_KEY", KEY));
+  await run(ctx, removeClick("STRIPE_KEY"));
+  assert.equal(
+    ctx.secrets.list().some((s) => s.name === "STRIPE_KEY"),
+    false,
+  );
+  assert.match(JSON.stringify(ctx.cards.at(-1)), /Removed/);
+});
+
+test("Remove of an unknown name reports rather than throwing", async () => {
+  const ctx = await setup();
+  await run(ctx, removeClick("NOPE"));
+  assert.match(JSON.stringify(ctx.cards.at(-1)), /no such secret/);
+});
+
+test("Remove with nothing stored says so instead of an empty picker", async () => {
+  const ctx = await setup();
+  await run(ctx, removeClick());
+  assert.match(JSON.stringify(ctx.cards.at(-1)), /No secrets stored/);
 });

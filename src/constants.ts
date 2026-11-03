@@ -44,3 +44,6 @@ export const SECRET_ACTION = "secret_prompt";
 
 /** Card action: store the value submitted by a `secretValueCard`. */
 export const SET_SECRET_ACTION = "secret_set";
+
+/** Card action: remove a stored secret, named by a `parameters` entry. */
+export const REMOVE_SECRET_ACTION = "secret_remove";

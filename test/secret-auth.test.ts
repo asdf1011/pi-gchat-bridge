@@ -146,13 +146,13 @@ function addClick(name: string): IncomingMessage {
 test("an empty SECRET_USERS list places no extra restriction", async () => {
   const ctx = await setup([]);
   await run(ctx, message("/secret"), STRANGER);
-  assert.match(ctx.sent.join("\n"), /EXISTING_KEY/);
+  assert.match(JSON.stringify(ctx.cards.at(-1)), /EXISTING_KEY/);
 });
 
 test("an authorised operator can list", async () => {
   const ctx = await setup([OPERATOR]);
   await run(ctx, message("/secret"), OPERATOR);
-  assert.match(ctx.sent.join("\n"), /EXISTING_KEY/);
+  assert.match(JSON.stringify(ctx.cards.at(-1)), /EXISTING_KEY/);
 });
 
 test("an unauthorised user is refused and learns nothing about the store", async () => {
@@ -191,7 +191,7 @@ test("an unauthorised user cannot remove a secret", async () => {
 test("the gate matches on the trailing id, like every other allow-list", async () => {
   const ctx = await setup(["operator"]);
   await run(ctx, message("/secret"), "users/operator");
-  assert.match(ctx.sent.join("\n"), /EXISTING_KEY/);
+  assert.match(JSON.stringify(ctx.cards.at(-1)), /EXISTING_KEY/);
 });
 
 // --- Card actions ------------------------------------------------------------
@@ -235,5 +235,5 @@ test("the web path is gated too: a Cloudflare email is the whole identity", asyn
   await run(ctx, message("/secret"), "stranger@example.com");
   assert.match(ctx.sent.join("\n"), /not allowed/);
   await run(ctx, message("/secret"), "operator@example.com");
-  assert.match(ctx.sent.join("\n"), /EXISTING_KEY/);
+  assert.match(JSON.stringify(ctx.cards.at(-1)), /EXISTING_KEY/);
 });

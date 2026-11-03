@@ -11,6 +11,7 @@ import type {
 import { clampToSupported } from "./agent-sessions.js";
 import {
   MODEL_ACTION,
+  REMOVE_SECRET_ACTION,
   RESUME_ACTION,
   SECRET_ACTION,
   SETTINGS_ACTION,
@@ -21,8 +22,15 @@ import {
 } from "./constants.js";
 
 /** Escape text for use inside Chat card/message HTML (e.g. user-supplied names). */
-export function escapeHtml(text: string): string {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+/**
+ * Escape text for use inside Chat card/message HTML (e.g. user-supplied names).
+ *
+ * Total on purpose: callers pass optional values (`process.env.X`, a status
+ * field) and an `undefined` must not throw inside a command handler, where the
+ * failure would surface as a missing reply rather than an error.
+ */
+export function escapeHtml(text: string | undefined | null): string {
+  return String(text ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 /**
@@ -597,6 +605,130 @@ export function secretConfirmCard(opts: {
                     },
                   ]
                 : []),
+            ],
+          },
+        ],
+      },
+    },
+  ];
+}
+
+/**
+ * The `/secret` panel: what is stored, and the one control that adds more.
+ *
+ * Deliberately a card rather than a text reply. A text listing looks like every
+ * other answer the bot posts, which is misleading in a specific way: it gives no
+ * signal that `/secret` is handled by the bridge rather than by pi, and no
+ * signal that a value typed here takes a different route from a value typed into
+ * the chat box. The card is evidence that this is a widget, not a prompt.
+ *
+ * The name input is the same `SECRET_ACTION` button the value card ends with, so
+ * `/secret` and `/secret set NAME` converge on one path.
+ */
+export function secretPanelCard(
+  secrets: { name: string; tail: string; addedAt: number; addedBy: string }[],
+): unknown[] {
+  const rows = secrets.map((secret) => ({
+    textParagraph: {
+      text:
+        `<b>${escapeHtml(secret.name)}</b> — <code>${escapeHtml(secret.tail)}</code>` +
+        ` · added ${new Date(secret.addedAt).toISOString().slice(0, 10)} by ${escapeHtml(secret.addedBy)}`,
+    },
+  }));
+
+  const widgets: unknown[] = [
+    {
+      textParagraph: {
+        text:
+          "Values are captured on a card and **never** pass through the model — this panel, `request_secret` " +
+          "and the redaction layer are bridge features, not prompt instructions.",
+      },
+    },
+  ];
+
+  if (secrets.length === 0) {
+    widgets.push({ textParagraph: { text: "No secrets stored yet." } });
+  } else {
+    widgets.push(...rows);
+    widgets.push({
+      textParagraph: {
+        text: "<i>Values are never shown — only the last few characters, and only to you.</i>",
+      },
+    });
+  }
+
+  widgets.push({
+    textInput: {
+      name: "secret_name",
+      label: "Add a secret — name",
+      type: "SINGLE_LINE",
+      hintText: "e.g. BRAVE_API_KEY",
+    },
+  });
+
+  widgets.push({
+    buttonList: {
+      buttons: [
+        {
+          text: "Enter value on a card",
+          onClick: { action: { function: SECRET_ACTION } },
+        },
+        ...(secrets.length > 0
+          ? [
+              {
+                text: "Remove…",
+                onClick: { action: { function: REMOVE_SECRET_ACTION } },
+              },
+            ]
+          : []),
+      ],
+    },
+  });
+
+  return [
+    {
+      cardId: "secret-panel",
+      card: {
+        header: { title: "Secrets", subtitle: `${secrets.length} stored` },
+        sections: [{ widgets }],
+      },
+    },
+  ];
+}
+
+/** Picker for removing a secret, so deletion needs no typed command. */
+export function secretRemoveCard(secrets: { name: string; tail: string }[]): unknown[] {
+  return [
+    {
+      cardId: "secret-remove",
+      card: {
+        header: { title: "Remove a secret" },
+        sections: [
+          {
+            widgets: [
+              {
+                textParagraph: {
+                  text: "Pick the secret to delete. This removes it from the bridge; it cannot be undone.",
+                },
+              },
+              {
+                selectionInput: {
+                  name: "secret_remove_picker",
+                  label: "Secret",
+                  type: "DROPDOWN",
+                  items: secrets.map((s) => ({ text: `${s.name} (${s.tail})`, value: s.name })),
+                },
+              },
+              {
+                buttonList: {
+                  buttons: [
+                    {
+                      text: "Remove",
+                      onClick: { action: { function: REMOVE_SECRET_ACTION } },
+                    },
+                  ],
+                },
+              },
             ],
           },
         ],

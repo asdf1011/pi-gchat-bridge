@@ -24,6 +24,8 @@ import {
   modelPickerCard,
   pickerCard,
   secretConfirmCard,
+  secretPanelCard,
+  secretRemoveCard,
   secretValueCard,
   settingsCard,
   settingsConfirmCard,
@@ -35,6 +37,7 @@ import type { ChatClient } from "../chat-client.js";
 import {
   BUSY,
   MODEL_ACTION,
+  REMOVE_SECRET_ACTION,
   RESUME_ACTION,
   SECRET_ACTION,
   SET_DEFAULT_MODEL_ACTION,
@@ -247,10 +250,10 @@ const SLASH_COMMANDS: SlashCommand[] = [
       const binding = await host.bindingFor(chatKey);
       const status = binding ? await conversationStatus(host, chatKey) : undefined;
       const lines = [
-        "<b>engine=durable</b>",
-        `db: <code>${escapeHtml(host.dbPath)}</code>`,
-        `subscription: <code>${escapeHtml(process.env.PUBSUB_SUBSCRIPTION ?? "(unset)")}</code>`,
-        `spaces: <code>${escapeHtml(process.env.ALLOWED_SPACES || "(all)")}</code>`,
+        "**engine=durable**",
+        `db: \`${escapeHtml(host.dbPath)}\``,
+        `subscription: \`${escapeHtml(process.env.PUBSUB_SUBSCRIPTION ?? "(unset)")}\``,
+        `spaces: \`${escapeHtml(process.env.ALLOWED_SPACES || "(all)")}\``,
         `this thread: ${binding ? `conversation ${status?.conversationId} · ${escapeHtml(status?.model ?? "?")}` : "no conversation yet"}`,
       ];
       await client.sendMessage(spaceName, lines.join("\n"), threadName);
@@ -300,8 +303,8 @@ const SLASH_COMMANDS: SlashCommand[] = [
       }
       const binding = await host.bindingFor(chatKey);
       const lines = [
-        `<b>Conversation ${status.conversationId}</b>${binding?.name ? ` — ${escapeHtml(binding.name)}` : ""}`,
-        `Model: <b>${escapeHtml(status.model ?? "?")}</b>${status.thinkingLevel ? ` · thinking ${escapeHtml(status.thinkingLevel)}` : ""}`,
+        `**Conversation ${status.conversationId}**${binding?.name ? ` — ${escapeHtml(binding.name)}` : ""}`,
+        `Model: **${escapeHtml(status.model ?? "?")}**${status.thinkingLevel ? ` · thinking ${escapeHtml(status.thinkingLevel)}` : ""}`,
         `Entries: ${status.entries ?? 0}`,
         status.usage
           ? `Tokens: ${status.usage.total.toLocaleString()} (${status.usage.input.toLocaleString()} in · ${status.usage.output.toLocaleString()} out) · $${status.usage.cost.toFixed(4)}`
@@ -372,7 +375,7 @@ const SLASH_COMMANDS: SlashCommand[] = [
         if (!isValidSecretName(name)) {
           await client.sendMessage(
             spaceName,
-            `<b>${escapeHtml(name)}</b> is not a usable name: letters, digits and _ only, starting with a letter; ` +
+            `**${escapeHtml(name)}** is not a usable name: letters, digits and _ only, starting with a letter; ` +
               "PATH/HOME/PI_* are refused.",
             threadName,
           );
@@ -411,24 +414,18 @@ const SLASH_COMMANDS: SlashCommand[] = [
         return "ok";
       }
 
+      // A card, not a text reply. A text listing is indistinguishable from any
+      // other answer the bot posts, and gives no evidence that `/secret` is
+      // handled by the bridge rather than by the model — which is exactly the
+      // confidence an operator wants before typing a key anywhere near this bot.
       const list = secrets.list();
-      const lines = list.length
-        ? list.map(
-            (s) =>
-              `<code>${escapeHtml(s.name)}</code> — ${escapeHtml(s.tail)} · added ${new Date(s.addedAt).toISOString().slice(0, 10)} by ${escapeHtml(s.addedBy)}`,
-          )
-        : ["No secrets stored yet."];
-      await client.sendMessage(
+      await client.createCardMessage(
         spaceName,
-        [
-          "<b>Stored secrets</b> (values are never shown):",
-          ...lines,
-          "",
-          "Add one with **/secret set NAME**; it is used as <code>$NAME</code> in shell commands and redacted everywhere else.",
-        ].join("\n"),
+        secretPanelCard(list),
+        `Secrets: ${list.length} stored.`,
         threadName,
       );
-      logger.info(`[chat] ${display}: listed ${list.length} secret(s)`);
+      logger.info(`[chat] ${display}: posted secret panel (${list.length} secret(s))`);
       return "ok";
     },
   },
@@ -636,8 +633,12 @@ export async function runDurableCommand(ctx: DurableCommandContext): Promise<Han
     }
 
     if (incoming.action?.actionMethodName === SECRET_ACTION) {
-      // The panel's "add" button: ask for a name, then post the value card.
-      const name = (actionParam(incoming, "name") ?? "").trim().toUpperCase();
+      // The panel's "add" button. The name can arrive two ways: as a card
+      // parameter (older cards, and the `/secret set NAME` path) or typed into
+      // the panel's text input, which is what the current card offers.
+      const name = (formValue(incoming, "secret_name") ?? actionParam(incoming, "name") ?? "")
+        .trim()
+        .toUpperCase();
       if (!name) {
         await client
           .updateMessageCards(incoming.message.name, errorCard("No name given."), "No name given.")
@@ -662,6 +663,40 @@ export async function runDurableCommand(ctx: DurableCommandContext): Promise<Han
         )
         .catch((err) => logger.error("[chat] card update failed:", (err as Error).message));
       logger.info(`[chat] ${display}: secret prompt posted for ${name}`);
+      return "ok";
+    }
+
+    if (incoming.action?.actionMethodName === REMOVE_SECRET_ACTION) {
+      const secrets = ctx.secrets;
+      if (!secrets) {
+        await client
+          .updateMessageCards(incoming.message.name, errorCard("No secret store configured."), "No secret store.")
+          .catch((err) => logger.error("[chat] card update failed:", (err as Error).message));
+        return "ok";
+      }
+      const picked = formValue(incoming, "secret_remove_picker");
+      // No selection yet: the panel's "Remove…" button renders the picker in
+      // place. A picked value means the form was submitted for real.
+      if (!picked) {
+        const list = secrets.list();
+        await client
+          .updateMessageCards(
+            incoming.message.name,
+            list.length > 0 ? secretRemoveCard(list) : errorCard("No secrets stored."),
+            list.length > 0 ? "Pick a secret to remove." : "No secrets stored.",
+          )
+          .catch((err) => logger.error("[chat] card update failed:", (err as Error).message));
+        return "ok";
+      }
+      const removed = secrets.remove(picked);
+      await client
+        .updateMessageCards(
+          incoming.message.name,
+          secretConfirmCard({ ok: removed, name: picked, action: removed ? "removed" : "failed", detail: "no such secret" }),
+          removed ? `Removed ${picked}.` : `No stored secret called ${picked}.`,
+        )
+        .catch((err) => logger.error("[chat] card update failed:", (err as Error).message));
+      logger.info(`[chat] ${display}: card removal of ${picked} -> ${removed ? "removed" : "not found"}`);
       return "ok";
     }
 
