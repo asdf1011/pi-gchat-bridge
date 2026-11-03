@@ -30,14 +30,27 @@ the model replies. This bridge therefore always passes `--config`:
 cloudflared tunnel --config /etc/cloudflared/cloudflared.yml run --token "$TUNNEL_TOKEN"
 ```
 
-`start_bridge.sh` does this automatically when `TUNNEL_TOKEN` is set in
-`.env.durable`. Two details worth knowing:
+The token can live in either place, checked in this order:
 
-- The token is read and then **removed from the environment**, because
-  `.env.durable` is sourced with `set -a` and would otherwise be inherited by
-  every `bash` tool call the agent runs. It is a supervisor credential.
+1. **`/secret set TUNNEL_TOKEN`** — preferred. The value never sits in a file the
+   shell sources, and `start_bridge.sh` reads it through the bridge's own store
+   (`dist/scripts/secret-get.js`, which uses `SecretStore` — not a second bash
+   parser of `secrets.json`). A file-backed secret works too:
+   `/secret set TUNNEL_TOKEN --file /etc/cloudflared/token`.
+2. **`TUNNEL_TOKEN=` in `.env.durable`** — for a fresh deployment, where the
+   bridge has not run yet and there is no store to read.
+
+Three details worth knowing:
+
+- Either way the token is **removed from the environment** before the bridge
+  starts, because `.env.durable` is sourced with `set -a` and would otherwise be
+  inherited by every `bash` tool call the agent runs. It is a supervisor
+  credential; `/secret` is for values the agent uses, this is not one of them.
 - The token and a `credentials-file` are alternatives; the token wins if both
   are present. `cloudflared.yml` keeps the file line commented for reference.
+- The supervisor restarts cloudflared when it dies, but it reads the token only
+  at startup — so after changing it, restart the supervisor (`start-bridge.sh`),
+  not just `cloudflared`.
 
 Then put the credentials where the config expects them and fill in the id:
 

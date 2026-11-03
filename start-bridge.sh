@@ -176,14 +176,36 @@ if [ "$ENGINE" = "durable" ]; then
     log "ERROR: PUBSUB_SUBSCRIPTION is not set — the durable engine would pull nothing"
     exit 1
   fi
-  # The tunnel token is a supervisor credential, not something the agent should
-  # be able to read. `set -a` above exported everything from .env.durable, so it
-  # must be captured and then removed from the environment that the bridge (and
-  # every `bash` tool call it runs) inherits.
+  # Where the tunnel token comes from, in priority order:
+  #
+  #   1. `/secret set TUNNEL_TOKEN` — read through the bridge's own store, so the
+  #      value never sits in a file the shell sources and never appears in
+  #      `.env.durable`.
+  #   2. `TUNNEL_TOKEN` in `.env.durable` — kept for a fresh deployment where the
+  #      bridge has not run yet and there is no store to read.
+  #
+  # Either way it must not stay in the environment: `set -a` above exported
+  # everything from `.env.durable`, and the bridge (plus every `bash` tool call it
+  # runs) inherits that. It is a supervisor credential, not an agent one.
   TUNNEL_TOKEN_SAVED="${TUNNEL_TOKEN:-}"
   unset TUNNEL_TOKEN
-  if [ -n "${TUNNEL_TOKEN_SAVED:-}" ]; then
-    log "cloudflared: TUNNEL_TOKEN present (removed from the bridge environment)"
+  if [ -z "${TUNNEL_TOKEN_SAVED:-}" ]; then
+    # `node` because the store's format is the store's business: this asks
+    # SecretStore rather than re-parsing secrets.json in bash, so migration and
+    # file-backed secrets behave identically here and in the bridge.
+    getter="$PROJECT_DIR/dist/scripts/secret-get.js"
+    if [ -f "$getter" ] && command -v node >/dev/null 2>&1; then
+      if TUNNEL_TOKEN_SAVED="$(BRIDGE_DB="${BRIDGE_DB:-$PROJECT_DIR/bridge.sqlite}" \
+          node "$getter" TUNNEL_TOKEN 2>/dev/null)"; then
+        if [ -n "$TUNNEL_TOKEN_SAVED" ]; then
+          log "cloudflared: TUNNEL_TOKEN read from the secret store"
+        fi
+      else
+        TUNNEL_TOKEN_SAVED=""
+      fi
+    fi
+  else
+    log "cloudflared: TUNNEL_TOKEN present in .env.durable (removed from the bridge environment)"
   fi
   log "engine=durable db=${BRIDGE_DB:-$PROJECT_DIR/bridge.sqlite} subscription=$PUBSUB_SUBSCRIPTION spaces=${ALLOWED_SPACES:-(all)}"
 else
