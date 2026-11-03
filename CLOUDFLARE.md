@@ -19,6 +19,26 @@ cloudflared tunnel create pi-bridge            # writes ~/.cloudflared/<tunnel-i
 cloudflared tunnel route dns pi-bridge pi.hl.id.au
 ```
 
+### Token instead of a credentials file
+
+The dashboard offers `cloudflared tunnel run --token <token>`. That command alone
+pulls **ingress from the dashboard**, which has no `disableChunkedEncoding` — and
+without it the edge buffers the `/web` event stream, so the page sits blank while
+the model replies. This bridge therefore always passes `--config`:
+
+```
+cloudflared tunnel --config /etc/cloudflared/cloudflared.yml run --token "$TUNNEL_TOKEN"
+```
+
+`start_bridge.sh` does this automatically when `TUNNEL_TOKEN` is set in
+`.env.durable`. Two details worth knowing:
+
+- The token is read and then **removed from the environment**, because
+  `.env.durable` is sourced with `set -a` and would otherwise be inherited by
+  every `bash` tool call the agent runs. It is a supervisor credential.
+- The token and a `credentials-file` are alternatives; the token wins if both
+  are present. `cloudflared.yml` keeps the file line commented for reference.
+
 Then put the credentials where the config expects them and fill in the id:
 
 ```bash

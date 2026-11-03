@@ -26,7 +26,18 @@
 # would have been cargo cult.
 
 tunnel: pi-bridge
-credentials-file: /etc/cloudflared/<tunnel-id>.json
+# Credentials: either a tunnel token (TUNNEL_TOKEN, read by start-bridge.sh and
+# passed with --token) or a credentials file. Only one is needed; the token wins
+# if both are present. The credentials-file line is kept commented so the file
+# path is documented without making its absence an error:
+#
+#credentials-file: /etc/cloudflared/<tunnel-id>.json
+#
+# NOTE: whichever is used, this ingress block must stay. A token-only run
+# (`cloudflared tunnel run --token ...` with no --config) pulls ingress from the
+# Cloudflare dashboard, and `disableChunkedEncoding` below is NOT exposed there —
+# without it the edge buffers the event stream and /web sits blank while the
+# model replies.
 
 ingress:
   - hostname: pi.hl.id.au

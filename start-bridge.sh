@@ -176,6 +176,15 @@ if [ "$ENGINE" = "durable" ]; then
     log "ERROR: PUBSUB_SUBSCRIPTION is not set — the durable engine would pull nothing"
     exit 1
   fi
+  # The tunnel token is a supervisor credential, not something the agent should
+  # be able to read. `set -a` above exported everything from .env.durable, so it
+  # must be captured and then removed from the environment that the bridge (and
+  # every `bash` tool call it runs) inherits.
+  TUNNEL_TOKEN_SAVED="${TUNNEL_TOKEN:-}"
+  unset TUNNEL_TOKEN
+  if [ -n "${TUNNEL_TOKEN_SAVED:-}" ]; then
+    log "cloudflared: TUNNEL_TOKEN present (removed from the bridge environment)"
+  fi
   log "engine=durable db=${BRIDGE_DB:-$PROJECT_DIR/bridge.sqlite} subscription=$PUBSUB_SUBSCRIPTION spaces=${ALLOWED_SPACES:-(all)}"
 else
   log "engine=sdk subscription=${PUBSUB_SUBSCRIPTION:-(unset)}"
@@ -207,13 +216,26 @@ start_tunnel() {
   if [ "${BRIDGE_BIND:-127.0.0.1}" != "127.0.0.1" ]; then
     log "cloudflared: WARNING BRIDGE_BIND=${BRIDGE_BIND} — the bridge is reachable WITHOUT the tunnel and its Access policy"
   fi
+  # Token auth. `--config` is passed even though the token supplies credentials:
+  # without it cloudflared pulls ingress from the Cloudflare dashboard, which has
+  # no `disableChunkedEncoding` — and without that the edge buffers the /web
+  # event stream, so the page stays blank while the model replies.
+  if [ -n "${TUNNEL_TOKEN_SAVED:-}" ]; then
+    log "cloudflared: starting tunnel with TUNNEL_TOKEN + local ingress ($CF_CONFIG)"
+    TUNNEL_TOKEN="$TUNNEL_TOKEN_SAVED" \
+      "$CF_BIN" tunnel --config "$CF_CONFIG" run --token "$TUNNEL_TOKEN_SAVED" \
+      >> "$PROJECT_DIR/cloudflared.log" 2>&1 &
+    TUNNEL_PID=$!
+    return 0
+  fi
+
   # Without credentials cloudflared exits in about a second, so starting it
   # would mean a respawn every 5s — the log-flooding pattern that buried a real
   # model failure earlier. Require the credential file to exist first.
   local creds
   creds="$(sed -n 's/^credentials-file:[[:space:]]*//p' "$CF_CONFIG" | head -1)"
   if [ -n "$creds" ] && [ ! -f "$creds" ]; then
-    log "cloudflared: credentials-file $creds missing — tunnel not started (run 'cloudflared tunnel create')"
+    log "cloudflared: no TUNNEL_TOKEN and credentials-file $creds missing — tunnel not started"
     return 0
   fi
   log "cloudflared: starting tunnel ($CF_CONFIG)"
