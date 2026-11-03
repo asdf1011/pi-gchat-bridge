@@ -30,6 +30,7 @@ import {
   statusCard,
 } from "../cards.js";
 import { actionParam, anyFormValue, formValue } from "../card-input.js";
+import { isAllowed } from "../access.js";
 import type { ChatClient } from "../chat-client.js";
 import {
   BUSY,
@@ -70,6 +71,12 @@ export interface DurableCommandContext {
   state: StateStore;
   /** Secret store for `/secret`. Built by the host so tests can point it at a temp file. */
   secrets?: SecretStore;
+  /**
+   * Users permitted to use `/secret` (resource name or ID). Empty means "no
+   * extra restriction" — the Pub/Sub allow-list and the web proxy have already
+   * decided who may talk to this bridge.
+   */
+  secretUsers?: readonly string[];
   incoming: IncomingMessage;
   /** Chat conversation key, from `keyFor()`. */
   chatKey: string;
@@ -339,6 +346,13 @@ const SLASH_COMMANDS: SlashCommand[] = [
     run: async (ctx) => {
       const { client, spaceName, threadName, display, text } = ctx;
       const secrets = ctx.secrets;
+      if (!isAllowed(display, ctx.secretUsers ?? [])) {
+        // Deliberately vague: an unauthorised user should not learn whether
+        // there is a store, what is in it, or that this command exists at all.
+        await client.sendMessage(spaceName, "You are not allowed to use /secret here.", threadName);
+        logger.info(`[chat] ${display}: refused /secret (not in SECRET_USERS)`);
+        return "ok";
+      }
       if (!secrets) {
         await client.sendMessage(spaceName, "No secret store is configured on this bridge.", threadName);
         return "ok";
@@ -466,7 +480,31 @@ function defaultModelRef(host: BridgeHost): { provider: string; modelId: string 
 export async function runDurableCommand(ctx: DurableCommandContext): Promise<HandleResult | null> {
   const { client, host, router, state, incoming, chatKey, actionKey, spaceName, threadName, display, text } = ctx;
 
+  /**
+   * Is this user allowed to touch the secret store?
+   *
+   * Checked here as well as in the receiver because the two frontends differ:
+   * Chat events carry a sender the Pub/Sub allow-list has already vetted, but a
+   * `/web` submission arrives with a Cloudflare-injected email and no Chat
+   * identity at all, so `/secret` typed in the browser would otherwise bypass
+   * the gate entirely. `display` is the best identity available on both paths.
+   */
+  const mayUseSecrets = (): boolean => isAllowed(display, ctx.secretUsers ?? []);
+
   if (incoming.eventType === "CARD_CLICKED") {
+    if (
+      (incoming.action?.actionMethodName === SECRET_ACTION ||
+        incoming.action?.actionMethodName === SET_SECRET_ACTION) &&
+      !mayUseSecrets()
+    ) {
+      // Refuse without echoing what was clicked: a rejected click should not
+      // confirm to an unauthorised user that a secret store exists here.
+      await client
+        .updateMessageCards(incoming.message.name, errorCard("Not allowed."), "Not allowed.")
+        .catch((err) => logger.error("[chat] card update failed:", (err as Error).message));
+      logger.info(`[chat] ${display}: refused secret card action (not in SECRET_USERS)`);
+      return "ok";
+    }
     if (incoming.action?.actionMethodName === THINKING_LEVELS_ACTION) {
       const mode = actionParam(incoming, "mode") === "settings" ? "settings" : "model";
       const picked = formValue(incoming, mode === "settings" ? "default_model_picker" : "model_picker");

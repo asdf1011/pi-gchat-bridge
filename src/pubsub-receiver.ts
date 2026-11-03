@@ -176,16 +176,21 @@ export class PubSubReceiver implements MessageReceiver {
 
       // Allow-list: respond only in permitted spaces, and to permitted users.
       // A disallowed event is acked (dropped) so it never loops in Pub/Sub.
-      // The user check applies to MESSAGE events (the ones that run pi); card
-      // events are only bounded by space, since they confirm bot cards the
-      // bridge itself posted and never run pi tools directly.
+      //
+      // The user check applies to CARD_CLICKED as well as MESSAGE. It used to
+      // apply only to MESSAGE, on the reasoning that a card is a widget the
+      // bridge itself posted and clicking one runs no tools — which was true
+      // before `/secret` existed. A card click can now open a card that stores a
+      // secret, so "who clicked" is exactly as load-bearing as "who typed".
       if (!isAllowed(incoming.space.name, this.allowedSpaces)) {
         logger.info(`[pubsub] ${incoming.space.name}: space not in allow-list, dropping`);
         await this.ack([receivedMessage.ackId]);
         return;
       }
-      if (incoming.eventType === "MESSAGE" && !isAllowed(incoming.message.senderName, this.allowedUsers)) {
-        logger.info(`[pubsub] ${incoming.space.name}: sender not in allow-list, dropping`);
+      if (!isAllowed(incoming.message.senderName, this.allowedUsers)) {
+        logger.info(
+          `[pubsub] ${incoming.space.name}: sender ${incoming.message.senderName ?? "(unknown)"} not in allow-list, dropping ${incoming.eventType ?? "MESSAGE"}`,
+        );
         await this.ack([receivedMessage.ackId]);
         return;
       }
@@ -297,6 +302,11 @@ export class PubSubReceiver implements MessageReceiver {
           name: message.name,
           threadName: message.thread?.name,
           threadKey: message.thread?.threadKey,
+          // Card events carry the clicking user here too. It was dropped before
+          // the allow-list started checking card events, which is why the hole
+          // was invisible: nothing downstream needed it.
+          senderName: message.sender?.name,
+          senderType: message.sender?.type as ChatMessage["senderType"],
         },
         action: {
           actionMethodName: event.action?.actionMethodName,

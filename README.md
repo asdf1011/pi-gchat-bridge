@@ -105,6 +105,7 @@ twice.
 - **The binding is a document, not a file.** A session-scoped document maps
   `chatKey → conversationId`, written in the *same commit* that creates the
   conversation, so a crash cannot leave a conversation no thread points at.
+- **`/secret`** lists stored secrets (names and a tail, never values); **`/secret set NAME`** posts a card for out-of-band entry; **`/secret remove NAME`** deletes. Values never enter the conversation — see [Security notes](#security-notes).
 - **`/sessions`** lists conversations; **`/resume`** rebinds a thread to one of
   them. `/name` gives one a display name (Chat-side label only).
 - **Legacy history was imported once.** `src/durable/import-all.ts` replays old
@@ -286,7 +287,9 @@ decision for a bridge with shell access.
 | `BRIDGE_WATCHDOG_INTERVAL_MS` | `30000` | Watchdog scan interval |
 | `BRIDGE_SESSION_IDLE_MS` | `0` | Evict an idle, non-streaming session from memory after this long (0 disables) |
 | `ALLOWED_SPACES` | — | Comma-separated spaces (name or ID) the bridge responds in; empty = all |
-| `ALLOWED_USERS` | — | Comma-separated users (name or ID) allowed to trigger pi; empty = anyone |
+| `ALLOWED_USERS` | — | Comma-separated users (name or ID) allowed to trigger pi, including card clicks; empty = anyone |
+| `SECRET_USERS` | — | Comma-separated users allowed to use `/secret`; empty = same as `ALLOWED_USERS` |
+| `BRIDGE_SECRETS_FILE` | `~/.pi-bridge/secrets.json` | Where `/secret` stores values. Deliberately outside `PI_CWD` |
 | `BRIDGE_REPLACE_ON_FINISH` | `1` | `1`: post the final answer as a new message (the completion notification), then delete the streaming placeholder (leaves a "Message deleted" stub). `0`: keep the patched placeholder as the answer (no stub; the notification is the one posted when the placeholder appears). |
 | `BRIDGE_TOPIC_SUMMARY` | `1` | Re-title the `/model` "Model switched" card with a local-model topic line once the first reply lands. `0` keeps the plain wording. |
 | `BRIDGE_TOPIC_SUMMARY_BASE_URL` | `http://127.0.0.1:8091/v1` | The **titler** server (see [Two local servers](#two-local-servers-and-why)). Not the conversation router. |
@@ -340,16 +343,77 @@ redelivered by Pub/Sub to the fresh session.
 - [x] Web frontend sharing conversations with Chat
 - [x] Topic titles, on a dedicated local titler server
 - [ ] Artifacts (agent-published HTML/Markdown/SVG, versioned per id)
-- [ ] Allowed-users filter (whitelist who can message the bot)
+- [x] Allowed-users filter (whitelist who can message the bot) — `ALLOWED_USERS`, applied to messages *and* card clicks
 - [x] Parallel processing: per-thread sessions + concurrent dispatch (threads are independent; serial within a thread)
 
 ## Security notes
 
-- The service account has **`chat.bot` scope only** — it can read messages in
-  spaces it's in and post as the bot. It cannot touch your Drive/Mail/Calendar.
-- pi sessions in the bridge get the **full default toolset** (`read`, `bash`,
-  `edit`, `write`) against `PI_CWD`. Anyone who can message the bot can run
-  commands — keep the app limited to your org / specific people.
+### The threat model, stated
+
+This bridge defends against **accident**. It does not defend against an attacker
+who already has code execution on this machine, and it does not defend against
+the model itself being adversarial — if the agent can run `bash`, it can reach
+anything the bridge user can reach.
+
+Two things follow, and they are deliberate rather than oversights:
+
+- The bridge and its shell share a UID. The secret store
+  (`~/.pi-bridge/secrets.json`, mode 0600) is therefore *readable* by anything
+  the agent runs. It buys "not in the conversation, not in the session export,
+  not in the model's context, not in the Chat scrollback", which is the risk that
+  actually bites.
+- Nothing here replaces not giving the bridge credentials it does not need.
+  Narrow, short-lived credentials beat every mechanism below.
+
+### What is in place
+
+- **The service account has `chat.bot` scope only** — it can read messages in
+  spaces it is in and post as the bot. It cannot touch Drive, Mail or Calendar.
+- **`ALLOWED_USERS` / `ALLOWED_SPACES`** gate who can trigger the bot. Both apply
+  to messages *and* card clicks; a card click can open a control that stores a
+  credential, so "who clicked" is as load-bearing as "who typed".
+- **`SECRET_USERS`** gates `/secret` separately (falling back to
+  `ALLOWED_USERS` when unset), because spending tokens and reading the secret
+  inventory are different risks.
+- **`/web` has no authentication of its own, by design.** It binds loopback and
+  expects an identity-aware proxy in front. Anyone who can reach the port can
+  read every conversation and submit as the bot — and this bot can run `bash`.
+- **Secrets stay out of the model's context.** Two mechanisms, deliberately
+  complementary:
+  - `/secret set NAME` captures a value on a **card**, so it never becomes a
+    message. `runDurableCommand()` consumes the submission before
+    `router.deliver()`, so the value cannot reach the transcript.
+  - A redaction extension (`src/durable/extensions/`) scrubs every registered
+    value from tool output (`afterTool`) and from **every model request**
+    (`beforeRequest`) — the last gate before bytes leave the machine. Each value
+    is matched as typed, JSON-escaped, URL-encoded and in three base64
+    alphabets. It fails closed: if redaction cannot complete, the request is not
+    sent.
+
+### What is not in place (known, accepted)
+
+- **Redaction is pattern-based, not a boundary.** A transformed value (hex,
+  reversed, split, inside a larger blob) passes. A secret written to a file by
+  the `write` tool stays on disk; only its later *reads* are scrubbed.
+- **Structured tool output is not rewritten.** `structuredOutput` is
+  schema-validated for program callers, so rewriting its strings would break the
+  contract. A secret returned that way never enters the transcript, but a
+  codemode script sees it.
+- **`~/.gmcli` and similar token stores are readable by the agent.**
+  Credentials owned by a filesystem-reading CLI cannot be protected by an HTTP
+  proxy or by redaction.
+- **Provider credentials are not yet off-host.** API keys are still supplied to
+  the bridge; an egress proxy that injects them upstream — so the agent never
+  holds a real value — is the next step, not a shipped feature.
+
+### If you expose this beyond the machine
+
+1. Keep `BRIDGE_BIND=127.0.0.1`. The tunnel is a security boundary only if it is
+   the only way in; a second listener makes the Access policy decorative.
+2. Put identity-aware auth at the edge (see `CLOUDFLARE.md`), with a short
+   session and WebAuthn if you have it.
+3. Never expose the secrets proxy through the tunnel — it is an egress gate for
+   the agent, not a service for the world.
 
 ## Known limitations
 

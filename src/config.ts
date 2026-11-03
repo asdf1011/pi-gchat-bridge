@@ -37,6 +37,16 @@ export interface Config {
   allowedSpaces: string[];
   /** Restrict which users can trigger pi (resource name or ID). Empty = all. */
   allowedUsers: string[];
+  /**
+   * Restrict who may use `/secret` (resource name or ID). Empty = inherit
+   * `allowedUsers`.
+   *
+   * Separate from `allowedUsers` because the two risks differ: triggering pi
+   * spends tokens and can run tools; listing secrets reveals which names exist
+   * and the last few characters of each. Someone may reasonably be allowed to
+   * chat without being allowed to see the secret inventory.
+   */
+  secretUsers: string[];
   /** Optional shared secret required on POST /notify (Authorization: Bearer …). Empty = no auth. */
   notifyToken: string;
   /** Bearer token for web writes. Empty means no check (tailnet-only deployment). */
@@ -104,6 +114,7 @@ export function loadConfig(): Config {
     sessionIdleMs: Number(process.env.BRIDGE_SESSION_IDLE_MS ?? 0),
     allowedSpaces: listEnv("ALLOWED_SPACES"),
     allowedUsers: listEnv("ALLOWED_USERS"),
+    secretUsers: listEnv("SECRET_USERS"),
     notifyToken: process.env.BRIDGE_NOTIFY_TOKEN ?? "",
     webToken: process.env.BRIDGE_WEB_TOKEN ?? "",
     topicSummary: (process.env.BRIDGE_TOPIC_SUMMARY ?? "1") !== "0",

@@ -85,3 +85,20 @@ seats, and a seat is consumed per *user who authenticates*, not per login.
 
 The trade: Cloudflare terminates TLS and can see every prompt and every command
 output. For a bridge with shell access that is a real decision, not a formality.
+
+## What the tunnel must never expose
+
+The tunnel is a boundary only for the things it fronts. Two rules follow from
+that and are worth writing down, because both are easy to undo by accident:
+
+- **Only the bridge is in `ingress`.** The config ends in
+  `http_status: 404`, so anything not matched dies at the edge. Any secrets or
+  egress proxy this machine runs must stay off the ingress list: the agent can
+  drive such a proxy, so a public one is a credential oracle with an SSO door.
+- **`BRIDGE_BIND` stays `127.0.0.1`.** `start-bridge.sh` warns when it is not.
+  A second listener means the Access policy protects nothing, because the origin
+  is reachable without passing it.
+- **Cloudflare terminates TLS and can see prompts and command output.** That is
+  the documented trade for using the tunnel at all. It is another reason the
+  agent should hold placeholder credentials rather than real ones: what the edge
+  can see should be worth nothing.

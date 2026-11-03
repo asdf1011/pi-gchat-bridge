@@ -298,6 +298,9 @@ async function main(): Promise<void> {
       router,
       state,
       secrets,
+      // Falls back to ALLOWED_USERS when SECRET_USERS is unset, so a single-user
+      // deployment needs no extra configuration.
+      secretUsers: config.secretUsers.length > 0 ? config.secretUsers : config.allowedUsers,
       incoming,
       chatKey,
       actionKey,
