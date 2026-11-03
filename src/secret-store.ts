@@ -29,6 +29,7 @@
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import { logger } from "./logger.js";
@@ -173,17 +174,46 @@ export function tail(value: string): string {
   return `••••${value.slice(-shown)}`;
 }
 
+/**
+ * Force a mode on an existing path, best-effort.
+ *
+ * A failure here is logged rather than thrown: refusing to store a secret
+ * because a chmod was denied would be worse than storing it at the wrong mode,
+ * and the operator can see the warning. Skipped on platforms without POSIX modes.
+ */
+function tighten(target: string, mode: number): void {
+  try {
+    const current = fs.statSync(target).mode & 0o777;
+    if (current !== mode) fs.chmodSync(target, mode);
+  } catch (error) {
+    // Only complain when we can see a wider mode; ENOENT and EPERM are noise.
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT" && code !== "EPERM") {
+      logger.error(`[secrets] cannot set ${mode.toString(8)} on ${target}: ${(error as Error).message}`);
+    }
+  }
+}
+
 export class SecretStore {
   constructor(private readonly file: string) {}
 
-  /** The default location: alongside the store, but not inside PI_CWD. */
-  static defaultPath(bridgeDir: string): string {
+  /**
+   * Where the store lives: the operator's home, not the project directory.
+   *
+   * This used to be `dirname(dbPath)/.pi-bridge/`, with a comment claiming that
+   * was "not inside PI_CWD". It was: `BRIDGE_DB` defaults to `./bridge.sqlite`,
+   * so the store landed in the bridge directory — which is exactly `PI_CWD`, the
+   * directory the agent's `read` and `bash` sit in. A secrets file there is one
+   * `cat` away from a tool result.
+   *
+   * `~/.pi-bridge/` is outside the project, so the agent only reaches it by
+   * naming an absolute path in `$HOME` — which is a deliberate act, not an
+   * accident of the default working directory. `BRIDGE_SECRETS_FILE` overrides.
+   */
+  static defaultPath(_dbPath?: string): string {
     const configured = process.env.BRIDGE_SECRETS_FILE;
     if (configured) return configured;
-    // `~/.pi-bridge/secrets.json`, not `./secrets.json`: the BridgeHost's cwd is
-    // PI_CWD, which is where the agent's tools run, and a file in the working
-    // directory is one `cat` away from being in a tool result.
-    return path.join(path.dirname(bridgeDir), ".pi-bridge", "secrets.json");
+    return path.join(os.homedir(), ".pi-bridge", "secrets.json");
   }
 
   private read(): StoreFile {
@@ -208,12 +238,21 @@ export class SecretStore {
   }
 
   private write(next: StoreFile): void {
-    fs.mkdirSync(path.dirname(this.file), { recursive: true, mode: 0o700 });
+    const dir = path.dirname(this.file);
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // `mode` on mkdir only applies at creation, so an existing directory keeps
+    // whatever permissions it had. A store found at 0755 (which happened: an
+    // earlier build created it, and the mode is a claim the file has to keep) is
+    // tightened here rather than left readable.
+    tighten(dir, 0o700);
+
     const temp = `${this.file}.${crypto.randomBytes(6).toString("hex")}.tmp`;
     // 0600 at creation: writing then chmod'ing leaves a window where the file is
     // world-readable, which on a shared host is the whole ballgame.
     fs.writeFileSync(temp, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+    tighten(temp, 0o600);
     fs.renameSync(temp, this.file);
+    tighten(this.file, 0o600);
   }
 
   /**

@@ -246,3 +246,29 @@ test("an unrecognisable entry is dropped rather than guessed at", () => {
   fs.writeFileSync(file, JSON.stringify({ version: 1, secrets: { BAD: { nonsense: true } } }));
   assert.deepEqual(store.registrySecrets(), []);
 });
+
+// --- Permissions are enforced, not just requested ----------------------------
+
+test("an existing store left world-readable is tightened on the next write", () => {
+  // `mode` on writeFileSync only applies at creation, so a store created by an
+  // older build (or by hand) keeps whatever permissions it had. This happened in
+  // production: the file was 0755 and the 0600 claim was false.
+  const { store, file } = tempStore();
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o755 });
+  fs.writeFileSync(file, JSON.stringify({ version: 1, secrets: {} }), { mode: 0o644 });
+  fs.chmodSync(file, 0o644);
+  fs.chmodSync(path.dirname(file), 0o755);
+
+  store.set("KEY", "abcdefgh", "alice");
+
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(path.dirname(file)).mode & 0o777, 0o700);
+});
+
+test("the store defaults to the home directory, not the project", () => {
+  // It used to be dirname(dbPath)/.pi-bridge, and BRIDGE_DB defaults to
+  // ./bridge.sqlite — so the store sat in PI_CWD, one `cat` from a tool result.
+  const resolved = SecretStore.defaultPath("/workspace/pi-gchat-bridge/bridge.sqlite");
+  assert.equal(resolved, path.join(os.homedir(), ".pi-bridge", "secrets.json"));
+  assert.equal(resolved.startsWith("/workspace"), false);
+});
