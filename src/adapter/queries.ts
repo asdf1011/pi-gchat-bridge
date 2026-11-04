@@ -76,19 +76,41 @@ export interface ConversationStatus {
   thinkingLevel?: string;
   supportedLevels?: string[];
   /** Totals across every model this conversation has used. */
-  usage?: { input: number; output: number; total: number; cost: number };
+  usage?: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    total: number;
+    cost: number;
+  };
   /** Number of entries in the active transcript. */
   entries?: number;
 }
 
+/** The counters one `pi.usage.models` bucket may carry (`totalTokens` is the billed sum). */
+interface UsageCounters {
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  totalTokens?: number;
+  cost?: { total?: number };
+}
+
 /** Sum `docs["pi.usage"]` into the totals `/status` shows. */
 export function totalUsage(usageDoc: unknown): ConversationStatus["usage"] {
-  const models = (usageDoc as { models?: Record<string, { input?: number; output?: number; totalTokens?: number; cost?: { total?: number } }> } | undefined)?.models;
+  const models = (usageDoc as { models?: Record<string, UsageCounters> } | undefined)?.models;
   if (!models) return undefined;
-  const totals = { input: 0, output: 0, total: 0, cost: 0 };
+  const totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0 };
   for (const usage of Object.values(models)) {
     totals.input += usage.input ?? 0;
     totals.output += usage.output ?? 0;
+    // Cache tokens are billed (cheaply) and counted in totalTokens, so they are
+    // summed too: dropping them made `/status` show a cache column of 0 while
+    // the ledger held real cache reads.
+    totals.cacheRead += usage.cacheRead ?? 0;
+    totals.cacheWrite += usage.cacheWrite ?? 0;
     totals.total += usage.totalTokens ?? 0;
     totals.cost += usage.cost?.total ?? 0;
   }

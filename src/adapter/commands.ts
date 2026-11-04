@@ -280,8 +280,8 @@ const SLASH_COMMANDS: SlashCommand[] = [
                 input: status.usage.input,
                 output: status.usage.output,
                 cost: status.usage.cost,
-                cacheRead: 0,
-                cacheWrite: 0,
+                cacheRead: status.usage.cacheRead,
+                cacheWrite: status.usage.cacheWrite,
               }
             : undefined,
         }),

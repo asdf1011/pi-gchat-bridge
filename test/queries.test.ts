@@ -73,11 +73,25 @@ test("clampThinkingLevel keeps a supported level and falls back to the lowest ot
 test("totalUsage sums every model a conversation has used", () => {
   const totals = totalUsage({
     models: {
-      "deepseek/deepseek-flash": { input: 100, output: 20, totalTokens: 120, cost: { total: 0.5 } },
-      "llama-local/small": { input: 10, output: 5, totalTokens: 15, cost: { total: 0 } },
+      "deepseek/deepseek-flash": {
+        input: 100,
+        output: 20,
+        cacheRead: 1000,
+        cacheWrite: 40,
+        totalTokens: 1160,
+        cost: { total: 0.5 },
+      },
+      "llama-local/small": { input: 10, output: 5, cacheRead: 7, totalTokens: 22, cost: { total: 0 } },
     },
   });
-  assert.deepEqual(totals, { input: 110, output: 25, total: 135, cost: 0.5 });
+  assert.deepEqual(totals, {
+    input: 110,
+    output: 25,
+    cacheRead: 1007,
+    cacheWrite: 40,
+    total: 1182,
+    cost: 0.5,
+  });
   assert.equal(totalUsage({}), undefined);
   assert.equal(totalUsage(undefined), undefined);
   assert.equal(totalUsage({ models: { a: { input: 0, output: 0, totalTokens: 0 } } }), undefined);
