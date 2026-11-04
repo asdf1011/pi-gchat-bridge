@@ -56,5 +56,19 @@ ingress:
       # The bridge serves one hostname; send it the one the browser used.
       httpHostHeader: pi.hl.id.au
 
+  # The artifact origin: a second listener in the same process, GET-only, with
+  # no route to the mutating API. Its own hostname is what makes the isolation
+  # real — a request here cannot reach `/web/api/.../message` however it is
+  # crafted. Both hostnames are one level below the zone, so Universal SSL
+  # covers them; both are gated by their own Access application.
+  #
+  # No SSE tuning: nothing here streams. `connectTimeout` is copied from the
+  # main host for consistency rather than because it was needed.
+  - hostname: artifacts.hl.id.au
+    service: http://127.0.0.1:8082
+    originRequest:
+      connectTimeout: 30s
+      httpHostHeader: artifacts.hl.id.au
+
   # Anything not matched above 404s at the edge rather than reaching the bridge.
   - service: http_status:404

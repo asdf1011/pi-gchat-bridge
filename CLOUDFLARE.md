@@ -138,6 +138,8 @@ that and are worth writing down, because both are easy to undo by accident:
   `http_status: 404`, so anything not matched dies at the edge. Any secrets or
   egress proxy this machine runs must stay off the ingress list: the agent can
   drive such a proxy, so a public one is a credential oracle with an SSO door.
+  The one exception is the artifact origin below, which is a second *bridge*
+  listener rather than a second service.
 - **`BRIDGE_BIND` stays `127.0.0.1`.** `start-bridge.sh` warns when it is not.
   A second listener means the Access policy protects nothing, because the origin
   is reachable without passing it.
@@ -145,3 +147,21 @@ that and are worth writing down, because both are easy to undo by accident:
   the documented trade for using the tunnel at all. It is another reason the
   agent should hold placeholder credentials rather than real ones: what the edge
   can see should be worth nothing.
+
+## Two hostnames, one tunnel
+
+`pi.hl.id.au` and `artifacts.hl.id.au` share the tunnel, the cloudflared process
+and the token; only the ingress rule differs. They are separate hosts on purpose:
+
+- **Separate origin.** The artifact route table is GET-only and has no path to
+  `/web/api/.../message`, so a document that escapes its sandbox still cannot
+  submit a message or run a tool.
+- **Separate Access application**, so each host gets its own host-only
+  `CF_Authorization` cookie. A wildcard application covering both would issue a
+  parent-domain cookie and collapse this separation — the reason the DNS records
+  are two plain hostnames rather than one wildcard.
+- Both are one level below the zone, so Universal SSL covers them; per-conversation
+  hostnames (`<id>.artifacts.hl.id.au`) would need Total TLS or a paid certificate.
+
+See [docs/artifacts.md](docs/artifacts.md) for the listener, its headers, and what
+it refuses to serve.
