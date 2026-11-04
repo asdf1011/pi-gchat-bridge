@@ -161,28 +161,50 @@ if [ "$NEEDS_BUILD" = "1" ]; then
   npm run build >> "$LOG_FILE" 2>&1 || log "ERROR: build failed (see $LOG_FILE)"
 fi
 
+# Load the durable engine's own environment. Called at startup AND before every
+# restart of the bridge.
+#
+# Sourcing this once, before the loop, meant an edit to `.env.durable` needed a
+# *container* restart to take effect: the loop re-executes node, node inherits
+# this shell's environment, and this shell had already exported the old values.
+# Deploying BRIDGE_ARTIFACTS_PORT made that concrete — the file was correct,
+# `.restart-bridge.sh` restarted node, and the new listener never started.
+#
+# One limit worth knowing before relying on it: sourcing can add or change a
+# variable but cannot remove one, so a line *deleted* from the file stays in the
+# environment until the container is recreated. Adding or changing a setting is
+# now a bridge restart; removing one is still a container restart.
+load_durable_env() {
+  if [ "$ENGINE" != "durable" ]; then
+    return 0
+  fi
+  local file="$PROJECT_DIR/.env.durable"
+  if [ ! -f "$file" ]; then
+    return 0
+  fi
+  log "loading .env.durable"
+  set -a
+  # shellcheck disable=SC1091
+  . "$file"
+  set +a
+}
+
+load_durable_env
+
 # Refuse to start when the durable engine has no subscription: it would pull
 # nothing and look healthy while answering no one.
+if [ "$ENGINE" = "durable" ] && [ -z "${PUBSUB_SUBSCRIPTION:-}" ]; then
+  log "ERROR: PUBSUB_SUBSCRIPTION is not set — the durable engine would pull nothing"
+  exit 1
+fi
 if [ "$ENGINE" = "durable" ]; then
-  DURABLE_ENV="$PROJECT_DIR/.env.durable"
-  if [ -f "$DURABLE_ENV" ]; then
-    log "loading .env.durable"
-    set -a
-    # shellcheck disable=SC1091
-    . "$DURABLE_ENV"
-    set +a
-  fi
-  if [ -z "${PUBSUB_SUBSCRIPTION:-}" ]; then
-    log "ERROR: PUBSUB_SUBSCRIPTION is not set — the durable engine would pull nothing"
-    exit 1
-  fi
   # The tunnel token comes from the secret store and nowhere else:
   #
   #     /secret set CLOUDFLARE_TUNNEL_TOKEN            (value on a card)
   #     /secret set CLOUDFLARE_TUNNEL_TOKEN --file /etc/cloudflared/token
   #
   # No environment fallback on purpose. A token in `.env.durable` would be
-  # exported by the `set -a` above into the bridge and inherited by every `bash`
+  # exported by `load_durable_env` into the bridge and inherited by every `bash`
   # tool call the agent runs — the exact exposure the store exists to avoid. If
   # the secret is absent the tunnel simply does not start, which is a supported
   # state: the bridge is reachable other ways.
@@ -255,6 +277,9 @@ start_tunnel() {
 log "pi-gchat-bridge starting (log: $LOG_FILE)"
 start_tunnel
 while true; do
+  # Re-read `.env.durable` every time the bridge is re-executed, so a bridge
+  # restart applies an environment change without restarting the container.
+  load_durable_env
   node "$ENTRYPOINT" >> "$LOG_FILE" 2>&1 &
   NODE_PID=$!
   wait "$NODE_PID"
