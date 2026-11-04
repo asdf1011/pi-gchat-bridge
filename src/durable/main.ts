@@ -18,6 +18,7 @@ import http from "node:http";
 import { AssistantEntry } from "@earendil-works/pi-durable";
 
 import { ChatClient, collectImageAttachments } from "../chat-client.js";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "../config.js";
 import { logger } from "../logger.js";
 import { PubSubReceiver } from "../pubsub-receiver.js";
@@ -32,7 +33,7 @@ import { defaultSettings } from "../adapter/commands.js";
 import { BridgeHost } from "./host.js";
 import { BridgeLockedError } from "./lock.js";
 import { handleDurableNotify } from "./notify.js";
-import { attachWebClient, webIndex, webSubmit, WEB_PAGE } from "../adapter/web.js";
+import { attachWebClient, webIndex, webPage, webSubmit } from "../adapter/web.js";
 import { applyDurableTopicSummary } from "./topic.js";
 import { identify } from "./identity.js";
 import { failureNotice } from "./failure-notice.js";
@@ -116,7 +117,7 @@ async function main(): Promise<void> {
           // headers too, which is how some proxies smoke-test an upstream.
           if (req.method === "GET" && (url.pathname === "/" || url.pathname === "")) {
             res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-            res.end(WEB_PAGE);
+            res.end(webPage());
             return;
           }
           if (req.method === "POST" && url.pathname === "/notify") {
@@ -158,7 +159,7 @@ async function main(): Promise<void> {
           // without a build-time or config-time base path.
           if (req.method === "GET" && (webPath(url.pathname) === "/web" || webPath(url.pathname) === "/web/")) {
             res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-            res.end(WEB_PAGE);
+            res.end(webPage());
             return;
           }
           if (req.method === "GET" && webPath(url.pathname) === "/web/api/conversations") {
@@ -269,6 +270,9 @@ async function main(): Promise<void> {
       if (config.trustedProxy) logger.info(`[bridge] identity headers trusted from ${config.trustedProxy}`);
     });
   }
+
+
+
 
   // --- One Chat message → one durable submission → one Chat reply. ---
   const handler = async (incoming: IncomingMessage): Promise<import("../receiver.js").HandleResult> => {

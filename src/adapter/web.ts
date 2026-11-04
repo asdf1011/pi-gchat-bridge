@@ -18,6 +18,8 @@
  * that connects mid-turn paints the in-progress answer instead of a blank page.
  * Measured: 8 concurrent subscribers receive identical frames with zero drift.
  */
+import fs from "node:fs";
+
 import type { Context } from "@earendil-works/chord";
 import type { ConversationId } from "@earendil-works/pi-durable";
 
@@ -157,136 +159,44 @@ export async function webSubmit(
  * — the next one is complete. That is what makes a reconnect (a bridge restart)
  * invisible rather than needing a resync protocol.
  */
-export const WEB_PAGE = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>pi bridge</title>
-<!--
-  Resolve everything against this document's own URL, not the origin root. The
-  page may be served at /web/ directly or behind a reverse proxy at /pi/, and a
-  hard-coded leading slash would point at the proxy's root instead of ours.
-  With <base> and relative URLs the same build works at both, with no config.
--->
-<base href="">
-<style>
-  :root { color-scheme: light dark; }
-  * { box-sizing: border-box; }
-  body { margin: 0; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; display: flex; height: 100vh; }
-  #list { width: 18rem; overflow: auto; border-right: 1px solid #8884; margin: 0; padding: 0; list-style: none; }
-  #list li { padding: .5rem .75rem; cursor: pointer; border-bottom: 1px solid #8882; }
-  #list li.on { background: #8882; }
-  #list small { display: block; opacity: .6; font-size: .78em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #pane { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-  #log { flex: 1; overflow: auto; padding: 1rem; white-space: pre-wrap; word-break: break-word; margin: 0; }
-  #tool { padding: .25rem 1rem; font: 12px ui-monospace, monospace; opacity: .7; min-height: 1.6em; }
-  form { display: flex; gap: .5rem; padding: .75rem; border-top: 1px solid #8884; }
-  textarea { flex: 1; resize: none; height: 3.5rem; font: inherit; padding: .5rem; }
-  button { padding: .5rem 1rem; font: inherit; }
-</style>
-</head>
-<body>
-<ul id="list"></ul>
-<div id="pane">
-  <p id="log"></p>
-  <div id="tool"></div>
-  <form id="send">
-    <textarea id="text" placeholder="Message this conversation — same one Chat is in"></textarea>
-    <button>Send</button>
-  </form>
-</div>
-<script>
 /**
- * A URL relative to wherever this page was served from.
+ * The browser page.
  *
- * The base tag handles the normal case, but it resolves against the full URL,
- * so at "/pi" (no trailing slash) a relative path becomes "/api/x" -- the
- * proxy's root, not the app's. Appending the slash first makes both "/pi" and
- * "/pi/" work.
+ * A file, not a string literal, so the UI can be edited and reloaded without a
+ * rebuild or a bridge restart: `BRIDGE_WEB_DEV=1` re-reads it per request. The two
+ * candidate paths are deliberate — in development this module runs from `src/`
+ * (tsx) and the page sits beside it; in production it runs from `dist/` while the
+ * repository, and therefore the page, is still checked out one directory up. Same
+ * file either way, so there is no copy to drift.
  */
-/**
- * Resolve an API path against this page's own directory.
- *
- * The page may be served at /web, /pi/web or /pi/web/, depending on the reverse
- * proxy, so no URL here is absolute. 'api/...' from a page at /pi/web resolves
- * to /pi/api/... which is wrong -- hence the explicit base of the directory the
- * page was served *from*, normalised to end in '/'.
- */
-function rel(path) {
-  const here = location.pathname.replace(/[^/]*$/, '');
-  return here + path;
-}
+const PAGE_CANDIDATES = [
+  new URL("./web/page.html", import.meta.url),
+  new URL("../../src/adapter/web/page.html", import.meta.url),
+];
 
-// State for the single open conversation. Declared here because the functions
-// below assign them: without these the first click threw
-// "ReferenceError: source is not defined" and the pane stayed blank.
-let current;
-let source;
-const log = document.getElementById('log');
-const tool = document.getElementById('tool');
-
-function open(id) {
-  if (source) source.close();
-  current = id;
-  log.textContent = '';
-  tool.textContent = '';
-  source = new EventSource(rel('api/c/' + id + '/events'));
-  source.addEventListener('text', (e) => {
-    const d = JSON.parse(e.data);
-    log.textContent = d.text;
-    log.scrollTop = log.scrollHeight;
-  });
-  source.addEventListener('tool', (e) => {
-    const d = JSON.parse(e.data);
-    tool.textContent = d ? d.name + ' · ' + d.status : '';
-  });
-  source.addEventListener('error', () => {
-    // EventSource reconnects by itself; show it so a restart is visible not mysterious.
-    tool.textContent = 'reconnecting…';
-  });
-}
-
-async function load() {
-  const rows = await (await fetch(rel('api/conversations'))).json();
-  const list = document.getElementById('list');
-  list.innerHTML = '';
-  for (const row of rows) {
-    const li = document.createElement('li');
-    li.innerHTML = '<span></span><small></small>';
-    li.firstChild.textContent = row.name || row.chatKey;
-    li.lastChild.textContent = '#' + row.conversationId + ' · ' + row.model;
-    li.onclick = () => {
-      [...list.children].forEach((c) => c.classList.remove('on'));
-      li.classList.add('on');
-      open(row.conversationId);
-    };
-    list.append(li);
+function readPage(): string {
+  const failures: string[] = [];
+  for (const candidate of PAGE_CANDIDATES) {
+    try {
+      return fs.readFileSync(candidate, "utf8");
+    } catch (error) {
+      failures.push(`${candidate.pathname}: ${(error as Error).message}`);
+    }
   }
-  if (rows.length && !current) list.firstChild.click();
+  throw new Error(`web page not found — tried ${failures.join(", ")}`);
 }
 
-document.getElementById('send').onsubmit = async (e) => {
-  e.preventDefault();
-  const box = document.getElementById('text');
-  const text = box.value.trim();
-  if (!text || !current) return;
-  box.value = '';
-  await fetch(rel('api/c/' + current + '/message'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text }),
-  });
-};
+/** The page as of process start. */
+export const WEB_PAGE = readPage();
 
-// A page served at ".../web" (no trailing slash) resolves relative paths one
-// level too high. Normalise once, preserving any query string.
-if (!location.pathname.endsWith('/')) {
-  location.replace(location.pathname + '/' + location.search);
-} else {
-  load();
-  setInterval(load, 30000);
+/**
+ * The page for one request.
+ *
+ * With `BRIDGE_WEB_DEV=1` the file is read every time, so editing the HTML and
+ * reloading the browser is the whole iteration loop. Production keeps the
+ * startup copy: one read, and the page cannot change under a running bridge
+ * because a file on disk changed.
+ */
+export function webPage(): string {
+  return process.env.BRIDGE_WEB_DEV === "1" ? readPage() : WEB_PAGE;
 }
-</script>
-</body>
-</html>`;
