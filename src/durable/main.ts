@@ -115,13 +115,21 @@ async function main(): Promise<void> {
             return;
           }
           // A proxy that mounts us at /pi/ and strips the prefix asks for "/".
-          // Serve the app there, because a browser following a bookmark to the
-          // mount root should land on the app, not on a bare "ok". Health checks
-          // use /healthz, so nothing is lost. A HEAD probe gets the page's
-          // headers too, which is how some proxies smoke-test an upstream.
-          if (req.method === "GET" && (url.pathname === "/" || url.pathname === "")) {
-            res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-            res.end(webPage());
+          // Redirect to the app rather than serving it here: the page resolves
+          // every URL relative to its own directory, so serving it at "/" made
+          // it request "/api/conversations" — a 404 — and the conversation list
+          // came up empty on exactly the URL a bookmark would use. One canonical
+          // URL for the app, and relative paths work again.
+          //
+          // Health checks use /healthz, so nothing is lost, and a HEAD probe sees
+          // the same redirect.
+          if (
+            (req.method === "GET" || req.method === "HEAD") &&
+            (url.pathname === "/" || url.pathname === "")
+          ) {
+            const base = url.pathname.endsWith("/") ? url.pathname : `${url.pathname}/`;
+            res.writeHead(302, { Location: `${base}web/`, "Cache-Control": "no-store" });
+            res.end();
             return;
           }
           if (req.method === "POST" && url.pathname === "/notify") {
