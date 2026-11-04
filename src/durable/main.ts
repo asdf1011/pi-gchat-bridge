@@ -34,6 +34,10 @@ import { BridgeHost } from "./host.js";
 import { BridgeLockedError } from "./lock.js";
 import { handleDurableNotify } from "./notify.js";
 import { attachWebClient, webIndex, webPage, webSubmit } from "../adapter/web.js";
+import { startArtifactsServer } from "../adapter/artifacts-server.js";
+import { artifactRoots } from "./artifacts.js";
+import { SecretRegistry } from "./extensions/redact.js";
+import { secretsFromEnvironment } from "./extensions/secret-redactor.js";
 import { applyDurableTopicSummary } from "./topic.js";
 import { identify } from "./identity.js";
 import { failureNotice } from "./failure-notice.js";
@@ -271,8 +275,39 @@ async function main(): Promise<void> {
     });
   }
 
-
-
+  // --- The artifact origin: a second listener, GET-only, on its own port. ---
+  //
+  // Separate from the server above on purpose. What is registered there is a
+  // read-only route table, so no request on this port — however malformed — can
+  // reach `/web/api/.../message` or any other mutating route. The tunnel maps a
+  // different hostname onto this port, which is what makes the capability split
+  // a fact of the deployment instead of a header check.
+  //
+  // Off unless `BRIDGE_ARTIFACTS_PORT` is set: a bridge that serves Chat needs no
+  // artifact origin, and a listener nobody asked for is just another port to
+  // wonder about.
+  const artifactsPort = Number(process.env.BRIDGE_ARTIFACTS_PORT ?? 0);
+  let artifactsServer: http.Server | undefined;
+  if (artifactsPort > 0) {
+    // Resolved per request, exactly as the harness resolves its registry per
+    // call: `/secret set` must take effect in a running bridge, and this viewer
+    // reads files the harness never sees, so it needs its own redaction pass.
+    const redactArtifact = (text: string): string => {
+      const stored = secrets.registrySecrets();
+      const names = new Set(stored.map((secret) => secret.name));
+      return new SecretRegistry([
+        ...stored,
+        ...secretsFromEnvironment().filter((secret) => !names.has(secret.name)),
+      ]).redact(text);
+    };
+    artifactsServer = await startArtifactsServer({
+      host,
+      port: artifactsPort,
+      bind: config.bindAddress,
+      roots: artifactRoots(config.cwd, getAgentDir()),
+      redact: redactArtifact,
+    });
+  }
 
   // --- One Chat message → one durable submission → one Chat reply. ---
   const handler = async (incoming: IncomingMessage): Promise<import("../receiver.js").HandleResult> => {
@@ -464,6 +499,7 @@ async function main(): Promise<void> {
   const shutdown = async (): Promise<void> => {
     logger.info("[bridge] shutting down...");
     await receiver.stop();
+    artifactsServer?.close();
     // Closing the harness waits for running task code to return and leaves the
     // store consistent; anything unfinished resumes on the next start.
     await host.close().catch(() => {});
