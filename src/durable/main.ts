@@ -38,6 +38,7 @@ import { identify } from "./identity.js";
 import { failureNotice } from "./failure-notice.js";
 import { claimAnswer, releaseAnswer } from "./posted-doc.js";
 import { AgentRouter } from "../agent-sessions.js";
+import { NullReceiver } from "../receiver.js";
 import { SecretStore } from "../secret-store.js";
 
 /**
@@ -441,13 +442,20 @@ async function main(): Promise<void> {
     }
   };
 
-  const receiver: MessageReceiver = new PubSubReceiver(
-    config.serviceAccountPath,
-    config.pubsubSubscription,
-    state,
-    config.allowedSpaces,
-    config.allowedUsers,
-  );
+  // `RECEIVER=none` runs the bridge for `/web` only — no Pub/Sub, no service
+  // account, no Chat app. It exists because `PubSubReceiver.start()` refuses to
+  // start without a subscription, so a web-only deployment (and the browser
+  // tests) would otherwise exit immediately.
+  const receiver: MessageReceiver =
+    process.env.RECEIVER === "none"
+      ? new NullReceiver()
+      : new PubSubReceiver(
+          config.serviceAccountPath,
+          config.pubsubSubscription,
+          state,
+          config.allowedSpaces,
+          config.allowedUsers,
+        );
 
   const shutdown = async (): Promise<void> => {
     logger.info("[bridge] shutting down...");

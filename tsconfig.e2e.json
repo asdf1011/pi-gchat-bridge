@@ -1,0 +1,17 @@
+{
+  // The e2e specs and config are not part of the build (tsconfig.json includes
+  // only src, and rootDir is src), but they still deserve typechecking: a typo in
+  // a Playwright matcher is otherwise a runtime surprise.
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "types": ["node"]
+  },
+  "include": ["e2e/**/*.ts", "playwright.config.ts"]
+}

@@ -23,3 +23,7 @@ bridge.sqlite.lock
 # Legacy session backups taken before the 1.4.0 upgrade and the cutover.
 sessions.pre-1.4.0/
 backups/
+
+# Playwright
+test-results/
+playwright-report/
