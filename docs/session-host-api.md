@@ -1,7 +1,7 @@
 # The session-host seam: `SessionHostApi`
 
 Status: proposal, not started. Builds on [migration-to-durable.md](migration-to-durable.md); changes
-none of its decisions.
+none of its decisions. Partly validated by the artifact origin, which shipped first — see below.
 
 ## Why
 
@@ -20,6 +20,26 @@ no chord types in it, so that all of these become transport choices instead of r
 
 Success criterion, checkable by a test: `grep -r "@earendil-works/pi-durable" src/adapter/` finds
 nothing, and `grep -r "host.harness" src/adapter/` finds nothing.
+
+## What the artifact origin already validated
+
+`docs/artifacts.md` shipped a second HTTP surface *inside the same process*: a separate listener on
+its own port, its own hostname, and a route table that contains only reads. It is the smallest
+possible version of this proposal, and it produced three pieces of evidence rather than argument.
+
+**Capability separation by route table is cheap and real.** The artifact host cannot reach
+`/web/api/.../message` because no such route is registered there — not because a header check said
+so. That cost one `http.createServer` call.
+
+**The seam's primitive is already shared by two consumers.** The artifact index needed a
+conversation lookup, a `viewState()` snapshot, and `dispose()`. That is `attach` minus the
+subscription — so `snapshot(conversationId)` is the primitive both the web pane and the artifact
+index want, and neither wants anything else.
+
+**But the coupling grew.** Adapters and Chat-side helpers now reach through `host.*` 67 times across
+five files, and five files in `src/adapter/` import pi-durable or chord types (was four). Every new
+surface re-derives the same handful of operations, which is the argument for building the seam
+before a sixth appears.
 
 ## Responsibilities
 
@@ -82,7 +102,8 @@ binding record, minus its storage representation.
 
 | Op | Replaces | Missing today |
 |---|---|---|
-| `attach(conversationId, sink) → ViewHandle` | `conversation.viewState()` (9 sites) + `projectView()` called in each adapter | Projection must move host-side (D3), or every adapter keeps a pi-durable type |
+| `snapshot(conversationId) → { view, entries }` | `conversation.viewState()`'s snapshot half (5 sites in adapters, 10 in `src/`), and the raw `entries` the artifact index walks | Entries must arrive as plain data, or `deriveArtifacts` keeps a pi-durable type (D11) |
+| `attach(conversationId, sink) → ViewHandle` | `conversation.viewState()`'s subscribe half + `projectView()` called in each adapter | Projection must move host-side (D3), or every adapter keeps a pi-durable type |
 | `status(conversationId) → ConversationStatus` | `queries.conversationStatus()` / the `/model` card: `conversation.agent()` + `viewState()` + usage, assembled in the adapter | Assembling "what `/status` shows" is host knowledge |
 
 `attach` is snapshot-first and then frames, exactly as `viewState().subscribe()` is today. Frames are
@@ -120,7 +141,7 @@ importing `defineDoc` and calling `harness.commit()`. The host should expose it 
   an adapter can tell "the host restarted, re-attach" from "the stream went quiet". In-process this
   is nearly free; over a socket it is the difference between a reconnect and a mystery.
 
-That is 24 operations, counted one per row above. Earlier I estimated "12–14"; the measured surface
+That is 25 operations, counted one per row above. Earlier I estimated "12–14"; the measured surface
 says otherwise — most of the extra is the adapter-owned durable state at the bottom, which is not
 "conversation" work but has to live somewhere both sides agree on.
 
@@ -172,6 +193,11 @@ left. Everything durable — the turn, the projection, the answer, the redactor 
 - **D10 — sinks are non-blocking.** A Chat PATCH that takes 300 ms must not delay a commit. Today that
   is free (in-process, sync callback); over a socket it needs a bounded per-sink queue with
   drop-oldest, safe because every frame is a whole snapshot.
+- **D11 — the seam carries entries, not derived artifacts.** `snapshot()` returns the projection
+  *and* the entries as plain data; `deriveArtifacts()` stays in the adapter. Putting artifact
+  derivation behind the seam would make every future view of "what did this conversation touch" go
+  through the host, and give the host a presentation concern. The alternative it must not take: an
+  `artifacts()` op, which would also have to own Markdown rendering's contract.
 
 ## Migration steps
 
@@ -180,9 +206,10 @@ place until the last adapter is ported; the seam is additive.
 
 - **S0 — the seam exists.** `src/session-host/api.ts` (types only) and `src/session-host/inprocess.ts`
   (implements it over `BridgeHost`). No adapter changes. Exit: typecheck clean, no behaviour change.
-- **S1 — port the web adapter.** `list`, `attach`, `submit`. Exit: `src/adapter/web.ts` imports
-  nothing from pi-durable or chord, and `test/web-page-dom.test.ts` can run against a fake host with
-  no SQLite. Smallest surface, so it proves the shape cheaply.
+- **S1 — port the read-only adapters: web and artifacts.** `list`, `snapshot`, `attach`, `submit`.
+  Exit: neither `web.ts` nor `artifacts-server.ts` imports pi-durable or chord, and
+  `test/artifacts-server.test.ts` runs against a fake host with no SQLite. Two small consumers, so
+  the shape is proved twice before it is applied to the Chat path.
 - **S2 — port `queries.ts`.** Kills the 14 `host.modelRuntime` reach-throughs and the 9 `viewState`
   ones; `ModelInfo`/`ConversationStatus` become plain data.
 - **S3 — port `router.ts` and the `main.ts` turn path.** `submit` / `await` / `abort` / `write`; the
@@ -217,26 +244,37 @@ place until the last adapter is ported; the seam is additive.
 
 ## Appendix: measured coupling
 
-`host.*` reach-throughs by file — the list the seam has to eliminate:
+`host.*` reach-throughs by file — the list the seam has to eliminate. The first block is the
+adapters themselves; the second is Chat-side code that will move behind an adapter (`notify`,
+`topic`, `posted-doc`) or stays host wiring (`main`).
 
 ```
-src/adapter/queries.ts      26
-src/adapter/commands.ts     24
-src/durable/notify.ts        9
-src/adapter/router.ts        7
-src/adapter/web.ts           7
-src/durable/posted-doc.ts    6
-src/durable/main.ts          4
-src/durable/topic.ts         4
+src/adapter/queries.ts       26
+src/adapter/commands.ts      24
+src/adapter/web.ts            7
+src/adapter/router.ts         7
+src/adapter/artifacts-server.ts 2
+----                     ----
+adapters                     66
+
+src/durable/notify.ts         9
+src/durable/posted-doc.ts     6
+src/durable/main.ts           4
+src/durable/topic.ts          4
 ```
 
-By symbol: `host.context` 47, `host.harness` 21, `host.bindingFor` 16, `host.modelRuntime` 14,
+By symbol: `host.context` 48, `host.harness` 22, `host.bindingFor` 16, `host.modelRuntime` 14,
 `host.conversationFor` 9, `host.cwdPath` 8, `host.close` 6, `host.bindings` 3, `host.dbPath` 1.
 
-Conversation methods reached from outside `host.ts`: `viewState` 9, `submit` 7, `commit` 3,
-`reset` 2, `configure` 2, `agent` 2, `compact` 1, `abort` 1.
+Conversation methods reached from outside `host.ts`: `viewState` 10, `submit` 7, `commit` 3,
+`reset` 2, `configure` 2, `agent` 2, `compact` 1, `abort` 1 — plus `opened.subscribe` twice and
+`opened.dispose` three times, which is the attach/dispose lifecycle the seam formalises.
 
-Library imports currently inside `src/adapter/`: `pi-durable` in `queries.ts`, `router.ts`,
-`view-sink.ts`, `web.ts`; `chord` in `router.ts`, `view-sink.ts`, `web.ts`. `projection.ts` is
+Library imports inside `src/adapter/`: `pi-durable` in `queries.ts`, `router.ts`, `view-sink.ts`,
+`web.ts`, `artifacts-server.ts`; `chord` in `router.ts`, `view-sink.ts`, `web.ts`. `projection.ts` is
 library-free already, and `commands.ts` reaches for `pi-coding-agent` only for `SettingsManager` and
-`getAgentDir` — the seam is mostly a formalisation of what those two files already do.
+`getAgentDir`.
+
+`artifacts-server.ts` is the newest and smallest: two reach-throughs, both `host.harness` +
+`host.context`, to take one snapshot. It is also the clearest case for `snapshot()` existing — two
+lines of adapter code stand in for an operation the seam should name.
