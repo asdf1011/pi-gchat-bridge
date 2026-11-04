@@ -36,6 +36,7 @@ import { attachWebClient, webIndex, webSubmit, WEB_PAGE } from "../adapter/web.j
 import { applyDurableTopicSummary } from "./topic.js";
 import { identify } from "./identity.js";
 import { failureNotice } from "./failure-notice.js";
+import { claimAnswer, releaseAnswer } from "./posted-doc.js";
 import { AgentRouter } from "../agent-sessions.js";
 import { SecretStore } from "../secret-store.js";
 
@@ -380,7 +381,35 @@ async function main(): Promise<void> {
         return "ok";
       }
 
-      await stream.finish(final);
+      // One answer, one Chat message. A single run can answer several Chat
+      // messages — a message that arrives mid-run is a steer and joins the run,
+      // and messages queued behind a stuck tool are all answered when it
+      // finishes. Every one of those submissions settles with the SAME answer
+      // entry, so posting here per submission is what produced the duplicate
+      // replies (four queued messages → four identical 2533-char posts).
+      //
+      // The claim is on the answer, not on the message: `requestId` dedupe is
+      // already correct and cannot see this, because those really are different
+      // Chat messages. It is durable, so a redelivery after a crash (posted,
+      // then died before acking) does not post the same answer twice either.
+      const answerKey = Number(answerId);
+      if (!(await claimAnswer(host, chatKey, answerKey))) {
+        logger.info(
+          `[chat] ${display}: answer ${answerKey} already delivered in this thread — not posting it again ` +
+            `(conversation=${bound.binding.conversationId})`,
+        );
+        await stream.abandon();
+        return "ok";
+      }
+      try {
+        await stream.finish(final);
+      } catch (error) {
+        // The reply was not delivered after all: hand the claim back so another
+        // handler for this answer (or a Pub/Sub redelivery) still delivers it.
+        // Losing a reply is worse than posting one twice.
+        await releaseAnswer(host, chatKey, answerKey).catch(() => {});
+        throw error;
+      }
 
       // Detached: a CPU titler can take minutes, and the reply is already
       // delivered. Only fires when /model left a pending card for this thread,

@@ -81,7 +81,10 @@ the same conversations are visible at `/web`.
   current tool call finishes and before the next model call, so pi keeps its
   tool loop active and addresses your new message alongside the original work.
   Commands (`/help`, `/model`, `/settings`, `/resume`) instead interrupt the
-  running reply.
+  running reply. Because a steer joins the run, **a run that answers three
+  messages posts one reply, not three** — the post is claimed per *answer* in
+  the `gchat.posted-answers` document, so a queued message can never make the
+  same reply appear twice.
 - **pi extensions & skills work** — the session loads your `~/.pi/agent`
   extensions, so `/commands` and skills behave like in the TUI.
 - **Images & text** — pasted (or uploaded) images are downloaded and passed to

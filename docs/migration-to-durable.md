@@ -459,6 +459,22 @@ conversation, post only on a YES verdict). It maps to a `conversation` that is c
 to a Chat thread; the verdict itself can be a `cron_notify` write. Deferred to the wiring step rather
 than guessed at here.
 
+### M4, corrected in production: dedupe stops at the transcript
+
+The M4 exit line — "duplicate Pub/Sub redelivery produces one answer" — was true and not enough.
+`requestId` dedupe guarantees one *run* per Chat message. It says nothing about the number of Chat
+*posts* per run, and on the durable engine a run answers every message that joined it: submissions
+8674 and 8709 both settled with `answer: 8742`, and four messages queued behind a tool that hung for
+four hours (8447, 8471, 8472, 8708) all settled with `answer: 8789`. The bridge posted `settled.answer`
+once per submission, so that one reply appeared four times verbatim in the thread.
+
+The fix is a claim on the *answer*, not the message (`src/durable/posted-doc.ts`): the
+`gchat.posted-answers` document records the last `EntryId` delivered to each Chat key, and
+`claimAnswer()` is taken inside one commit, so exactly one of the waking handlers posts. It also
+covers the crash-after-post-before-ack redelivery, which had the same symptom. The general lesson is
+the one from the supervisor bug: platform dedupe protects the *transcript*, and the last inch — the
+thing you actually see — needs its own guard.
+
 ## M5 results (part 2: the command layer) — M5 complete
 
 `src/adapter/queries.ts` — the facts the command cards are fed by, on top of pi-durable. The command
