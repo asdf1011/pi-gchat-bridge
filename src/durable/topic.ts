@@ -24,7 +24,7 @@ import {
   TOPIC_SYSTEM_PROMPT,
   type TopicSummaryConfig,
 } from "../topic-summary.js";
-import { projectView, type ViewLike } from "../adapter/projection.js";
+import { projectView, type ViewLike } from "../session-host/projection.js";
 import type { BridgeHost } from "./host.js";
 
 /** First user and assistant text in a conversation, for a title prompt. */

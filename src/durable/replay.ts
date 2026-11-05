@@ -23,7 +23,7 @@ import { getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
 
 import { AssistantEntry } from "@earendil-works/pi-durable";
 
-import { projectView, type ViewLike } from "../adapter/projection.js";
+import { projectView, type ViewLike } from "../session-host/projection.js";
 import { defaultSettings } from "../adapter/commands.js";
 import { BridgeHost } from "./host.js";
 

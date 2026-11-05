@@ -23,7 +23,7 @@ import fs from "node:fs";
 import type { Context } from "@earendil-works/chord";
 import type { ConversationId } from "@earendil-works/pi-durable";
 
-import { projectView, type ViewLike } from "./projection.js";
+import { projectView, type ViewLike } from "../session-host/projection.js";
 import type { BridgeHost } from "../durable/host.js";
 import { logger } from "../logger.js";
 

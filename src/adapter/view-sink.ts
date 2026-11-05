@@ -16,7 +16,7 @@
 import type { Context } from "@earendil-works/chord";
 import type { Conversation } from "@earendil-works/pi-durable";
 
-import { activeTool, projectView, type ProjectedView, type ViewLike } from "./projection.js";
+import { activeTool, projectView, type ProjectedView, type ViewLike } from "../session-host/projection.js";
 
 /** The slice of `ReplyStream` the sink drives. Structural, so tests need no Chat client. */
 export interface StreamTarget {

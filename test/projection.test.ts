@@ -15,7 +15,7 @@ import {
   projectView,
   toolCallsOf,
   type EntryLike,
-} from "../src/adapter/projection.js";
+} from "../src/session-host/projection.js";
 
 const assistant = (text: string, toolCalls: { id: string; name: string; arguments: unknown }[] = []): EntryLike => ({
   kind: "pi.assistant",
