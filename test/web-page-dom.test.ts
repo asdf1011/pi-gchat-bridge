@@ -130,6 +130,11 @@ async function loadPage(
           // The paged shape, which is what the index and the sidebar read.
           return { ok: true, status: 200, json: async () => ({ items: conversations, more: false }) };
         }
+        const one = /\/api\/c\/(\d+)$/.exec(url);
+        if (one) {
+          const found = conversations.find((c) => c.conversationId === Number(one[1]));
+          return { ok: Boolean(found), status: found ? 200 : 404, json: async () => found ?? {} };
+        }
         if (url.includes("/history")) {
           return { ok: true, status: 200, json: async () => options.history ?? [] };
         }
@@ -183,7 +188,7 @@ function rows(h: Harness): HTMLElement[] {
 
 // --- Loading -----------------------------------------------------------------
 
-test("the sidebar lists recent conversations and marks the open one", async () => {
+test("a conversation page shows the conversation, not a list of them", async () => {
   let h: Harness | undefined;
   try {
     h = await loadPage({
@@ -193,16 +198,13 @@ test("the sidebar lists recent conversations and marks the open one", async () =
       ],
     });
     assert.deepEqual(h.errors, []);
-    const list = rows(h);
-    assert.equal(list.length, 2);
-    // A named conversation shows its name; an unnamed one falls back to the key.
-    assert.equal(list[0]?.querySelector("span")?.textContent, "deploy notes");
-    assert.equal(list[1]?.querySelector("span")?.textContent, "spaces/A/threads/T2");
-    // The second line carries the id and model.
-    assert.equal(list[0]?.querySelector("small")?.textContent, "#7 · deepseek/deepseek-flash");
-    // The open conversation is the one in the URL.
-    assert.equal(list[0]?.classList.contains("on"), true);
-    assert.equal(list[1]?.classList.contains("on"), false);
+    const doc = h.dom.window.document;
+    // No sidebar: one page, one conversation.
+    assert.equal(doc.getElementById("list"), null, "the conversation list must be gone");
+    assert.equal(doc.getElementById("app")!.hidden, false);
+    // The header names it, and offers the way back to the index.
+    assert.equal(doc.getElementById("conv-title")!.textContent, "deploy notes");
+    assert.equal(doc.getElementById("back")!.getAttribute("href"), "/");
   } finally {
     h?.close();
   }
@@ -235,8 +237,11 @@ test("the conversation in the URL is the one opened", async () => {
     assert.deepEqual(h.errors, []);
     assert.equal(h.sources.length, 1);
     assert.match(h.sources[0]!.url, /api\/c\/9\/events$/);
-    assert.equal(rows(h)[1]?.classList.contains("on"), true);
-    assert.equal(rows(h)[0]?.classList.contains("on"), false);
+    // The header names the conversation the URL asked for, not the newest one.
+    // This fixture has no title, so the key is the name — the point is that it is
+    // k2's, not k1's.
+    const title = h.dom.window.document.getElementById("conv-title")!.textContent ?? "";
+    assert.equal(title, "k2");
   } finally {
     h?.close();
   }
@@ -331,26 +336,6 @@ test("a stream error says reconnecting rather than going blank", async () => {
   }
 });
 
-test("clicking another conversation navigates instead of swapping in place", async () => {
-  let h: Harness | undefined;
-  try {
-    // Each conversation has its own URL now, so switching is a navigation: jsdom
-    // does not implement navigation, and the jsdomError it emits is the proof the
-    // click asked for one. (Playwright covers what actually happens.)
-    h = await loadPage({ conversations: [{ conversationId: 7, chatKey: "k1", model: "m" }] });
-    h.dom.window.document.getElementById("list")!.innerHTML = "";
-    const item = h.dom.window.document.createElement("li");
-    h.dom.window.document.getElementById("list")!.append(item);
-
-    // Row 0 is the open one: clicking it does nothing.
-    const before = h.sources.length;
-    rows(h)[0]?.click();
-    assert.equal(h.sources.length, before, "clicking the open conversation must not reload it");
-  } finally {
-    h?.close();
-  }
-});
-
 // --- Sending -----------------------------------------------------------------
 
 test("submitting posts the text to the open conversation", async () => {
@@ -419,7 +404,7 @@ test("API paths resolve under a reverse-proxy prefix", async () => {
     // The mount root, not the document's own directory: a conversation lives at
     // /pi/7/, so its API calls must still be /pi/api/... and not /pi/7/api/...
     for (const url of urls) assert.ok(url.startsWith("/pi/api/"), url);
-    assert.ok(urls.some((url) => url.startsWith("/pi/api/conversations")), urls.join(", "));
+    assert.ok(urls.includes("/pi/api/c/7"), urls.join(", "));
     assert.ok(urls.includes("/pi/api/environment"), urls.join(", "));
     // The stream is an EventSource, not a fetch, so it is checked where it lives.
     assert.match(h.sources[0]!.url, /^\/pi\/api\/c\/7\/events$/);

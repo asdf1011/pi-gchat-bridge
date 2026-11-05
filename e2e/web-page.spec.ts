@@ -97,6 +97,15 @@ async function stubApi(
     }),
   );
 
+  // The page's own heading: one conversation's name.
+  await page.route("**/api/c/*", (route) => {
+    const id = Number(/\/api\/c\/(\d+)$/.exec(new URL(route.request().url()).pathname)?.[1] ?? 0);
+    const found = conversations.find((conversation) => conversation.conversationId === id);
+    return found
+      ? route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(found) })
+      : route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ ok: false }) });
+  });
+
   await page.route("**/api/c/*/history", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(options.history ?? []) }),
   );
@@ -107,16 +116,15 @@ async function stubApi(
   });
 }
 
-test("the page loads and lists conversations with no console errors", async ({ page }) => {
+test("a conversation page shows that conversation, with no list beside it", async ({ page }) => {
   const errors = watchErrors(page);
   await stubApi(page);
   await page.goto("/7/");
 
-  await expect(page.locator("#list li")).toHaveCount(2);
-  await expect(page.locator("#list li").first()).toContainText("deploy notes");
-  await expect(page.locator("#list li").first()).toContainText("#7 · deepseek/deepseek-flash");
-  // The unnamed one falls back to its key.
-  await expect(page.locator("#list li").nth(1)).toContainText("spaces/A/threads/T2");
+  // One page per conversation: the header names it and offers the way back.
+  await expect(page.locator("#conv-title")).toHaveText("deploy notes");
+  await expect(page.locator("#back")).toHaveAttribute("href", "/");
+  await expect(page.locator("#list")).toHaveCount(0);
 
   expect(errors, `console errors: ${errors.join(" | ")}`).toEqual([]);
 });
@@ -131,7 +139,7 @@ test("the conversation in the URL is opened and streamed", async ({ page }) => {
   // /9/ is the *second* conversation in the fixture: the URL decides, not order.
   await page.goto("/9/");
 
-  await expect(page.locator("#list li").nth(1)).toHaveClass(/on/);
+  await expect(page.locator("#conv-title")).toHaveText("spaces/A/threads/T2");
   await expect(page.locator("#log .bubble")).toHaveText("streamed at load");
   expect(requests.some((u) => /\/api\/c\/9\/events$/.test(u))).toBe(true);
   expect(errors).toEqual([]);
@@ -169,29 +177,12 @@ test("tool frames arrive, and a closed stream reads as reconnecting", async ({ p
   expect(errors).toEqual([]);
 });
 
-test("switching conversation points the stream at the new id", async ({ page }) => {
-  const errors = watchErrors(page);
-  const eventUrls: string[] = [];
-  page.on("request", (req) => {
-    if (req.url().includes("/events")) eventUrls.push(req.url());
-  });
-  await stubApi(page);
-  await page.goto("/7/");
-  await expect(page.locator("#list li")).toHaveCount(2);
-
-  await page.locator("#list li").nth(1).click();
-  await expect(page.locator("#list li").nth(1)).toHaveClass(/on/);
-  await expect(page.locator("#list li").first()).not.toHaveClass(/on/);
-  await expect.poll(() => eventUrls.some((u) => /\/api\/c\/9\/events$/.test(u))).toBe(true);
-  expect(errors).toEqual([]);
-});
-
 test("sending a message posts the trimmed text and clears the box", async ({ page }) => {
   const errors = watchErrors(page);
   const posted: unknown[] = [];
   await stubApi(page, { onPost: (body) => posted.push(body) });
   await page.goto("/7/");
-  await expect(page.locator("#list li")).toHaveCount(2);
+  await expect(page.locator("#conv-title")).toHaveText("deploy notes");
 
   await page.locator("#text").fill("  hello from the browser  ");
   await page.locator("#send").evaluate((form) => (form as HTMLFormElement).requestSubmit());

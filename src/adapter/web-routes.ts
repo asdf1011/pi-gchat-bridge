@@ -233,6 +233,21 @@ export async function handleWebRequest(
     return true;
   }
 
+  // One conversation, for the page's own heading. Scanning the bindings is fine:
+  // they are one document, and this is asked once per page load.
+  const one = /^\/api\/c\/(\d+)$/.exec(api);
+  if (req.method === "GET" && one) {
+    const found = (await seam.list()).find((c) => c.conversationId === Number(one[1]));
+    if (!found) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: `no such conversation: ${one[1]}` }));
+      return true;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(toJson(found)));
+    return true;
+  }
+
   // "New chat": a conversation nobody has named yet, created from the default
   // model. The client navigates to /<id>/ afterwards.
   if (req.method === "POST" && api === "/api/conversations") {

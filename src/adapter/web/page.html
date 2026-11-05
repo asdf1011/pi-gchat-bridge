@@ -14,11 +14,23 @@
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
-  body { margin: 0; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; display: flex; height: 100vh; }
-  #list { width: 18rem; overflow: auto; border-right: 1px solid #8884; margin: 0; padding: 0; list-style: none; }
-  #list li { padding: .5rem .75rem; cursor: pointer; border-bottom: 1px solid #8882; }
-  #list li.on { background: #8882; }
-  #list small { display: block; opacity: .6; font-size: .78em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  body { margin: 0; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif;
+         display: flex; flex-direction: column; height: 100dvh; }
+  /* One page per conversation: no list beside it. The header carries the way back
+     and the conversation's name, which is all the context the pane needs. */
+  #app { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  #app[hidden] { display: none; }
+  #conv-header { display: flex; align-items: center; gap: .5rem; padding: .35rem .6rem;
+    border-bottom: 1px solid #8884; flex: none; }
+  #conv-header #back { text-decoration: none; color: inherit; font-size: 1.15rem;
+    padding: .3rem .5rem; border-radius: .5rem; line-height: 1; }
+  #conv-header #back:hover { background: #8882; }
+  #conv-title { flex: 1; min-width: 0; font-size: .92em; font-weight: 600;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* The artifacts toggle lives in the header on this page: a floating button would
+     sit on top of the Send button, which is exactly where a thumb lands. */
+  #artifacts-toggle { padding: .35rem .55rem; border-radius: .5rem; font-size: 1rem;
+    border: 1px solid #8886; background: #8883; cursor: pointer; }
   /* `min-height: 0` on both the pane and the log is what lets the conversation
      give up space when the composer grows. Without it a flex item refuses to
      shrink below its content, so the composer is pushed past the window instead
@@ -123,9 +135,6 @@
   #new-chat { position: fixed; right: 1rem; bottom: 1rem; z-index: 10;
     width: 2.75rem; height: 2.75rem; padding: 0; border-radius: 50%; font-size: 1.3rem;
     border: 1px solid #8886; background: var(--bubble-me); cursor: pointer; }
-  #artifacts-toggle { position: fixed; right: 1rem; bottom: 4.15rem; z-index: 10;
-    width: 2.75rem; height: 2.75rem; padding: 0; border-radius: 50%;
-    border: 1px solid #8886; background: #8883; font-size: 1.1rem; cursor: pointer; }
   #artifacts-toggle[hidden] { display: none; }
   #artifacts { position: fixed; top: 0; right: 0; bottom: 0; width: min(38rem, 92vw);
     z-index: 9; display: flex; flex-direction: column; background: Canvas;
@@ -141,6 +150,24 @@
   #artifact-list small { display: block; opacity: .6; font-size: .8em; }
   #artifact-frame { flex: 1; border: 0; width: 100%; background: #fff0; }
   #artifact-hint { padding: .5rem .75rem; font-size: .85em; opacity: .7; margin: 0; }
+  /* Phones: the index is the whole width, the pane keeps its padding, and the
+     drawer takes the screen rather than a strip of it. */
+  @media (max-width: 40rem) {
+    body { font-size: 16px; }               /* stops iOS zooming on focus */
+    #index { padding: 1rem .75rem 5rem; }
+    #index h1 { font-size: 1rem; }
+    #index-list li { padding: .7rem .25rem; }
+    #log { padding: .6rem .5rem; }
+    #log .msg > .col { max-width: 92%; }
+    #log .msg { gap: .4rem; }
+    #pane { min-height: 0; }
+    form { padding: .5rem; gap: .4rem; }
+    textarea { min-height: 3rem; padding: .55rem .7rem; }
+    button { padding: .55rem .85rem; }
+    #attachments img { height: 3.2rem; }
+    #artifacts { width: 100vw; border-left: 0; }
+    #new-chat { right: .75rem; bottom: .75rem; }
+  }
 </style>
 </head>
 <body>
@@ -153,15 +180,21 @@
     <button id="index-older" type="button">Older</button>
   </nav>
 </section>
-<ul id="list"></ul>
-<div id="pane">
+<div id="app" hidden>
+  <header id="conv-header">
+    <a id="back" href="./" title="All conversations" aria-label="All conversations">←</a>
+    <span id="conv-title"></span>
+    <button id="artifacts-toggle" title="Files this conversation wrote" hidden aria-label="Artifacts">🗂</button>
+  </header>
+  <div id="pane">
   <p id="log"></p>
   <div id="tool"></div>
-  <div id="attachments" hidden></div>
-  <form id="send">
-    <textarea id="text" placeholder="Message this conversation — same one Chat is in"></textarea>
-    <button>Send</button>
-  </form>
+    <div id="attachments" hidden></div>
+    <form id="send">
+      <textarea id="text" placeholder="Message this conversation — same one Chat is in"></textarea>
+      <button>Send</button>
+    </form>
+  </div>
 </div>
 <button id="new-chat" title="Start a new conversation" aria-label="New chat">＋</button>
 <button id="artifacts-toggle" title="Files this conversation wrote" hidden aria-label="Artifacts">🗂</button>
@@ -493,29 +526,21 @@ function open(id) {
 }
 
 /**
- * The sidebar, in conversation mode: enough context to switch threads without
- * going back to the index. Clicking one navigates, because the URL is the state.
+ * The conversation's own name, for the header.
+ *
+ * A title if it has one, else its opening words — the same rule the index uses, so
+ * a conversation is called the same thing wherever it appears.
  */
-async function loadSidebar() {
-  let rows = [];
+async function loadTitle() {
+  const heading = document.getElementById('conv-title');
+  heading.textContent = '#' + current;
   try {
-    rows = (await (await fetch(rel('api/conversations?limit=30'))).json()).items || [];
+    const conversation = await (await fetch(rel('api/c/' + current))).json();
+    if (conversation && (conversation.name || conversation.chatKey)) {
+      heading.textContent = conversation.name || conversation.chatKey;
+    }
   } catch {
-    rows = [];
-  }
-  const list = document.getElementById('list');
-  list.innerHTML = '';
-  for (const row of rows) {
-    const li = document.createElement('li');
-    li.innerHTML = '<span></span><small></small>';
-    li.firstChild.textContent = row.name || row.chatKey;
-    li.lastChild.textContent = '#' + row.conversationId + ' · ' + row.model;
-    if (row.conversationId === current) li.classList.add('on');
-    li.onclick = () => {
-      if (row.conversationId === current) return;
-      location.href = mountRoot() + row.conversationId + '/';
-    };
-    list.append(li);
+    // The id is a fine fallback: the pane below is the thing being read.
   }
 }
 
@@ -799,16 +824,15 @@ document.getElementById('new-chat').onclick = async () => {
 const openId = conversationIdFromPath();
 if (openId === undefined) {
   document.getElementById('index').hidden = false;
-  document.getElementById('list').hidden = true;
-  document.getElementById('pane').hidden = true;
-  document.getElementById('artifacts-toggle').hidden = true;
+  document.getElementById('app').hidden = true;
   void loadIndex(0);
 } else {
   document.getElementById('index').hidden = true;
+  document.getElementById('app').hidden = false;
+  document.getElementById('back').href = mountRoot();
   current = openId;
-  void loadSidebar();
+  void loadTitle();
   open(openId);
-  setInterval(loadSidebar, 30000);
 }
 </script>
 </body>
