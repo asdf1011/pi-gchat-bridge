@@ -61,6 +61,8 @@ async function loadPage(
   options: {
     pathname?: string;
     conversations?: { conversationId: number; chatKey: string; model: string; name?: string }[];
+    /** Whether the fake server claims another page exists after this one. */
+    more?: boolean;
     /** Messages the fake host returns for one conversation's history. */
     history?: { role: string; text: string; at?: number; html: string; entryId?: number; images?: { mimeType: string }[] }[];
     /** Page version the fake server reports; a different value asks for a reload. */
@@ -128,7 +130,7 @@ async function loadPage(
         requests.push({ url, method: init?.method ?? "GET", ...(init?.body ? { body: init.body } : {}) });
         if (url.includes("api/conversations")) {
           // The paged shape, which is what the index and the sidebar read.
-          return { ok: true, status: 200, json: async () => ({ items: conversations, more: false }) };
+          return { ok: true, status: 200, json: async () => ({ items: conversations, more: options.more ?? false }) };
         }
         const one = /\/api\/c\/(\d+)$/.exec(url);
         if (one) {
@@ -268,6 +270,35 @@ test("the index lists conversations, and no stream is opened there", async () =>
   }
 });
 
+test("the index asks for a page, and offers Older only when there is one", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      pathname: "/",
+      conversations: [{ conversationId: 7, chatKey: "k1", model: "m", name: "a" }],
+      more: true,
+    });
+    assert.deepEqual(h.errors, []);
+    const doc = h.dom.window.document;
+    // It asks for a bounded page rather than everything: the whole point of the
+    // list on a phone is that it can end, and say so.
+    const asked = h.requests.find((request) => request.url.includes("api/conversations"));
+    assert.ok(asked, "the index asked for conversations");
+    assert.match(asked.url, /api\/conversations\?limit=\d+&offset=0$/);
+    const pager = doc.getElementById("index-pager")!;
+    assert.equal(pager.hidden, false, "more rows exist, so the pager is shown");
+    assert.equal((doc.getElementById("index-older") as HTMLButtonElement).disabled, false);
+    assert.equal((doc.getElementById("index-newer") as HTMLButtonElement).disabled, true);
+    assert.equal(doc.getElementById("index-range")!.textContent, "1–1");
+
+    (doc.getElementById("index-older") as HTMLButtonElement).click();
+    await h.settle();
+    assert.match(h.requests.at(-1)!.url, /offset=\d+$/);
+  } finally {
+    h?.close();
+  }
+});
+
 // --- Streaming ---------------------------------------------------------------
 
 test("a text frame paints the answer pane", async () => {
@@ -278,11 +309,13 @@ test("a text frame paints the answer pane", async () => {
     h.sources[0]!.emit("text", { text: "hello from the model", busy: true });
     // The pane labels each block, so assert on the live message's body: history
     // and the answer share #log, and the label is presentation.
-    // The pane is chat-shaped now: an avatar, a name line, and the bubble.
+    // The pane is chat-shaped now: a name line and the bubble.
     const live = log.querySelector(".msg.live")!;
     assert.equal(live.querySelector(".bubble")!.textContent, "hello from the model");
     assert.equal(live.querySelector(".meta .name")!.textContent, "pi");
-    assert.ok(live.querySelector(".avatar"), "pi has an avatar; you do not");
+    // No avatar disc: it cost a 1.9rem column on every row, which on a narrow
+    // screen is space the answer could be using.
+    assert.equal(live.querySelector(".avatar"), null, "the pi marker is gone");
     assert.equal(live.classList.contains("me"), false);
   } finally {
     h?.close();
@@ -431,11 +464,9 @@ test("history renders as chat rows: you on the right, pi on the left, with times
     assert.equal(chat.length, 2);
 
     assert.equal(chat[0].classList.contains("me"), true, "your message is the 'me' row");
-    assert.equal(chat[0].querySelector(".avatar"), null, "no avatar for you");
     assert.equal(chat[0].querySelector(".bubble")!.textContent, "hi");
 
     assert.equal(chat[1].classList.contains("pi"), true, "pi's message is the 'pi' row");
-    assert.ok(chat[1].querySelector(".avatar"), "pi has an avatar");
     assert.equal(chat[1].querySelector(".meta .name")!.textContent, "pi");
     assert.equal(chat[1].querySelector(".bubble")!.textContent, "hello");
 

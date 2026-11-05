@@ -425,6 +425,55 @@ test("the index lists recent conversations, pages, and starts a new chat", async
   expect(errors).toEqual([]);
 });
 
+test("the index pages: Older asks for the next slice, and shows the range", async ({ page }) => {
+  const errors = watchErrors(page);
+  const asked: string[] = [];
+  const rows = (offset: number, count: number) =>
+    Array.from({ length: count }, (_, index) => ({
+      conversationId: offset + index + 1,
+      chatKey: `web:${offset + index + 1}`,
+      model: "m",
+      name: `conversation ${offset + index + 1}`,
+      createdAt: Date.now() - (offset + index) * 60e3,
+      lastActivityAt: Date.now() - (offset + index) * 60e3,
+    }));
+
+  // Thirty-one conversations: a full first page and one more, which is the shape
+  // that made "the list stops at N" look like a truncation rather than a page.
+  await page.route("**/api/conversations*", (route) => {
+    const url = new URL(route.request().url());
+    asked.push(url.search);
+    const offset = Number(url.searchParams.get("offset") ?? 0);
+    const limit = Number(url.searchParams.get("limit") ?? 30);
+    const total = 31;
+    const items = rows(offset, Math.max(0, Math.min(limit, total - offset)));
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ items, more: offset + items.length < total, offset, limit }),
+    });
+  });
+  await page.goto("/");
+
+  const items = page.locator("#index-list li");
+  await expect(items).toHaveCount(30);
+  // The pager is visible on the first page, because there is more to see.
+  const pager = page.locator("#index-pager");
+  await expect(pager).toBeVisible();
+  await expect(page.locator("#index-range")).toHaveText("1–30");
+  await expect(page.locator("#index-newer")).toBeDisabled();
+
+  await page.locator("#index-older").click();
+  await expect(items).toHaveCount(1);
+  await expect(page.locator("#index-range")).toHaveText("31–31");
+  await expect(page.locator("#index-older")).toBeDisabled();
+  expect(asked.some((search) => search.includes("offset=30"))).toBe(true);
+
+  await page.locator("#index-newer").click();
+  await expect(items).toHaveCount(30);
+  expect(errors).toEqual([]);
+});
+
 test("the new chat button creates a conversation and opens it", async ({ page }) => {
   await stubApi(page);
   await page.goto("/");

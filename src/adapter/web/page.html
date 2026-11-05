@@ -56,17 +56,14 @@
      bubbles, so on a 1920px screen the exchange is still a conversation. */
   #log { flex: 1; overflow: auto; word-break: break-word; margin: 0; min-height: 0;
     padding: 1rem max(1rem, calc((100% - var(--content)) / 2)); }
-  /* Chat-shaped rows: the agent on the left with an avatar and a name, you on
-     the right with just a time. Bubbles cap their width so long answers stay
-     readable, and the colours follow the system scheme. */
+  /* Chat-shaped rows: the agent on the left with a name, you on the right with
+     just a time. Bubbles cap their width so long answers stay readable, and the
+     colours follow the system scheme. */
   :root { --bubble-pi: #f1f2f4; --bubble-me: #d6e4fd; --bubble-code: Canvas;
     --content: 54rem; }
   @media (prefers-color-scheme: dark) { :root { --bubble-pi: #2a2b2e; --bubble-me: #24405f; } }
   #log .msg { display: flex; gap: .55rem; margin: 0 0 .9rem; align-items: flex-start; }
   #log .msg.me { flex-direction: row-reverse; }
-  #log .avatar { flex: none; width: 1.9rem; height: 1.9rem; border-radius: 50%;
-    background: var(--bubble-pi); display: grid; place-items: center; font-size: .95rem; }
-  #log .msg.me .avatar { display: none; }
   #log .msg > .col { display: flex; flex-direction: column; min-width: 0; max-width: min(46rem, 86%); }
   #log .msg.me > .col { align-items: flex-end; }
   #log .meta { display: flex; gap: .4rem; align-items: baseline; margin: 0 0 .15rem .15rem;
@@ -141,7 +138,10 @@
     display: flex; gap: .75rem; align-items: baseline; }
   #index-list li:hover { background: #8881; }
   #index-list li .who { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #index-list li .when { flex: none; font-size: .8em; opacity: .6; }
+  /* A date, not a full timestamp: at phone width "Nov 2, 7:33 AM" is wide enough
+     to ellipsise every title to two words. The time is in the row's title. */
+  #index-list li .when { flex: none; font-size: .8em; opacity: .6; white-space: nowrap;
+    font-variant-numeric: tabular-nums; }
   #index-pager { display: flex; gap: .5rem; align-items: center; margin-top: 1rem;
     max-width: 46rem; font-size: .85em; opacity: .85; }
   #index-pager span { flex: 1; opacity: .7; }
@@ -210,6 +210,11 @@
     #index { padding: 1rem .75rem 5rem; }
     #index h1 { font-size: 1rem; }
     #index-list li { padding: .7rem .25rem; }
+    /* The pager is the only way to see past the first page, so on a phone it is
+       a full-width pair of buttons rather than small text at the foot of a list. */
+    #index-pager { margin-top: .75rem; }
+    #index-pager button { flex: 1; padding: .6rem .5rem; }
+    #index-pager span { flex: none; order: -1; opacity: .6; }
     #log { padding: .6rem .75rem; }
     #log .msg > .col { max-width: 92%; }
     #log .msg { gap: .4rem; }
@@ -385,8 +390,11 @@ function escapeText(text) {
  * A time as a chat shows one: the clock for today, "yesterday 3:13pm" before
  * that, and a date once it is older than that. The full timestamp is in the
  * element's title, so nothing is lost by being brief.
+ *
+ * `short` drops the clock from the date forms, for the index: a phone row has
+ * room for "Nov 2" or a title, not both. The time is still in the row's title.
  */
-function formatWhen(ms) {
+function formatWhen(ms, short) {
   const at = new Date(ms);
   if (Number.isNaN(at.getTime())) return '';
   const now = new Date();
@@ -398,21 +406,14 @@ function formatWhen(ms) {
   if (at.toDateString() === yesterday.toDateString()) return 'yesterday ' + time;
   const sameYear = at.getFullYear() === now.getFullYear();
   const date = at.toLocaleDateString([], sameYear ? { month: 'short', day: 'numeric' } : { year: 'numeric', month: 'short', day: 'numeric' });
-  return date + ' ' + time;
+  return short ? date : date + ' ' + time;
 }
 
-/** One chat row: avatar and name for pi, just a time for you. */
+/** One chat row: a name for pi, just a time for you. */
 function messageRow(role, html, at, live, images) {
   const me = role === 'user';
   const block = document.createElement('div');
   block.className = 'msg ' + (me ? 'me' : 'pi') + (live ? ' live' : '');
-
-  if (!me) {
-    const avatar = document.createElement('div');
-    avatar.className = 'avatar';
-    avatar.textContent = 'π';
-    block.append(avatar);
-  }
 
   const col = document.createElement('div');
   col.className = 'col';
@@ -992,8 +993,9 @@ async function loadIndex(offset) {
     const li = document.createElement('li');
     li.innerHTML = '<span class="who"></span><span class="when"></span>';
     li.firstChild.textContent = row.name || row.chatKey;
-    li.lastChild.textContent = formatWhen(row.lastActivityAt || row.createdAt);
-    li.title = '#' + row.conversationId + ' · ' + row.model;
+    const at = row.lastActivityAt || row.createdAt;
+    li.lastChild.textContent = formatWhen(at, true);
+    li.title = '#' + row.conversationId + ' · ' + row.model + (at ? ' · ' + formatWhen(at) : '');
     li.onclick = () => {
       location.href = mountRoot() + row.conversationId + '/';
     };
