@@ -112,6 +112,19 @@ export type Settled =
   | { status: "done"; answerId: number; text: string }
   | { status: "unanswered"; reason?: string; detail?: unknown };
 
+/**
+ * A verdict an adapter records about a conversation — the notification
+ * validator's "did this notification deserve to be sent".
+ */
+export interface AdapterVerdict {
+  verdict: "YES" | "NO";
+  reason: string;
+  notificationPosted?: boolean;
+  postFailed?: boolean;
+  error?: string;
+  at: number;
+}
+
 /** An entry an adapter writes for itself: a notice, not a model turn. */
 export interface AdapterEntry {
   /** Entry kind, e.g. `app.notice`. Namespaced by convention. */
@@ -258,6 +271,48 @@ export interface SessionHost {
 
   /** Write an adapter-authored entry into a conversation. Returns its id. */
   write(conversationId: number, entry: AdapterEntry, options?: { signal?: AbortSignal }): Promise<number>;
+
+  // --- Adapter-owned durable state ----------------------------------------
+  //
+  // D5 in the doc said "one generic primitive, namespaced". These turned out to
+  // be two *typed* claims over the documents that already exist, rather than a
+  // generic key/value store: a generic store would let an adapter write anything
+  // anywhere, and switching to one would have meant migrating live claims — for
+  // a claim whose whole job is to survive exactly that kind of change. The names
+  // are the semantics, which is the property that matters.
+
+  /**
+   * Claim the right to post one answer into one conversation's adapter view.
+   *
+   * True for exactly one caller per (name, answerId); a later answer takes the
+   * slot, an equal or older one is refused. Entry ids come from one global
+   * sequence, so "older" is meaningful — and a stale answer can never post after
+   * a newer one, which is the ordering the guard exists for.
+   */
+  claimAnswer(name: string, answerId: number, options?: { signal?: AbortSignal }): Promise<boolean>;
+
+  /** Give a claim back after a delivery that failed outright. */
+  releaseAnswer(name: string, answerId: number, options?: { signal?: AbortSignal }): Promise<void>;
+
+  /** The answer last claimed for a name, for diagnostics. */
+  lastPostedAnswer(name: string, options?: { signal?: AbortSignal }): Promise<{ answerId: number; at: number } | undefined>;
+
+  /** Record an adapter's verdict about a conversation (notification validation). */
+  recordVerdict(name: string, verdict: AdapterVerdict, options?: { signal?: AbortSignal }): Promise<void>;
+
+  /** The last verdict recorded for a name. */
+  verdict(name: string, options?: { signal?: AbortSignal }): Promise<AdapterVerdict | undefined>;
+
+  /**
+   * The first user/assistant exchange of a conversation, for a title.
+   *
+   * Extracted host-side: a title needs two strings, and the transcript it would
+   * otherwise take to get them is the one payload the seam must never carry.
+   */
+  firstTurn(
+    conversationId: number,
+    options?: { signal?: AbortSignal },
+  ): Promise<{ userText: string; assistantText: string } | undefined>;
 
   /** Compact the conversation's context now. Instructions are free text. */
   compact(conversationId: number, instructions?: string, options?: { signal?: AbortSignal }): Promise<void>;

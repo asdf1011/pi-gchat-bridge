@@ -142,8 +142,9 @@ importing `defineDoc` and calling `harness.commit()`. The host should expose it 
   an adapter can tell "the host restarted, re-attach" from "the stream went quiet". In-process this
   is nearly free; over a socket it is the difference between a reconnect and a mystery.
 
-That is 25 operations, counted one per row above. Earlier I estimated "12–14"; the measured surface
-says otherwise — most of the extra is the adapter-owned durable state at the bottom, which is not
+That is 26 operations by the time S1–S4 landed, counted one per row above plus `awaitSubmission`,
+`write`, `compact`/`abort`, and the five adapter-state operations. Earlier I estimated "12–14"; the
+measured surface says otherwise — most of the extra is adapter-owned state, which is not
 "conversation" work but has to live somewhere both sides agree on.
 
 ## The Chat path, after the seam
@@ -240,9 +241,13 @@ place until the last adapter is ported; the seam is additive.
   holds no pi-durable import, and `src/adapter/` has **zero** `host.*` reach-throughs. Submissions are
   addressed by id (`harness.submission(id)`) rather than held as handles, which is why the wait
   survives a restart and why this operation can cross a link later.
-- **S4 — port `commands.ts`, `posted-doc.ts`, `notify.ts`, `topic.ts`.** Adapter documents onto
-  `doc.claim`/`doc.get`/`doc.set`; titles onto `title()`. Exit: add the guard test — adapter
-  directory has zero pi-durable imports.
+- **S4 — adapter-owned state and titles. DONE.** The claim on an answer, the notifier's verdicts and
+  a conversation's first turn are seam operations; `posted-doc.ts` is gone and `notify.ts`/`topic.ts`
+  take the seam. One deviation, recorded rather than hidden: D5 said `doc.get/set/claim` — a generic
+  namespaced store — but the claims that exist are *typed* and live in documents that predate the
+  seam. A generic store would have meant migrating live claims, for a claim whose job is to survive
+  exactly that. So the surface is `claimAnswer`/`releaseAnswer`/`recordVerdict`/`verdict`/
+  `firstTurn`: fewer foot-guns, no migration, and the semantics are in the names.
 - **S5 — optional, and only if wanted:** `src/session-host/socket.ts` + `bin/session-host.ts`. No
   adapter file changes, because the interface is the contract. Now the web process restarts alone,
   and `RECEIVER=none` gives a dev host on its own `BRIDGE_DB` and `PORT` beside a live one.
@@ -274,19 +279,29 @@ place until the last adapter is ported; the seam is additive.
 will move behind an adapter or stay host wiring.
 
 ```
-src/adapter/queries.ts        0   ← S2
-src/adapter/commands.ts       0   ← S2
-src/adapter/router.ts         0   ← S3
-src/adapter/web.ts            0   ← S1
-src/adapter/artifacts-server.ts 0 ← S1
-----                     ----
-adapters                      0
+src/adapter/queries.ts          0   ← S2
+src/adapter/commands.ts         0   ← S2
+src/adapter/router.ts           0   ← S3
+src/adapter/web.ts              0   ← S1
+src/adapter/artifacts-server.ts 0   ← S1
+src/adapter/view-sink.ts        0   ← S3
+src/durable/notify.ts           0   ← S4
+src/durable/topic.ts            0   ← S4
+posted-doc.ts                 gone  ← S4
+----                       ----
+adapters + Chat helpers         0
 
-src/durable/notify.ts         9   ← S4 (adapter-scoped docs)
-src/durable/posted-doc.ts     6   ← S4
-src/durable/main.ts           4   ← host wiring, stays
-src/durable/topic.ts          4   ← S4 (title op)
+src/durable/import-legacy.ts   12   ← one-shot migration tools, not adapters
+src/durable/smoke.ts            6
+src/durable/replay.ts           5
+src/durable/import-all.ts       4
+src/durable/prefix-probe.ts     4
 ```
+
+The remainder are host-side *tools*: they import a database from an old session format, replay a
+conversation, or probe a model. They run from a shell with the bridge stopped, so requiring the
+harness directly is the correct thing for them to do — and wrapping them in the seam would mean a
+tool that cannot run when it is needed.
 
 By symbol: `host.context` 48, `host.harness` 22, `host.bindingFor` 16, `host.modelRuntime` 14,
 `host.conversationFor` 9, `host.cwdPath` 8, `host.close` 6, `host.bindings` 3, `host.dbPath` 1.

@@ -15,7 +15,8 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 import { BridgeHost } from "../src/durable/host.js";
-import { handleDurableNotify, VerdictsDoc } from "../src/durable/notify.js";
+import { handleDurableNotify } from "../src/durable/notify.js";
+import { inProcessSessionHost } from "../src/session-host/inprocess.js";
 import type { DurableRouter } from "../src/adapter/router.js";
 
 function fakeClient() {
@@ -58,17 +59,20 @@ async function host() {
     BACKGROUND_CONTEXT,
   );
   const fake = Object.create(BridgeHost.prototype) as BridgeHost;
-  Object.assign(fake, { harness, context: BACKGROUND_CONTEXT, modelRuntime: {} as ModelRuntime });
+  Object.assign(fake, { harness, context: BACKGROUND_CONTEXT, modelRuntime: {} as ModelRuntime, cwd: "/tmp", dbPath: ":memory:" });
   return fake;
+}
+
+/** The seam over a fake host: what the notifier actually talks to now. */
+function seamOf(h: BridgeHost) {
+  return inProcessSessionHost({ host: h, roots: [] });
 }
 
 const agent = { model: { provider: "llama-local", modelId: "small" } };
 
 async function seedVerdict(h: BridgeHost, chatKey: string, entry: Record<string, unknown>) {
-  await h.harness.commit(async (tx) => {
-    const doc = await tx.doc(VerdictsDoc);
-    doc.byThreadKey[chatKey] = { at: Date.now(), ...entry };
-  }, h.context);
+  // Through the seam, which is where the notifier reads it back.
+  await seamOf(h).recordVerdict(chatKey, { verdict: "NO", reason: "", at: Date.now(), ...entry } as never);
 }
 
 test("a plain notification is posted and recorded as conversation context", async () => {
@@ -77,7 +81,7 @@ test("a plain notification is posted and recorded as conversation context", asyn
   const { router, notices } = fakeRouter();
 
   const result = await handleDurableNotify(
-    { client, host: h, router, defaultAgent: agent },
+    { client, seam: seamOf(h), router, defaultAgent: agent },
     { space: "spaces/s", text: "disk is 94% full", threadKey: "t1", title: "Disk alert" },
     undefined,
   );
@@ -98,7 +102,7 @@ test("a plain notification without a threadKey is posted but not seeded", async 
   const { router, notices } = fakeRouter();
 
   const result = await handleDurableNotify(
-    { client, host: h, router, defaultAgent: agent },
+    { client, seam: seamOf(h), router, defaultAgent: agent },
     { space: "spaces/s", text: "hello" },
     undefined,
   );
@@ -116,7 +120,7 @@ test("a recorded NO verdict is never posted again", async () => {
   await seedVerdict(h, "spaces/s/t9", { verdict: "NO", reason: "not an invitation" });
 
   const result = await handleDurableNotify(
-    { client, host: h, router, defaultAgent: agent },
+    { client, seam: seamOf(h), router, defaultAgent: agent },
     { space: "spaces/s", text: "candidate", threadKey: "t9", validation: { prompt: "is this an invitation?" } },
     undefined,
   );
@@ -134,7 +138,7 @@ test("an already-posted verdict does not post twice", async () => {
   await seedVerdict(h, "spaces/s/t8", { verdict: "YES", notificationPosted: true, messageName: "spaces/s/messages/1" });
 
   const result = await handleDurableNotify(
-    { client, host: h, router, defaultAgent: agent },
+    { client, seam: seamOf(h), router, defaultAgent: agent },
     { space: "spaces/s", text: "candidate", threadKey: "t8", validation: { prompt: "is this an invitation?" } },
     undefined,
   );
@@ -151,21 +155,21 @@ test("validation requires a threadKey, and bad auth is rejected", async () => {
   const { router } = fakeRouter();
 
   const missingKey = await handleDurableNotify(
-    { client, host: h, router, defaultAgent: agent },
+    { client, seam: seamOf(h), router, defaultAgent: agent },
     { space: "spaces/s", text: "x", validation: { prompt: "p" } },
     undefined,
   );
   assert.equal(missingKey.status, 400);
 
   const badAuth = await handleDurableNotify(
-    { client, host: h, router, defaultAgent: agent, notifyToken: "secret" },
+    { client, seam: seamOf(h), router, defaultAgent: agent, notifyToken: "secret" },
     { space: "spaces/s", text: "x" },
     "Bearer wrong",
   );
   assert.equal(badAuth.status, 401);
 
   const okAuth = await handleDurableNotify(
-    { client, host: h, router, defaultAgent: agent, notifyToken: "secret" },
+    { client, seam: seamOf(h), router, defaultAgent: agent, notifyToken: "secret" },
     { space: "spaces/s", text: "x" },
     "Bearer secret",
   );

@@ -54,7 +54,7 @@ test("the title request goes to the titler server with caching off", async () =>
   }) as never;
 
   const title = await summarizeConversationTopic(
-    view([msg("user", "how do I shrink this disk image"), msg("assistant", "truncate")]),
+    firstTurnFromView(view([msg("user", "how do I shrink this disk image"), msg("assistant", "truncate")])),
     { baseUrl: "http://127.0.0.1:8091/v1/", model: "lfm3-vl-2b-q8", timeoutMs: 1000 },
     { post },
   );
@@ -72,7 +72,11 @@ test("an empty conversation asks for no title at all", async () => {
     called = true;
     return {};
   }) as never;
-  const title = await summarizeConversationTopic(view([]), { baseUrl: "http://x/v1", model: "m", timeoutMs: 10 }, { post });
+  const title = await summarizeConversationTopic(
+    firstTurnFromView(view([])),
+    { baseUrl: "http://x/v1", model: "m", timeoutMs: 10 },
+    { post },
+  );
   assert.equal(title, undefined);
   assert.equal(called, false);
 });

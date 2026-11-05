@@ -25,7 +25,7 @@ import {
   type TopicSummaryConfig,
 } from "../topic-summary.js";
 import { projectView, type ViewLike } from "../session-host/projection.js";
-import type { BridgeHost } from "./host.js";
+import type { SessionHost } from "../session-host/api.js";
 
 /** First user and assistant text in a conversation, for a title prompt. */
 export function firstTurnFromView(view: ViewLike): { userText: string; assistantText: string } {
@@ -56,12 +56,11 @@ export function firstTurnFromView(view: ViewLike): { userText: string; assistant
  * own slot from accumulating state it will never reuse.
  */
 export async function summarizeConversationTopic(
-  view: ViewLike,
+  turn: { userText: string; assistantText: string },
   config: TopicSummaryConfig,
   deps?: { post?: typeof postJson; maxChars?: number },
 ): Promise<string | undefined> {
   const post = deps?.post ?? postJson;
-  const turn = firstTurnFromView(view);
   if (!turn.userText.trim() && !turn.assistantText.trim()) return undefined;
 
   const body = {
@@ -89,7 +88,7 @@ export async function summarizeConversationTopic(
 
 export interface DurableTopicDeps {
   state: StateStore;
-  host: BridgeHost;
+  seam: SessionHost;
   client: ChatClient;
   config: TopicSummaryConfig;
   chatKey: string;
@@ -105,23 +104,21 @@ export interface DurableTopicDeps {
  * re-title the same card twice.
  */
 export async function applyDurableTopicSummary(deps: DurableTopicDeps): Promise<void> {
-  const { state, host, client, config, chatKey, display } = deps;
+  const { state, seam, client, config, chatKey, display } = deps;
   const card = state.takeTopicCard(chatKey);
   if (!card) return;
   try {
-    const binding = await host.bindingFor(chatKey);
+    const binding = await seam.resolve(chatKey);
     if (!binding) {
       logger.info(`[chat] ${display}: no conversation yet — topic title skipped`);
       return;
     }
-    const conversation = await host.harness.conversation(
-      binding.conversationId as ConversationId,
-      host.context,
-    );
-    if (!conversation) return;
-    const opened = await conversation.viewState(host.context);
+    // The host extracts the first exchange: a title needs two strings, and the
+    // transcript they come from is the one payload the seam must not carry.
+    const turn = await seam.firstTurn(binding.conversationId);
+    if (!turn) return;
     const started = Date.now();
-    const title = await summarizeConversationTopic(opened.value as ViewLike, config);
+    const title = await summarizeConversationTopic(turn, config);
     if (!title) {
       logger.info(`[chat] ${display}: topic title came back empty — card left as "Model switched"`);
       return;

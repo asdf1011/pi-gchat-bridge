@@ -24,7 +24,7 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 import { BridgeHost } from "../src/durable/host.js";
-import { claimAnswer, lastPostedAnswer, releaseAnswer } from "../src/durable/posted-doc.js";
+import { inProcessSessionHost } from "../src/session-host/inprocess.js";
 
 /** A host over in-memory storage: enough for the claim, no model needed. */
 async function memoryHost(): Promise<BridgeHost> {
@@ -43,54 +43,61 @@ const OTHER = "spaces/sPA7FKAAAAE/threads/8Xay0xgO-TI";
 
 test("four submissions that share one answer produce exactly one post", async () => {
   const host = await memoryHost();
+  const seam = inProcessSessionHost({ host, roots: [] });
   // The production shape: four handlers wake from the same settled answer at
   // roughly the same moment.
-  const wins = await Promise.all([1, 2, 3, 4].map(() => claimAnswer(host, THREAD, 8789)));
+  const wins = await Promise.all([1, 2, 3, 4].map(() => seam.claimAnswer(THREAD, 8789)));
   assert.equal(wins.filter(Boolean).length, 1, `exactly one claim may win, got ${JSON.stringify(wins)}`);
   assert.equal(wins[0], true, "the first caller posts");
 });
 
 test("a sequential repeat of the same answer is refused too", async () => {
   const host = await memoryHost();
-  assert.equal(await claimAnswer(host, THREAD, 8742), true);
-  assert.equal(await claimAnswer(host, THREAD, 8742), false);
-  assert.equal((await lastPostedAnswer(host, THREAD))?.answerId, 8742);
+  const seam = inProcessSessionHost({ host, roots: [] });
+  assert.equal(await seam.claimAnswer(THREAD, 8742), true);
+  assert.equal(await seam.claimAnswer(THREAD, 8742), false);
+  assert.equal((await seam.lastPostedAnswer(THREAD))?.answerId, 8742);
 });
 
 test("the next answer in the same thread is delivered normally", async () => {
   const host = await memoryHost();
-  assert.equal(await claimAnswer(host, THREAD, 8742), true);
-  assert.equal(await claimAnswer(host, THREAD, 8789), true, "a newer answer must not be blocked");
+  const seam = inProcessSessionHost({ host, roots: [] });
+  assert.equal(await seam.claimAnswer(THREAD, 8742), true);
+  assert.equal(await seam.claimAnswer(THREAD, 8789), true, "a newer answer must not be blocked");
 });
 
 test("an older answer can never be posted after a newer one", async () => {
   const host = await memoryHost();
-  assert.equal(await claimAnswer(host, THREAD, 8789), true);
+  const seam = inProcessSessionHost({ host, roots: [] });
+  assert.equal(await seam.claimAnswer(THREAD, 8789), true);
   // A late-settling submission carrying a stale answer must not resurrect it.
-  assert.equal(await claimAnswer(host, THREAD, 8742), false);
+  assert.equal(await seam.claimAnswer(THREAD, 8742), false);
 });
 
 test("threads are independent: the same answer in another thread still posts", async () => {
   const host = await memoryHost();
-  assert.equal(await claimAnswer(host, THREAD, 8789), true);
-  assert.equal(await claimAnswer(host, OTHER, 8789), true);
+  const seam = inProcessSessionHost({ host, roots: [] });
+  assert.equal(await seam.claimAnswer(THREAD, 8789), true);
+  assert.equal(await seam.claimAnswer(OTHER, 8789), true);
 });
 
 test("a released claim can be taken by the next handler", async () => {
   const host = await memoryHost();
-  assert.equal(await claimAnswer(host, THREAD, 8789), true);
+  const seam = inProcessSessionHost({ host, roots: [] });
+  assert.equal(await seam.claimAnswer(THREAD, 8789), true);
   // The post failed outright, so the reply is still owed to the thread.
-  await releaseAnswer(host, THREAD, 8789);
-  assert.equal(await lastPostedAnswer(host, THREAD), undefined);
-  assert.equal(await claimAnswer(host, THREAD, 8789), true);
+  await seam.releaseAnswer(THREAD, 8789);
+  assert.equal(await seam.lastPostedAnswer(THREAD), undefined);
+  assert.equal(await seam.claimAnswer(THREAD, 8789), true);
 });
 
 test("releasing a claim that has been superseded leaves the newer one alone", async () => {
   const host = await memoryHost();
-  assert.equal(await claimAnswer(host, THREAD, 8789), true);
-  assert.equal(await claimAnswer(host, THREAD, 8801), true);
-  await releaseAnswer(host, THREAD, 8789);
-  assert.equal((await lastPostedAnswer(host, THREAD))?.answerId, 8801);
+  const seam = inProcessSessionHost({ host, roots: [] });
+  assert.equal(await seam.claimAnswer(THREAD, 8789), true);
+  assert.equal(await seam.claimAnswer(THREAD, 8801), true);
+  await seam.releaseAnswer(THREAD, 8789);
+  assert.equal((await seam.lastPostedAnswer(THREAD))?.answerId, 8801);
 });
 
 /**
@@ -108,7 +115,7 @@ test("a claim survives a restart", async () => {
       modelRuntime: createModels() as unknown as ModelRuntime,
       context: BACKGROUND_CONTEXT,
     });
-    assert.equal(await claimAnswer(first, THREAD, 8789), true);
+    assert.equal(await inProcessSessionHost({ host: first, roots: [] }).claimAnswer(THREAD, 8789), true);
     await first.close();
 
     const second = await BridgeHost.open({
@@ -118,8 +125,9 @@ test("a claim survives a restart", async () => {
       context: BACKGROUND_CONTEXT,
     });
     try {
-      assert.equal(await claimAnswer(second, THREAD, 8789), false, "the answer was already delivered");
-      assert.equal((await lastPostedAnswer(second, THREAD))?.answerId, 8789);
+      const seam = inProcessSessionHost({ host: second, roots: [] });
+      assert.equal(await seam.claimAnswer(THREAD, 8789), false, "the answer was already delivered");
+      assert.equal((await seam.lastPostedAnswer(THREAD))?.answerId, 8789);
     } finally {
       await second.close();
     }

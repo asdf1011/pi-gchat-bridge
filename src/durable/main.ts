@@ -41,7 +41,6 @@ import { secretsFromEnvironment } from "./extensions/secret-redactor.js";
 import { applyDurableTopicSummary } from "./topic.js";
 import { identify } from "./identity.js";
 import { failureNotice } from "./failure-notice.js";
-import { claimAnswer, releaseAnswer } from "./posted-doc.js";
 import { AgentRouter } from "../agent-sessions.js";
 import { NullReceiver } from "../receiver.js";
 import { SecretStore } from "../secret-store.js";
@@ -158,7 +157,7 @@ async function main(): Promise<void> {
             const result = await handleDurableNotify(
               {
                 client,
-                host,
+                seam,
                 router,
                 notifyToken: config.notifyToken || undefined,
                 defaultAgent: { model: defaultModel },
@@ -443,7 +442,7 @@ async function main(): Promise<void> {
       // Chat messages. It is durable, so a redelivery after a crash (posted,
       // then died before acking) does not post the same answer twice either.
       const answerKey = Number(answerId);
-      if (!(await claimAnswer(host, chatKey, answerKey))) {
+      if (!(await seam.claimAnswer(chatKey, answerKey))) {
         logger.info(
           `[chat] ${display}: answer ${answerKey} already delivered in this thread — not posting it again ` +
             `(conversation=${delivered.conversationId})`,
@@ -457,7 +456,7 @@ async function main(): Promise<void> {
         // The reply was not delivered after all: hand the claim back so another
         // handler for this answer (or a Pub/Sub redelivery) still delivers it.
         // Losing a reply is worse than posting one twice.
-        await releaseAnswer(host, chatKey, answerKey).catch(() => {});
+        await seam.releaseAnswer(chatKey, answerKey).catch(() => {});
         throw error;
       }
 
@@ -467,7 +466,7 @@ async function main(): Promise<void> {
       if (config.topicSummary) {
         void applyDurableTopicSummary({
           state,
-          host,
+          seam,
           client,
           chatKey,
           display,

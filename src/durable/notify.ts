@@ -22,7 +22,7 @@ import { parseVerdict, postText, unauthorized, chunkText } from "../notify.js";
 import type { ChatClient } from "../chat-client.js";
 import { defineDoc, type ConversationId } from "@earendil-works/pi-durable";
 import { logger } from "../logger.js";
-import type { BridgeHost } from "./host.js";
+import type { SessionHost } from "../session-host/api.js";
 import type { DurableRouter } from "../adapter/router.js";
 import type { ConversationBinding } from "./bindings-doc.js";
 
@@ -56,7 +56,7 @@ export const VerdictsDoc = defineDoc<VerdictsValue>({
 
 export interface DurableNotifyDeps {
   client: ChatClient;
-  host: BridgeHost;
+  seam: SessionHost;
   router: DurableRouter;
   notifyToken?: string;
   /** Default agent for conversations this endpoint creates. */
@@ -82,16 +82,21 @@ function threadChatKey(space: string, threadKey: string): string {
   return `${space}/${threadKey}`;
 }
 
-async function recordVerdict(host: BridgeHost, chatKey: string, record: VerdictEntry): Promise<void> {
-  await host.harness.commit(async (tx) => {
-    const doc = await tx.doc(VerdictsDoc);
-    doc.byThreadKey[chatKey] = { ...record, at: Date.now() };
-  }, host.context);
+async function recordVerdict(seam: SessionHost, chatKey: string, record: VerdictEntry): Promise<void> {
+  // The seam's verdict is the claim the validator makes; a POST failure is
+  // recorded alongside it rather than as a verdict of its own.
+  await seam.recordVerdict(chatKey, {
+    verdict: record.verdict === "YES" ? "YES" : "NO",
+    reason: record.reason ?? "",
+    ...(record.notificationPosted === undefined ? {} : { notificationPosted: record.notificationPosted }),
+    ...(record.postFailed === undefined ? {} : { postFailed: record.postFailed }),
+    ...(record.error === undefined ? {} : { error: record.error }),
+    at: record.at,
+  });
 }
 
-async function lastVerdict(host: BridgeHost, chatKey: string): Promise<VerdictEntry | undefined> {
-  const doc = await host.harness.snapshot(VerdictsDoc, host.context);
-  return doc?.byThreadKey[chatKey];
+async function lastVerdict(seam: SessionHost, chatKey: string): Promise<VerdictEntry | undefined> {
+  return (await seam.verdict(chatKey)) as VerdictEntry | undefined;
 }
 
 /** Handle one POST /notify body. Never throws. */
@@ -191,7 +196,7 @@ async function validatedNotify(
 
   // 1. Already decided? The stored verdict drives the response, so a re-run of the
   //    same candidate neither re-runs the prompt nor re-posts.
-  const stored = await lastVerdict(deps.host, chatKey);
+  const stored = await lastVerdict(deps.seam, chatKey);
   if (stored) {
     if (stored.verdict === "NO") {
       logger.info(`[notify] ${chatKey}: already rejected (${stored.reason})`);
@@ -211,24 +216,21 @@ async function validatedNotify(
   let verdict: "YES" | "NO" | "UNCLEAR" = "UNCLEAR";
   let reason = "";
   try {
-    const bound = await deps.host.conversationFor(`validation:${chatKey}`, deps.defaultAgent);
-    const submission = await bound.conversation.submit(
-      { type: "input", content: prompt, requestId: `notify:${chatKey}:${Date.now()}` },
-      deps.host.context,
-    );
-    const settled = await submission.wait(deps.host.context);
-    const view = await bound.conversation.viewState(deps.host.context);
-    const entries = (view.value as unknown as { entries?: readonly { kind?: string; model?: readonly { content?: readonly { type?: string; text?: string }[] }[] }[] }).entries ?? [];
-    view.dispose();
-    const lastAssistant = [...entries].reverse().find((entry) => entry.kind === "pi.assistant");
-    const reply = (lastAssistant?.model?.[0]?.content ?? [])
-      .flatMap((block) => (block.type === "text" && block.text ? [block.text] : []))
-      .join("");
+    const conversation = await deps.seam.getOrCreate(`validation:${chatKey}`, deps.defaultAgent);
+    const submitted = await deps.seam.submit(conversation.conversationId, {
+      content: prompt,
+      requestId: `notify:${chatKey}:${Date.now()}`,
+    });
+    if ("error" in submitted) throw new Error(submitted.error);
+    const settled = await deps.seam.awaitSubmission(submitted.submissionId);
+    // The host hands back the answer's text, so the validator does not parse a
+    // transcript to find one string.
+    const reply = settled.status === "done" ? settled.text : "";
     const parsed = parseVerdict(reply);
     verdict = parsed ?? "UNCLEAR";
     reason = settled.status === "done" ? "" : `run ${settled.status}`;
     if (parsed === "NO") {
-      await recordVerdict(deps.host, chatKey, { verdict: "NO", reason: `model: ${reply.slice(0, 200)}`, at: Date.now() });
+      await recordVerdict(deps.seam, chatKey, { verdict: "NO", reason: `model: ${reply.slice(0, 200)}`, at: Date.now() });
       logger.info(`[notify] ${chatKey}: verdict NO — not posting`);
       return { status: 200, json: { ok: true, status: "skipped", reason: "verdict NO", verdict: "NO" } };
     }
@@ -242,7 +244,7 @@ async function validatedNotify(
   try {
     const { messageName, threadName } = await postText(deps.client, space, chunks, threadKey);
     await deps.router.notify(chatKey, title ? `${title}\n\n${text}` : text);
-    await recordVerdict(deps.host, chatKey, {
+    await recordVerdict(deps.seam, chatKey, {
       verdict,
       reason,
       notificationPosted: true,
@@ -266,7 +268,7 @@ async function validatedNotify(
     };
   } catch (error) {
     const message = (error as Error).message;
-    await recordVerdict(deps.host, chatKey, {
+    await recordVerdict(deps.seam, chatKey, {
       verdict,
       reason: reason || message,
       notificationPosted: false,
@@ -280,8 +282,8 @@ async function validatedNotify(
 }
 
 /** The conversation id behind a validation key, for tests and diagnostics. */
-export async function validationConversationId(host: BridgeHost, chatKey: string): Promise<number | undefined> {
-  const binding: ConversationBinding | undefined = await host.bindingFor(`validation:${chatKey}`);
+export async function validationConversationId(seam: SessionHost, chatKey: string): Promise<number | undefined> {
+  const binding = await seam.resolve(`validation:${chatKey}`);
   return binding?.conversationId;
 }
 

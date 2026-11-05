@@ -39,6 +39,7 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { logger } from "../logger.js";
 import type { AdapterEntry, ConversationState, ModelInfo, Settled, UsageTotals } from "../session-host/api.js";
 import { BindingsDoc, type BindingsValue, type ConversationBinding } from "./bindings-doc.js";
+import { defineDoc } from "@earendil-works/pi-durable";
 import { ChatFormat } from "./extensions/chat-format.js";
 import { createCodingToolsWithDelivery } from "./extensions/coding-tools.js";
 import { createSecretRedactor, secretsFromEnvironment } from "./extensions/secret-redactor.js";
@@ -496,6 +497,66 @@ export class BridgeHost {
     };
   }
 
+  // --- Adapter-owned durable state ------------------------------------------
+  //
+  // These two documents predate the seam (they were the bridge's own durable
+  // state), so the operations below are typed claims over them rather than a
+  // generic key/value store. That keeps live claims across the move and keeps
+  // the semantics in the name: "claim the last answer" is not "set a key".
+
+  /** Claim the right to post one answer. See `SessionHost.claimAnswer`. */
+  async claimAnswer(chatKey: string, answerId: number): Promise<boolean> {
+    if (!Number.isFinite(answerId)) return true; // nothing to key on: better twice than never
+    return this.harness.commit(async (tx) => {
+      const doc = await tx.doc(PostedAnswersDoc);
+      const last = doc.byChatKey[chatKey];
+      if (last && answerId <= last.answerId) return false;
+      doc.byChatKey[chatKey] = { answerId, at: Date.now() };
+      return true;
+    }, this.context);
+  }
+
+  /** Give a claim back, if it is still this answer's. */
+  async releaseAnswer(chatKey: string, answerId: number): Promise<void> {
+    if (!Number.isFinite(answerId)) return;
+    await this.harness.commit(async (tx) => {
+      const doc = await tx.doc(PostedAnswersDoc);
+      if (doc.byChatKey[chatKey]?.answerId !== answerId) return;
+      delete doc.byChatKey[chatKey];
+    }, this.context);
+  }
+
+  /** The answer last claimed for a name. */
+  async lastPostedAnswer(chatKey: string): Promise<{ answerId: number; at: number } | undefined> {
+    return (await this.harness.snapshot(PostedAnswersDoc, this.context))?.byChatKey[chatKey];
+  }
+
+  /** Record a validation verdict for a name. */
+  async recordVerdict(chatKey: string, verdict: VerdictEntry): Promise<void> {
+    await this.harness.commit(async (tx) => {
+      const doc = await tx.doc(VerdictsDoc);
+      doc.byThreadKey[chatKey] = verdict;
+    }, this.context);
+  }
+
+  /** The last verdict recorded for a name. */
+  async verdict(chatKey: string): Promise<VerdictEntry | undefined> {
+    return (await this.harness.snapshot(VerdictsDoc, this.context))?.byThreadKey[chatKey];
+  }
+
+  /** The first user/assistant exchange, for a title. */
+  async firstTurn(conversationId: number): Promise<{ userText: string; assistantText: string } | undefined> {
+    const conversation = await this.harness.conversation(
+      conversationId as ConversationId,
+      this.context,
+    );
+    if (!conversation) return undefined;
+    const view = await conversation.viewState(this.context);
+    const entries = (view.value as { entries?: readonly unknown[] }).entries ?? [];
+    view.dispose();
+    return firstTurnOf(entries);
+  }
+
   async close(): Promise<void> {
     await this.harness.close(this.context);
     this.lock.release();
@@ -552,4 +613,69 @@ export function totalUsage(usageDoc: unknown): UsageTotals | undefined {
     totals.cost += usage.cost?.total ?? 0;
   }
   return totals.total > 0 ? totals : undefined;
+}
+
+/** Chat answers already delivered, keyed by conversation name. */
+export type PostedAnswersValue = { byChatKey: Record<string, { answerId: number; at: number }> };
+
+const PostedAnswersDoc = defineDoc<PostedAnswersValue>({
+  kind: "gchat.posted-answers",
+  version: 1,
+  scope: "session",
+  initial: () => ({ byChatKey: {} }),
+  checkpointWhen: () => true,
+});
+
+/** One notification verdict, as `notify.ts` writes it. */
+export type VerdictEntry = {
+  verdict: "YES" | "NO";
+  reason: string;
+  notificationPosted?: boolean;
+  postFailed?: boolean;
+  error?: string;
+  at: number;
+};
+
+/** Notification verdicts, keyed by conversation name. */
+export type VerdictsValue = { byThreadKey: Record<string, VerdictEntry> };
+
+const VerdictsDoc = defineDoc<VerdictsValue>({
+  kind: "gchat.verdicts",
+  version: 1,
+  scope: "session",
+  initial: () => ({ byThreadKey: {} }),
+  checkpointWhen: () => true,
+});
+
+/** The first user message and the assistant reply that followed it. */
+function firstTurnOf(entries: readonly unknown[]): { userText: string; assistantText: string } | undefined {
+  let userText = "";
+  let assistantText = "";
+  for (const raw of entries) {
+    const messages = (raw as { model?: readonly { role?: string; content?: unknown }[] }).model ?? [];
+    for (const message of messages) {
+      const text = textOf(message);
+      if (!text) continue;
+      if (message.role === "user" && !userText) userText = text;
+      else if (message.role === "assistant" && userText && !assistantText) {
+        assistantText = text;
+        return { userText, assistantText };
+      }
+    }
+  }
+  return userText ? { userText, assistantText } : undefined;
+}
+
+/** Concatenated text blocks of one message. */
+function textOf(message: { content?: unknown }): string {
+  const content = message.content;
+  if (typeof content === "string") return content.trim();
+  if (!Array.isArray(content)) return "";
+  return content
+    .flatMap((block) => {
+      const typed = block as { type?: string; text?: string };
+      return typed.type === "text" && typed.text ? [typed.text] : [];
+    })
+    .join("")
+    .trim();
 }
