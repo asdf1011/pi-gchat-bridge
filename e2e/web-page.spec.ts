@@ -43,6 +43,7 @@ async function stubApi(
   page: Page,
   options: {
     conversations?: typeof CONVERSATIONS;
+    history?: { role: string; text: string; html?: string; at?: number }[];
     frames?: { event: string; data: unknown }[];
     onPost?: (body: unknown) => void;
   } = {},
@@ -70,6 +71,13 @@ async function stubApi(
       body: `${frames}\n`,
     });
   });
+
+  // History is a real endpoint the page calls on every open, and the fixture
+  // conversations are not in the database, so an unstubbed call 404s. That
+  // 404 was the console error failing the "no console errors" assertions.
+  await page.route("**/api/c/*/history", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(options.history ?? []) }),
+  );
 
   await page.route("**/api/c/*/message", async (route) => {
     options.onPost?.(route.request().postDataJSON());
@@ -101,7 +109,7 @@ test("the first conversation is selected and streamed on load", async ({ page })
   await page.goto("/web/");
 
   await expect(page.locator("#list li").first()).toHaveClass(/on/);
-  await expect(page.locator("#log")).toHaveText("streamed at load");
+  await expect(page.locator("#log .bubble")).toHaveText("streamed at load");
   expect(requests.some((u) => /\/api\/c\/7\/events$/.test(u))).toBe(true);
   expect(errors).toEqual([]);
 });
@@ -110,7 +118,7 @@ test("an SSE text frame paints the answer pane", async ({ page }) => {
   const errors = watchErrors(page);
   await stubApi(page, { frames: [{ event: "text", data: { text: "the model said this", busy: true } }] });
   await page.goto("/web/");
-  await expect(page.locator("#log")).toHaveText("the model said this");
+  await expect(page.locator("#log .bubble")).toHaveText("the model said this");
   expect(errors).toEqual([]);
 });
 
@@ -190,6 +198,42 @@ test("layout: the answer pane is visible and the controls are reachable", async 
   // And nothing overflows horizontally at this width.
   const scrollWidth = await page.evaluate(() => document.documentElement.scrollWidth);
   expect(scrollWidth).toBeLessThanOrEqual(1281);
+});
+
+test("layout: the text box grows with the message instead of scrolling its own text", async ({ page }) => {
+  // The bug this covers: a fixed-height box keeps its size, so a long message
+  // scrolls *inside* a 3.5rem window and the first lines — the ones you were
+  // writing a minute ago — are invisible while you type.
+  await stubApi(page);
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/web/");
+
+  const box = page.locator("#text");
+  const shortBox = (await box.boundingBox())!;
+
+  await box.fill(Array.from({ length: 8 }, (_, i) => `line ${i + 1} of a longer message`).join("\n"));
+  const tallBox = (await box.boundingBox())!;
+  expect(tallBox.height, "the box must grow with its content").toBeGreaterThan(shortBox.height + 40);
+
+  // Grown, not scrolled: the first line is still on screen, and it stays put.
+  const scrolled = await box.evaluate((el) => {
+    const area = el as HTMLTextAreaElement;
+    return { scrollTop: area.scrollTop, overflows: area.scrollHeight > area.clientHeight + 1 };
+  });
+  expect(scrolled.scrollTop).toBe(0);
+  expect(scrolled.overflows, "content fits, so nothing is hidden").toBe(false);
+
+  // And it gives the space back: clearing the box returns it to one line, so a
+  // long message does not permanently eat the conversation.
+  await box.fill("");
+  const resetBox = (await box.boundingBox())!;
+  expect(resetBox.height).toBeLessThan(tallBox.height - 40);
+
+  // A paste far past the cap stops growing at 40vh and scrolls from there,
+  // rather than pushing the whole conversation off the screen.
+  await box.fill(Array.from({ length: 200 }, (_, i) => `line ${i + 1}`).join("\n"));
+  const capped = (await box.boundingBox())!;
+  expect(capped.height).toBeLessThanOrEqual(800 * 0.4 + 1);
 });
 
 test("a path without a trailing slash is normalised to one", async ({ page }) => {
