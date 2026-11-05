@@ -301,9 +301,26 @@ place until the last adapter is ported; the seam is additive.
     adapter observes (`{status, answerId, text}`), which is what the `settled` cell in this spike
     already demonstrates.
 
-  What remains is mechanical: a `ConversationView` contract (and a TypeBox schema for
-  `ProjectedView`), a submission-state contract, an adapter-side client host, and `start-bridge.sh`
-  supervising one more process.
+  **First increment landed** (`src/session-host/link.ts` + `link-contract.ts`): an in-process
+  `SessionHost` is published as two chord objects (session, conversation) and a second
+  `SessionHost` is implemented over a client host. `test/session-host-link.test.ts` runs `getOrCreate`,
+  `list`, `resolve`, `attach` (snapshot then a real frame), `submit` (including the "no such
+  conversation" value) and `artifacts` through a link — the same interface the adapters already use,
+  so moving one out is a deployment change.
+
+  Two things the increment forced:
+
+  - **A `has(conversation)` method on the session object.** A chord object springs into existence on
+    demand, so without it "the conversation is gone" and "the conversation is empty" are the same
+    state, and the seam promises `undefined` for the first.
+  - **Nothing else is published.** `state`, `models`, `setModel`, `create`, `bind`, `unbind`,
+    `label`, `compact`, `abort`, `usage`, `awaitSubmission`, `write`, the claim/verdict operations and
+    `firstTurn` throw `not implemented over the link yet`. Each becomes a contract method the day an
+    adapter in another process needs it — and `awaitSubmission` is the one that will need the
+    state-instead-of-call shape the second spike established.
+
+  What remains: `start-bridge.sh` supervising a second process, and the web adapter pointed at a
+  linked seam instead of the in-process one.
 
 ## Non-goals
 
