@@ -17,6 +17,7 @@ import http from "node:http";
 
 
 import { ChatClient, collectImageAttachments } from "../chat-client.js";
+import { fork } from "node:child_process";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "../config.js";
 import { logger } from "../logger.js";
@@ -32,10 +33,12 @@ import { defaultSettings } from "../adapter/commands.js";
 import { BridgeHost } from "./host.js";
 import { BridgeLockedError } from "./lock.js";
 import { handleDurableNotify } from "./notify.js";
-import { attachWebClient, webIndex, webPage, webSubmit } from "../adapter/web.js";
+import { handleWebRequest, readBody } from "../adapter/web-routes.js";
 import { startArtifactsServer } from "../adapter/artifacts-server.js";
 import { artifactRoots } from "./artifacts.js";
 import { inProcessSessionHost } from "../session-host/inprocess.js";
+import { serveSessionHost } from "../session-host/link.js";
+import { ipcLink } from "@earendil-works/chord";
 import { SecretRegistry } from "./extensions/redact.js";
 import { secretsFromEnvironment } from "./extensions/secret-redactor.js";
 import { applyDurableTopicSummary } from "./topic.js";
@@ -121,149 +124,19 @@ async function main(): Promise<void> {
             res.end("ok");
             return;
           }
-          // A proxy that mounts us at /pi/ and strips the prefix asks for "/".
-          // Redirect to the app rather than serving it here: the page resolves
-          // every URL relative to its own directory, so serving it at "/" made
-          // it request "/api/conversations" — a 404 — and the conversation list
-          // came up empty on exactly the URL a bookmark would use. One canonical
-          // URL for the app, and relative paths work again.
-          //
-          // Health checks use /healthz, so nothing is lost, and a HEAD probe sees
-          // the same redirect.
+          // The browser front end lives in one module so the same routes can be
+          // served from the bridge process or from an adapter process. In link
+          // mode the adapter owns them, and this process answers 404 — the tunnel
+          // must point at BRIDGE_WEB_PORT, not here.
           if (
-            (req.method === "GET" || req.method === "HEAD") &&
-            (url.pathname === "/" || url.pathname === "")
+            webEngine !== "link" &&
+            (await handleWebRequest(req, res, url, {
+              seam,
+              model: defaultModel,
+              ...(config.webToken ? { token: config.webToken } : {}),
+              who,
+            }))
           ) {
-            const base = url.pathname.endsWith("/") ? url.pathname : `${url.pathname}/`;
-            res.writeHead(302, { Location: `${base}web/`, "Cache-Control": "no-store" });
-            res.end();
-            return;
-          }
-          if (req.method === "POST" && url.pathname === "/notify") {
-            const body = await readBody(req, 1_000_000);
-            if (body === null) {
-              res.writeHead(413, { "Content-Type": "application/json" });
-              res.end(JSON.stringify({ ok: false, error: "request body too large" }));
-              return;
-            }
-            let json: unknown;
-            try {
-              json = JSON.parse(body);
-            } catch {
-              res.writeHead(400, { "Content-Type": "application/json" });
-              res.end(JSON.stringify({ ok: false, error: "invalid JSON body" }));
-              return;
-            }
-            const result = await handleDurableNotify(
-              {
-                client,
-                seam,
-                router,
-                notifyToken: config.notifyToken || undefined,
-                defaultAgent: { model: defaultModel },
-              },
-              json,
-              req.headers.authorization,
-            );
-            res.writeHead(result.status, { "Content-Type": "application/json" });
-            res.end(JSON.stringify(result.json));
-            return;
-          }
-          // --- Web frontend: a second sink on the same conversations. ---
-          //
-          // Mount-agnostic on purpose. A reverse proxy may hand us "/pi/web"
-          // (prefix passed through) or "/web" (prefix stripped), and the HTML
-          // cannot know which -- so routes strip an optional prefix and the page
-          // uses relative URLs throughout. That makes both proxy styles work
-          // without a build-time or config-time base path.
-          if (req.method === "GET" && (webPath(url.pathname) === "/web" || webPath(url.pathname) === "/web/")) {
-            res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-            res.end(webPage());
-            return;
-          }
-          if (req.method === "GET" && webPath(url.pathname) === "/web/api/conversations") {
-            res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify(await webIndex({ seam })));
-            return;
-          }
-          const events = /^\/web\/api\/c\/(\d+)\/events$/.exec(webPath(url.pathname));
-          if (req.method === "GET" && events) {
-            const conversationId = Number(events[1]);
-            res.writeHead(200, {
-              "Content-Type": "text/event-stream",
-              "Cache-Control": "no-cache",
-              Connection: "keep-alive",
-              // No CORS: the page is served from this origin only.
-            });
-            let alive = true;
-            const client = {
-              open: alive,
-              send(event: string, data: unknown) {
-                if (!alive) return;
-                try {
-                  res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-                } catch {
-                  alive = false;
-                }
-              },
-            };
-            const handle = await attachWebClient(
-              { seam, model: defaultModel, ...(config.webToken ? { token: config.webToken } : {}) },
-              conversationId,
-              client,
-            );
-            // A comment line keeps proxies from closing an idle stream.
-            const keepalive = setInterval(() => {
-              if (!alive) return;
-              try {
-                res.write(": keepalive\n\n");
-              } catch {
-                alive = false;
-              }
-            }, 15_000);
-            req.on("close", () => {
-              alive = false;
-              clearInterval(keepalive);
-              handle.close();
-            });
-            return;
-          }
-          const send = /^\/web\/api\/c\/(\d+)\/message$/.exec(webPath(url.pathname));
-          if (req.method === "POST" && send) {
-            if (config.webToken && req.headers.authorization !== `Bearer ${config.webToken}`) {
-              res.writeHead(401, { "Content-Type": "application/json" });
-              res.end(JSON.stringify({ ok: false, error: "unauthorized" }));
-              return;
-            }
-            const body = await readBody(req, 200_000);
-            if (body === null) {
-              res.writeHead(413, { "Content-Type": "application/json" });
-              res.end(JSON.stringify({ ok: false, error: "request body too large" }));
-              return;
-            }
-            let text = "";
-            try {
-              const parsed = JSON.parse(body) as { text?: unknown };
-              text = typeof parsed.text === "string" ? parsed.text : "";
-            } catch {
-              res.writeHead(400, { "Content-Type": "application/json" });
-              res.end(JSON.stringify({ ok: false, error: "invalid JSON body" }));
-              return;
-            }
-            const result = await webSubmit(
-              { seam, model: defaultModel, ...(config.webToken ? { token: config.webToken } : {}) },
-              Number(send[1]),
-              text,
-            );
-            if (result.ok) {
-              // Who asked, and which conversation: this bridge can run shell
-              // commands, so "who submitted this" belongs in the log.
-              logger.info(
-                `[web] ${who.email ?? "anonymous"}: submitted to conversation ${send[1]} (submission ${result.submissionId})`,
-              );
-            }
-            res.writeHead(result.ok ? 202 : 400, { "Content-Type": "application/json" });
-            res.end(JSON.stringify(result));
             return;
           }
           res.writeHead(404, { "Content-Type": "application/json" });
@@ -321,6 +194,61 @@ async function main(): Promise<void> {
       bind: config.bindAddress,
       redact: redactArtifact,
     });
+  }
+
+  // --- The web front end, optionally in its own process. ---
+  //
+  // `BRIDGE_WEB_ENGINE=link` forks `dist/web-host.js`, accepts its chord link, and
+  // stops serving `/web` here. The adapter then owns that surface on
+  // `BRIDGE_WEB_PORT`, which is the port the tunnel must point at; everything it
+  // does goes through the seam, so the process holds no database and no Chat
+  // credentials, and restarting it cannot interrupt a turn.
+  //
+  // The child is forked from *this* process rather than the supervisor because
+  // the IPC channel is the link: whoever accepts it must be the session host.
+  const webEngine = process.env.BRIDGE_WEB_ENGINE ?? "inprocess";
+  let webAdapter: import("node:child_process").ChildProcess | undefined;
+  if (webEngine === "link") {
+    const webPort = Number(process.env.BRIDGE_WEB_PORT ?? 0);
+    if (!webPort) {
+      logger.error("[bridge] BRIDGE_WEB_ENGINE=link needs BRIDGE_WEB_PORT");
+      process.exit(1);
+    }
+    // src/web-host.ts compiles next to the entrypoint, one level up from this file.
+    const entry = new URL("../web-host.js", import.meta.url).pathname;
+    const child = fork(entry, [], {
+      stdio: ["ignore", "pipe", "inherit", "ipc"],
+      env: {
+        ...process.env,
+        // The adapter has no business reading the database path or the service
+        // account; it only needs where to listen and which model to default to.
+        BRIDGE_DB: "",
+        GOOGLE_SERVICE_ACCOUNT_JSON: "",
+        BRIDGE_WEB_DEFAULT_PROVIDER: defaultModel.provider,
+        BRIDGE_WEB_DEFAULT_MODEL: defaultModel.modelId,
+      },
+    });
+    webAdapter = child;
+    child.stdout?.on("data", (chunk: Buffer) => {
+      for (const line of chunk.toString().split("\n")) {
+        if (line.startsWith("WEB_ADAPTER_LISTENING ")) {
+          logger.info(`[bridge] web adapter ready on ${line.slice("WEB_ADAPTER_LISTENING ".length)}`);
+        }
+      }
+    });
+    child.on("exit", (code, signal) => {
+      // Not fatal: the session host keeps answering Chat. The supervisor will
+      // restart the whole container if this keeps happening, and the log says why.
+      logger.error(`[bridge] web adapter exited (code ${code ?? signal}) — /web is down until restart`);
+      webAdapter = undefined;
+    });
+    // `serveSessionHost` only creates a chord host: it opens no socket, so a
+    // bridge that never forks an adapter pays nothing for it.
+    serveSessionHost(seam).accept(
+      ipcLink(child as unknown as Parameters<typeof ipcLink>[0]),
+      { principal: "web-adapter", kind: "client" },
+    );
+    logger.info("[bridge] web engine=link: /web is served by the adapter process");
   }
 
   // --- One Chat message → one durable submission → one Chat reply. ---
@@ -509,6 +437,7 @@ async function main(): Promise<void> {
     logger.info("[bridge] shutting down...");
     await receiver.stop();
     artifactsServer?.close();
+    webAdapter?.kill("SIGTERM");
     // Closing the harness waits for running task code to return and leaves the
     // store consistent; anything unfinished resumes on the next start.
     await host.close().catch(() => {});
@@ -526,44 +455,3 @@ main().catch((error) => {
   process.exit(1);
 });
 
-/**
- * Strip a reverse proxy's mount prefix, so route matching is independent of
- * whether the proxy passes "/pi/web/..." or rewrites it to "/web/...".
- *
- * Only leading segments before "/web" are removed, so a conversation id or any
- * other late path component is never touched.
- */
-function webPath(pathname: string): string {
-  const at = pathname.indexOf("/web");
-  return at > 0 ? pathname.slice(at) : pathname;
-}
-
-/** Read a request body up to `maxBytes`; returns null when the cap is exceeded. */
-function readBody(req: http.IncomingMessage, maxBytes: number): Promise<string | null> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    let done = false;
-    req.on("data", (chunk: Buffer) => {
-      if (done) return;
-      size += chunk.length;
-      if (size > maxBytes) {
-        done = true;
-        resolve(null);
-        req.destroy();
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on("end", () => {
-      if (done) return;
-      done = true;
-      resolve(Buffer.concat(chunks).toString("utf8"));
-    });
-    req.on("error", (error) => {
-      if (done) return;
-      done = true;
-      reject(error);
-    });
-  });
-}

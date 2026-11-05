@@ -78,6 +78,7 @@ test("every adapter file is one of the surfaces we know about", () => {
     "router.ts",
     "view-sink.ts",
     "web.ts",
+    "web-routes.ts",
   ]);
   const unexpected = sourcesIn(adapterDir)
     .map(({ file }) => path.basename(file))

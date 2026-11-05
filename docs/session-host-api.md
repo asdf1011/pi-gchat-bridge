@@ -319,8 +319,30 @@ place until the last adapter is ported; the seam is additive.
     adapter in another process needs it — and `awaitSubmission` is the one that will need the
     state-instead-of-call shape the second spike established.
 
-  What remains: `start-bridge.sh` supervising a second process, and the web adapter pointed at a
-  linked seam instead of the in-process one.
+  **Second increment landed: the web front end can run in its own process.**
+  `BRIDGE_WEB_ENGINE=link` makes the session host fork `dist/web-host.js`, accept its chord link, and
+  stop serving `/web` itself; the adapter listens on `BRIDGE_WEB_PORT`. Verified end to end against a
+  scratch database:
+
+  ```
+  session host  :8095  /healthz 200   /web 404 (the adapter owns it)
+  adapter       :8096  /healthz 200   / 302 → /web/   /web/ 200
+                       /web/api/conversations 200 []
+                       /web/api/c/999/events → event: error  {"error":"no such conversation: 999"}
+                       POST /web/api/c/999/message → {"ok":false,"error":"no such conversation: 999"}
+  ```
+
+  So the front end runs on the seam, and a restart of that process cannot touch a running turn. Two
+  details the build forced:
+
+  - **The fork belongs to the session host, not the supervisor.** The IPC channel *is* the link, so
+    whoever accepts it must be the host; `start-bridge.sh` keeps supervising one process, and the
+    adapter is restarted with it.
+  - **The adapter gets a stripped environment** — no `BRIDGE_DB`, no service account — and it serves
+    `/healthz` for *itself* only, never on the session host's behalf.
+
+  Flipping it on is a deployment step, not a code one: set `BRIDGE_WEB_ENGINE=link` and
+  `BRIDGE_WEB_PORT=8083`, and point the tunnel's `pi.hl.id.au` ingress at 8083 instead of 8081.
 
 ## Non-goals
 
