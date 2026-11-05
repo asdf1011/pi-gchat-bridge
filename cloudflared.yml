@@ -40,8 +40,13 @@ tunnel: pi-bridge
 # model replies.
 
 ingress:
+  # With BRIDGE_WEB_ENGINE=link the web front end is its own process on
+  # BRIDGE_WEB_PORT, and that is what this hostname must reach: restarting it is
+  # then a per-process affair and cannot interrupt a running turn. The session
+  # host keeps 8081 for /healthz and /notify, which nothing outside this machine
+  # needs.
   - hostname: pi.hl.id.au
-    service: http://127.0.0.1:8081
+    service: http://127.0.0.1:8083
     originRequest:
       # SSE carries the live answer. Without this, chunked encoding lets the
       # edge hold frames until the response ends — and an event stream never
