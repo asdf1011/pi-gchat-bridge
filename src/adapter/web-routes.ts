@@ -36,6 +36,7 @@ function toJson(conversation: {
   conversationId: number;
   name: string;
   label?: string;
+  preview?: string;
   model: string;
   createdAt: number;
   lastActivityAt?: number;
@@ -44,7 +45,13 @@ function toJson(conversation: {
     conversationId: conversation.conversationId,
     chatKey: conversation.name,
     model: conversation.model,
-    ...(conversation.label === undefined ? {} : { name: conversation.label }),
+    // A title if one exists, the opening words if not, and the thread key only
+    // when neither does — which is a conversation nobody has spoken in.
+    ...(conversation.label !== undefined
+      ? { name: conversation.label }
+      : conversation.preview !== undefined
+        ? { name: conversation.preview }
+        : {}),
     createdAt: conversation.createdAt,
     lastActivityAt: conversation.lastActivityAt ?? conversation.createdAt,
   };
@@ -82,6 +89,19 @@ export function webPath(pathname: string): string {
 }
 
 /**
+ * The API path, wherever the app is mounted.
+ *
+ * The page resolves API calls against the mount root, so a page at `/32/` asks for
+ * `/api/...` while the same page behind a prefix asks for `/pi/web/api/...`.
+ * Matching on the `/api/` suffix accepts both, and any future mount, without the
+ * page having to know its own depth.
+ */
+export function apiPath(pathname: string): string {
+  const at = pathname.indexOf("/api/");
+  return at > 0 ? pathname.slice(at) : pathname;
+}
+
+/**
  * Handle one request. Returns `true` when it was a web route and the response
  * has been written, `false` to let the caller keep looking.
  */
@@ -113,7 +133,8 @@ export async function handleWebRequest(
   // What the page needs to know about this deployment. One field today; a
   // separate route rather than a field on the conversation list, so the list's
   // shape stays the array the page already renders.
-  if (req.method === "GET" && path === "/web/api/environment") {
+  const api = apiPath(path);
+  if (req.method === "GET" && api === "/api/environment") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(
       JSON.stringify({
@@ -129,7 +150,7 @@ export async function handleWebRequest(
 
   // The last few messages, so opening a conversation shows what was being
   // discussed instead of a blank pane (the stream only carries the live answer).
-  const history = /^\/web\/api\/c\/(\d+)\/history$/.exec(path);
+  const history = /^\/api\/c\/(\d+)\/history$/.exec(api);
   if (req.method === "GET" && history) {
     const limit = Math.min(Number(url.searchParams.get("limit") ?? 20) || 20, 100);
     const messages = await seam.history(Number(history[1]), { limit });
@@ -151,7 +172,7 @@ export async function handleWebRequest(
   // One image from the transcript. Bytes are served from here rather than inlined
   // into `history`, so a page of messages stays small and only the images on
   // screen are fetched.
-  const image = /^\/web\/api\/c\/(\d+)\/image\/(\d+)\/(\d+)$/.exec(path);
+  const image = /^\/api\/c\/(\d+)\/image\/(\d+)\/(\d+)$/.exec(api);
   if (req.method === "GET" && image) {
     const found = await seam.image(Number(image[1]), Number(image[2]), Number(image[3]));
     if (!found) {
@@ -172,7 +193,7 @@ export async function handleWebRequest(
 
   // The artifact list for one conversation, same-origin: the page links to the
   // artifact host but never fetches from it, so no CORS is needed anywhere.
-  const artifactList = /^\/web\/api\/c\/(\d+)\/artifacts$/.exec(path);
+  const artifactList = /^\/api\/c\/(\d+)\/artifacts$/.exec(api);
   if (req.method === "GET" && artifactList) {
     const artifacts = await seam.artifacts(Number(artifactList[1]));
     if (artifacts === undefined) {
@@ -194,7 +215,7 @@ export async function handleWebRequest(
     return true;
   }
 
-  if (req.method === "GET" && path === "/web/api/conversations") {
+  if (req.method === "GET" && api === "/api/conversations") {
     const limit = clamp(Number(url.searchParams.get("limit") ?? 30) || 30, 1, 100);
     const offset = Math.max(0, Number(url.searchParams.get("offset") ?? 0) || 0);
     // One extra row tells the client whether another page exists without a
@@ -214,7 +235,7 @@ export async function handleWebRequest(
 
   // "New chat": a conversation nobody has named yet, created from the default
   // model. The client navigates to /<id>/ afterwards.
-  if (req.method === "POST" && path === "/web/api/conversations") {
+  if (req.method === "POST" && api === "/api/conversations") {
     const name = `web:${randomUUID()}`;
     const created = await seam.create(name, { model });
     res.writeHead(201, { "Content-Type": "application/json" });
@@ -222,7 +243,7 @@ export async function handleWebRequest(
     return true;
   }
 
-  const events = /^\/web\/api\/c\/(\d+)\/events$/.exec(path);
+  const events = /^\/api\/c\/(\d+)\/events$/.exec(api);
   if (req.method === "GET" && events) {
     const conversationId = Number(events[1]);
     res.writeHead(200, {
@@ -270,7 +291,7 @@ export async function handleWebRequest(
     return true;
   }
 
-  const send = /^\/web\/api\/c\/(\d+)\/message$/.exec(path);
+  const send = /^\/api\/c\/(\d+)\/message$/.exec(api);
   if (req.method === "POST" && send) {
     if (token && req.headers.authorization !== `Bearer ${token}`) {
       res.writeHead(401, { "Content-Type": "application/json" });

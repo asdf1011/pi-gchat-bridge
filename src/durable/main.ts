@@ -43,6 +43,7 @@ import { ipcLink } from "@earendil-works/chord";
 import { SecretRegistry } from "./extensions/redact.js";
 import { secretsFromEnvironment } from "./extensions/secret-redactor.js";
 import { applyDurableTopicSummary } from "./topic.js";
+import { nameUntitledConversations } from "./naming.js";
 import { identify } from "./identity.js";
 import { failureNotice } from "./failure-notice.js";
 import { AgentRouter } from "../agent-sessions.js";
@@ -443,6 +444,7 @@ async function main(): Promise<void> {
             baseUrl: config.topicSummaryBaseUrl,
             model: config.topicSummaryModel,
             timeoutMs: config.topicSummaryTimeoutMs,
+            ...(config.topicSummaryApiKey ? { apiKey: config.topicSummaryApiKey } : {}),
           },
         });
       }
@@ -489,6 +491,25 @@ async function main(): Promise<void> {
 
   await receiver.start(handler);
   logger.info("[bridge] running on the durable engine. Ctrl+C to stop.");
+
+  // Name whatever has no title yet, in the background. Detached on purpose: a
+  // hundred titles must not delay the first Chat message, and one title at a time
+  // keeps the titler from competing with a running turn.
+  if (config.topicSummary) {
+    void nameUntitledConversations({
+      seam,
+      config: {
+        baseUrl: config.topicSummaryBaseUrl,
+        model: config.topicSummaryModel,
+        timeoutMs: config.topicSummaryTimeoutMs,
+        ...(config.topicSummaryApiKey ? { apiKey: config.topicSummaryApiKey } : {}),
+      },
+      intervalMs: 250,
+    }).then(
+      (count) => logger.info(`[naming] pass finished: ${count} conversation(s) named`),
+      (error: unknown) => logger.error(`[naming] pass failed: ${(error as Error).message}`),
+    );
+  }
 }
 
 main().catch((error) => {

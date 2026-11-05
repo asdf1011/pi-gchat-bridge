@@ -99,6 +99,25 @@ test("an image-only message is kept, with its entry id so the bytes can be fetch
   await host.harness.close(BACKGROUND_CONTEXT);
 });
 
+test("the first message's opening words are kept as a preview, once", async () => {
+  const host = await memoryHost();
+  const created = await host.createNamed("threads/P", { model: { provider: "p", modelId: "m" } });
+
+  await host.setPreview(created.conversationId, "  how   do I shrink a disk image without losing the partition table  ".repeat(2));
+  const rows = await host.recentConversations();
+  const row = rows.find((entry) => entry.conversationId === created.conversationId);
+  assert.ok(row?.preview, "a conversation with no title still has something to show");
+  // Fifteen words, then an ellipsis: the count is the promise, not the marker.
+  assert.equal(row!.preview!.replace(/…$/, "").trim().split(" ").length, 15);
+  assert.match(row!.preview!, /…$/, "a truncated preview says so");
+
+  // Written once: a later message does not rewrite the opening.
+  await host.setPreview(created.conversationId, "a completely different second message");
+  const again = (await host.recentConversations()).find((entry) => entry.conversationId === created.conversationId);
+  assert.equal(again?.preview, row!.preview);
+  await host.harness.close(BACKGROUND_CONTEXT);
+});
+
 test("history() truncates one huge message instead of shipping it", async () => {
   const host = await memoryHost();
   const created = await host.createNamed("threads/B", { model: { provider: "p", modelId: "m" } });

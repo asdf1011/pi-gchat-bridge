@@ -60,6 +60,13 @@ export interface TopicSummaryConfig {
   baseUrl: string;
   model: string;
   timeoutMs: number;
+  /**
+   * Bearer token for a hosted titler.
+   *
+   * Only sent when set: the local llama.cpp server takes no auth, and sending an
+   * empty header there is at best noise.
+   */
+  apiKey?: string;
 }
 
 /** What the title prompt was built from (kept separate so it's unit-testable). */
@@ -114,7 +121,12 @@ type PostJson = (url: string, body: unknown, timeoutMs: number) => Promise<unkno
  * while the server is still happily generating. Here the only deadline is our
  * own (configurable) one. Injection-friendly so tests need no real server.
  */
-export function postJson(url: string, body: unknown, timeoutMs: number): Promise<unknown> {
+export function postJson(
+  url: string,
+  body: unknown,
+  timeoutMs: number,
+  apiKey?: string,
+): Promise<unknown> {
   const target = new URL(url);
   const transport = target.protocol === "https:" ? https : http;
   const payload = JSON.stringify(body);
@@ -127,7 +139,11 @@ export function postJson(url: string, body: unknown, timeoutMs: number): Promise
         // response, and node's keep-alive agent reuses the dead socket for the
         // next request, failing it instantly with "socket hang up".
         agent: false,
-        headers: { "content-type": "application/json", "content-length": Buffer.byteLength(payload) },
+        headers: {
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(payload),
+          ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
+        },
       },
       (res) => {
         const chunks: Buffer[] = [];
@@ -165,7 +181,7 @@ export async function summarizeSessionTopic(
   config: TopicSummaryConfig,
   deps?: { post?: PostJson; maxChars?: number },
 ): Promise<string | undefined> {
-  const post = deps?.post ?? postJson;
+  const post = deps?.post ?? ((url, body, timeout) => postJson(url, body, timeout, config.apiKey));
   const turn = await readFirstTurn(file);
   // Image-only greetings ("what's going on here" + photo) are exactly the case
   // this feature exists for, so pass the image itself — LFM3-VL is multimodal.

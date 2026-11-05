@@ -73,6 +73,8 @@ export interface NamedConversation {
    * and equal to `createdAt` until the conversation is used.
    */
   lastActivityAt?: number;
+  /** Opening words, shown when no title has been generated yet. */
+  preview?: string;
   /** `"provider/modelId"`. */
   model: string;
   thinking?: string;

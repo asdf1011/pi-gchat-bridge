@@ -46,6 +46,7 @@ function fakeHost(options: FakeOptions = {}): BridgeHost {
         .sort((a, b) => (b.updatedAt ?? b.createdAt) - (a.updatedAt ?? a.createdAt))
         .slice(offset ?? 0, (offset ?? 0) + (limit ?? Number.MAX_SAFE_INTEGER)),
     touch: async () => {},
+    setPreview: async () => {},
     bindingFor: async (name: string) => (options.bindings ?? {})[name],
     conversationFor: async (name: string, agent: { model: { provider: string; modelId: string } }) => ({
       binding: {

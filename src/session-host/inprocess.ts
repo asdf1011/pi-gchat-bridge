@@ -91,6 +91,7 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
     name?: string;
     createdAt: number;
     updatedAt?: number;
+    preview?: string;
   }): NamedConversation => ({
     conversationId: binding.conversationId,
     name,
@@ -99,6 +100,7 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
     ...(binding.thinking === undefined ? {} : { thinking: binding.thinking }),
     createdAt: binding.createdAt,
     lastActivityAt: binding.updatedAt ?? binding.createdAt,
+    ...(binding.preview === undefined ? {} : { preview: binding.preview }),
   });
 
   return {
@@ -297,8 +299,14 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
         },
         host.context,
       );
-      // Remember that the conversation was used, for the recent list.
+      // Remember that the conversation was used, and what it opened with, for the
+      // recent list: a title is a model call away, and the list needs a name now.
       await host.touch(conversationId).catch(() => {});
+      const firstText =
+        typeof request.content === "string"
+          ? request.content
+          : request.content.find((part) => part.type === "text")?.text;
+      if (firstText) await host.setPreview(conversationId, firstText).catch(() => {});
       return { submissionId: submission.id as unknown as number };
     },
   };

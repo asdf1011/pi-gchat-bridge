@@ -12,7 +12,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import test from "node:test";
 
-import { handleWebRequest, webPath } from "../src/adapter/web-routes.js";
+import { apiPath, handleWebRequest, webPath } from "../src/adapter/web-routes.js";
 import type { NamedConversation, SessionHost } from "../src/session-host/api.js";
 import type { ProjectedView } from "../src/session-host/projection.js";
 
@@ -95,6 +95,24 @@ test("the root and a conversation URL both serve the page", async () => {
     // would hide a proxy that is not stripping what it should.
     assert.equal((await fetch(`${served.base}/pi/`, { redirect: "manual" })).status, 404);
     assert.equal(webPath("/pi/web/api/conversations"), "/web/api/conversations");
+    // The page resolves API calls against the mount root, so the same route has to
+    // answer at "/api/..." and at "/web/api/..." depending on where it is mounted.
+    assert.equal(apiPath("/api/conversations"), "/api/conversations");
+    assert.equal(apiPath("/pi/web/api/c/7/history"), "/api/c/7/history");
+  } finally {
+    await served.close();
+  }
+});
+
+test("the API answers at the mount root as well as under /web", async () => {
+  const served = await serve(fakeSeam());
+  try {
+    // The page at "/32/" asks for "/api/..."; the same page behind a prefix asks
+    // for "/pi/web/api/...". Both name the same route.
+    for (const path of ["/api/environment", "/web/api/environment", "/pi/web/api/environment"]) {
+      const response = await fetch(`${served.base}${path}`);
+      assert.equal(response.status, 200, path);
+    }
   } finally {
     await served.close();
   }
@@ -235,6 +253,32 @@ test("an image is served as bytes, with its own content type", async () => {
     assert.deepEqual([...bytes], [0x89, 0x50, 0x4e, 0x47]);
 
     assert.equal((await fetch(`${served.base}/web/api/c/1/image/9/9`)).status, 404);
+  } finally {
+    await served.close();
+  }
+});
+
+test("a conversation is listed by title, else by its opening words, else by key", async () => {
+  const served = await serve(
+    fakeSeam({
+      conversations: [
+        { conversationId: 1, name: "threads/titled", label: "Disk images", model: "p/m", createdAt: 1 },
+        { conversationId: 2, name: "threads/preview", preview: "how do I shrink a disk image…", model: "p/m", createdAt: 2 },
+        { conversationId: 3, name: "threads/bare", model: "p/m", createdAt: 3 },
+      ],
+    }),
+  );
+  try {
+    const page = (await (await fetch(`${served.base}/api/conversations`)).json()) as {
+      items: { chatKey: string; name?: string }[];
+    };
+    assert.deepEqual(page.items.map((item) => item.name), [
+      "Disk images",
+      "how do I shrink a disk image…",
+      undefined,
+    ]);
+    // The key is still there for anything that needs an address.
+    assert.deepEqual(page.items.map((item) => item.chatKey), ["threads/titled", "threads/preview", "threads/bare"]);
   } finally {
     await served.close();
   }

@@ -63,6 +63,8 @@ export interface Config {
   topicSummaryModel: string;
   /** Give up on a title after this long — CPU inference is slow and shared. */
   topicSummaryTimeoutMs: number;
+  /** Bearer token for a hosted titler; empty for the local llama.cpp one. */
+  topicSummaryApiKey: string;
   /**
    * Streaming placeholder: post a fresh final message and delete the placeholder
    * (true, the historical behaviour — costs a "Message deleted" stub but the
@@ -130,6 +132,7 @@ export function loadConfig(): Config {
     // every title evicted a conversation's KV prefix, which on a 2-slot server
     // is the whole cache. Default port 8091 is lfm-server.sh's titler instance.
     topicSummaryBaseUrl: process.env.BRIDGE_TOPIC_SUMMARY_BASE_URL ?? "http://127.0.0.1:8091/v1",
+    topicSummaryApiKey: process.env.BRIDGE_TOPIC_SUMMARY_API_KEY ?? "",
     topicSummaryModel: process.env.BRIDGE_TOPIC_SUMMARY_MODEL ?? "lfm3-vl-2b-q8",
     // 15 min: CPU inference is slow, and the titler shares the machine with
     // whatever conversations are running (it no longer shares their slots).

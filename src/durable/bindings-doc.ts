@@ -33,6 +33,13 @@ export type ConversationBinding = {
   /** Epoch ms, so a future `/sessions` can sort by recency without opening each conversation. */
   createdAt: number;
   /**
+   * The first few words of the first message, for a conversation with no name yet.
+   *
+   * A title takes a model call and may never arrive; the list still has to show
+   * something recognisable rather than a thread id.
+   */
+  preview?: string;
+  /**
    * Last time something was said here.
    *
    * Absent on bindings written before this existed, which is why every reader

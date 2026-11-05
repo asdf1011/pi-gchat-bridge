@@ -212,6 +212,29 @@ export class BridgeHost {
   }
 
   /**
+   * Remember the opening words of a conversation, if it has none yet.
+   *
+   * Written once, from the first message with text in it. Cheap (one commit) and
+   * it is what the list shows until a title exists.
+   */
+  async setPreview(conversationId: number, text: string): Promise<void> {
+    const preview = firstWords(text, PREVIEW_WORDS);
+    if (!preview) return;
+    const existing = await this.harness.snapshot(BindingsDoc, this.context);
+    const key = Object.entries(existing?.byChatKey ?? {}).find(
+      ([, binding]) => binding.conversationId === conversationId,
+    )?.[0];
+    if (!key) return;
+    if (existing?.byChatKey[key]?.preview) return;
+    await this.harness.commit(async (tx) => {
+      const doc = await tx.doc(BindingsDoc);
+      const current = doc.byChatKey[key];
+      if (!current || current.preview) return;
+      doc.byChatKey[key] = { ...current, preview };
+    }, this.context);
+  }
+
+  /**
    * Record that a conversation was used just now.
    *
    * Called on every submission, from either surface. One small commit per
@@ -756,6 +779,17 @@ const VerdictsDoc = defineDoc<VerdictsValue>({
   initial: () => ({ byThreadKey: {} }),
   checkpointWhen: () => true,
 });
+
+/** How many words of the first message stand in for a missing title. */
+const PREVIEW_WORDS = 15;
+
+/** The first `count` words of some text, on one line. */
+export function firstWords(text: string, count = PREVIEW_WORDS): string {
+  const words = text.replace(/\s+/g, " ").trim().split(" ").filter((word) => word !== "");
+  if (words.length === 0) return "";
+  const head = words.slice(0, count).join(" ");
+  return words.length > count ? `${head}…` : head;
+}
 
 /** How much of one message the pane shows. Long tool output would swamp it. */
 const TRANSCRIPT_MESSAGE_CHARS = 4000;
