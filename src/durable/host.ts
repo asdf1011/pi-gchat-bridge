@@ -611,16 +611,47 @@ export class BridgeHost {
       for (const message of model) {
         if (message.role !== "user" && message.role !== "assistant") continue;
         const text = textOf(message);
-        if (!text) continue;
+        const images = imagesOf(message);
+        // A message with only an image is still a message: dropping it would hide
+        // the photo someone sent from the transcript.
+        if (!text && images.length === 0) continue;
         const at = (message as { timestamp?: unknown }).timestamp;
+        const entryId = (raw as { id?: unknown }).id;
         messages.push({
           role: message.role,
           text: text.slice(0, TRANSCRIPT_MESSAGE_CHARS),
           ...(typeof at === "number" && Number.isFinite(at) ? { at } : {}),
+          ...(typeof entryId === "number" ? { entryId } : {}),
+          ...(images.length === 0 ? {} : { images }),
         });
       }
     }
     return messages.slice(-limit);
+  }
+
+  /** One image's bytes from a transcript entry. */
+  async image(
+    conversationId: number,
+    entryId: number,
+    index: number,
+  ): Promise<{ mimeType: string; data: string } | undefined> {
+    const conversation = await this.harness.conversation(
+      conversationId as ConversationId,
+      this.context,
+    );
+    if (!conversation) return undefined;
+    // The plain entry, not a typed one: an image can be in a notice or a user
+    // message as easily as in an answer, and the typed accessor decodes one kind.
+    const entry = await conversation
+      .commit((tx) => tx.entry(entryId as never), this.context)
+      .catch(() => undefined);
+    const messages = (entry as { model?: readonly { content?: unknown }[] } | undefined)?.model ?? [];
+    for (const message of messages) {
+      const images = imageBlocks(message);
+      const found = images[index];
+      if (found) return found;
+    }
+    return undefined;
   }
 
   /** The first user/assistant exchange, for a title. */
@@ -746,6 +777,23 @@ function firstTurnOf(entries: readonly unknown[]): { userText: string; assistant
     }
   }
   return userText ? { userText, assistantText } : undefined;
+}
+
+/** Image blocks of one message, as `{mimeType, data}`. */
+function imageBlocks(message: { content?: unknown }): { mimeType: string; data: string }[] {
+  const content = message.content;
+  if (!Array.isArray(content)) return [];
+  return content.flatMap((block) => {
+    const typed = block as { type?: string; data?: string; mimeType?: string };
+    return typed.type === "image" && typeof typed.data === "string"
+      ? [{ mimeType: typed.mimeType ?? "image/png", data: typed.data }]
+      : [];
+  });
+}
+
+/** What a viewer needs to know about one message's images. */
+function imagesOf(message: { content?: unknown }): { mimeType: string }[] {
+  return imageBlocks(message).map((image) => ({ mimeType: image.mimeType }));
 }
 
 /** Concatenated text blocks of one message. */

@@ -117,12 +117,26 @@ export interface SubmitRequest {
 
 export type SubmitResult = { submissionId: number } | { error: string };
 
+/** An image attached to a message. The bytes are fetched separately. */
+export interface TranscriptImage {
+  mimeType: string;
+}
+
 /** One message as a viewer shows it: who said it, what, and when. */
 export interface TranscriptMessage {
   role: "user" | "assistant";
   text: string;
   /** Epoch ms the message was created, when the host knows it. */
   at?: number;
+  /**
+   * Entry this message came from, so its images can be addressed.
+   *
+   * A conversation can have several messages per entry; the pair
+   * `(entryId, index)` is what the image route takes.
+   */
+  entryId?: number;
+  /** Images attached to this message, in order. Bytes are not inlined. */
+  images?: TranscriptImage[];
 }
 
 /**
@@ -218,6 +232,19 @@ export interface SessionHost {
     conversationId: number,
     options?: { limit?: number; signal?: AbortSignal },
   ): Promise<readonly TranscriptMessage[] | undefined>;
+
+  /**
+   * The bytes of one image from a transcript entry, as base64.
+   *
+   * Separate from `history` because images are megabytes and history is a page
+   * of messages: a viewer fetches the ones it is about to show, and nothing else.
+   */
+  image(
+    conversationId: number,
+    entryId: number,
+    index: number,
+    options?: { signal?: AbortSignal },
+  ): Promise<{ mimeType: string; data: string } | undefined>;
 
   /** What this conversation looks like right now. Small and bounded. */
   snapshot(conversationId: number, options?: { signal?: AbortSignal }): Promise<ProjectedView | undefined>;

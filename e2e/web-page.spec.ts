@@ -198,7 +198,9 @@ test("sending a message posts the trimmed text and clears the box", async ({ pag
 
   await expect(page.locator("#text")).toHaveValue("");
   await expect.poll(() => posted.length).toBe(1);
-  expect(posted[0]).toEqual({ text: "hello from the browser" });
+  // `images` is always sent — empty when nothing was pasted — because the route
+  // validates the list when it is present.
+  expect(posted[0]).toEqual({ text: "hello from the browser", images: [] });
   expect(errors).toEqual([]);
 });
 

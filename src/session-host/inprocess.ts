@@ -136,6 +136,14 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
       return host.history(conversationId, options?.limit);
     },
 
+    async image(
+      conversationId: number,
+      entryId: number,
+      index: number,
+    ): Promise<{ mimeType: string; data: string } | undefined> {
+      return host.image(conversationId, entryId, index);
+    },
+
     async snapshot(conversationId: number): Promise<ProjectedView | undefined> {
       const conversation = await conversationOf(conversationId);
       if (!conversation) return undefined;

@@ -67,6 +67,38 @@ test("history() returns the last messages with text, newest last", async () => {
   await host.harness.close(BACKGROUND_CONTEXT);
 });
 
+test("an image-only message is kept, with its entry id so the bytes can be fetched", async () => {
+  const host = await memoryHost();
+  const created = await host.createNamed("threads/C", { model: { provider: "p", modelId: "m" } });
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString("base64");
+  await host.writeEntry(created.conversationId, {
+    kind: "app.notice",
+    data: {},
+    model: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "what is this" },
+          { type: "image", data: png, mimeType: "image/png" },
+        ],
+      },
+    ],
+  });
+
+  const rows = await host.history(created.conversationId);
+  assert.equal(rows?.length, 1);
+  assert.equal(rows?.[0].text, "what is this");
+  assert.deepEqual(rows?.[0].images, [{ mimeType: "image/png" }], "the image is announced, not inlined");
+  assert.ok(rows?.[0].entryId, "the entry id is what the image URL is built from");
+
+  // And the bytes come back when asked for by that id.
+  const found = await host.image(created.conversationId, rows![0].entryId!, 0);
+  assert.equal(found?.mimeType, "image/png");
+  assert.equal(found?.data, png);
+  assert.equal(await host.image(created.conversationId, rows![0].entryId!, 7), undefined);
+  await host.harness.close(BACKGROUND_CONTEXT);
+});
+
 test("history() truncates one huge message instead of shipping it", async () => {
   const host = await memoryHost();
   const created = await host.createNamed("threads/B", { model: { provider: "p", modelId: "m" } });

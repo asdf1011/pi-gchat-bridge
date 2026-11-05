@@ -139,6 +139,8 @@ export function serveSessionHost(seam: SessionHost): Host {
       history: async ({ limit }: { limit: number }) => [
         ...((await seam.history(conversation, { limit })) ?? []),
       ],
+      image: async ({ entryId, index }: { entryId: number; index: number }) =>
+        (await seam.image(conversation, entryId, index)) ?? null,
     };
   });
 
@@ -262,6 +264,17 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
     announce: async (conversationId: number, text: string) => {
       const root = await session();
       return host.root((ctx) => root.announce({ conversation: conversationId, text }, ctx));
+    },
+
+    image: async (conversationId: number, entryId: number, index: number) => {
+      const ref = await conversationRef(host, conversationId, session);
+      if (!ref) return undefined;
+      try {
+        const found = await host.root((ctx) => ref.image({ entryId, index }, ctx));
+        return found ?? undefined;
+      } finally {
+        ref.release();
+      }
     },
 
     state: () => {

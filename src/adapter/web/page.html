@@ -52,6 +52,8 @@
   #log .bubble .status { font: .82em ui-monospace, SFMono-Regular, monospace;
     opacity: .75; white-space: pre-wrap; word-break: break-word; }
   #log .bubble .status + * { margin-top: .5rem; }
+  #log .images { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .5rem; }
+  #log .images img { max-width: min(24rem, 100%); max-height: 24rem; border-radius: .6rem; display: block; }
   #log .bubble > .body:not(:empty) + .status { margin-top: .5rem; }
   /* Rendered markdown. The HTML comes from the server's escape-first renderer,
      so every tag here is ours; these rules only make it readable in a pane. */
@@ -110,6 +112,14 @@
   #index-pager { display: flex; gap: .5rem; align-items: center; margin-top: 1rem;
     max-width: 46rem; font-size: .85em; opacity: .85; }
   #index-pager span { flex: 1; opacity: .7; }
+  /* Pasted images waiting to be sent, above the composer. */
+  #attachments { display: flex; gap: .5rem; padding: .5rem .75rem 0; flex-wrap: wrap; }
+  #attachments[hidden] { display: none; }
+  #attachments figure { margin: 0; position: relative; }
+  #attachments img { height: 4rem; border-radius: .5rem; display: block; }
+  #attachments button { position: absolute; top: -.4rem; right: -.4rem; padding: 0;
+    width: 1.25rem; height: 1.25rem; font-size: .7rem; line-height: 1; border-radius: 50%;
+    border: 1px solid #8886; background: Canvas; cursor: pointer; }
   #new-chat { position: fixed; right: 1rem; bottom: 1rem; z-index: 10;
     width: 2.75rem; height: 2.75rem; padding: 0; border-radius: 50%; font-size: 1.3rem;
     border: 1px solid #8886; background: var(--bubble-me); cursor: pointer; }
@@ -147,6 +157,7 @@
 <div id="pane">
   <p id="log"></p>
   <div id="tool"></div>
+  <div id="attachments" hidden></div>
   <form id="send">
     <textarea id="text" placeholder="Message this conversation — same one Chat is in"></textarea>
     <button>Send</button>
@@ -295,7 +306,7 @@ function formatWhen(ms) {
 }
 
 /** One chat row: avatar and name for pi, just a time for you. */
-function messageRow(role, html, at, live) {
+function messageRow(role, html, at, live, images) {
   const me = role === 'user';
   const block = document.createElement('div');
   block.className = 'msg ' + (me ? 'me' : 'pi') + (live ? ' live' : '');
@@ -330,6 +341,21 @@ function messageRow(role, html, at, live) {
   // tag, so this HTML is ours and cannot carry a script.
   bubble.innerHTML = html;
 
+  // Images someone sent: fetched from this origin by entry and index, so the
+  // transcript payload stays text.
+  if (images && images.length && current) {
+    const strip = document.createElement('div');
+    strip.className = 'images';
+    images.forEach((image, index) => {
+      const img = document.createElement('img');
+      img.loading = 'lazy';
+      img.alt = image.mimeType || 'image';
+      img.src = image.dataUrl || rel('api/c/' + current + '/image/' + image.entryId + '/' + index);
+      strip.append(img);
+    });
+    if (strip.childElementCount > 0) bubble.append(strip);
+  }
+
   col.append(meta, bubble);
   block.append(col);
   return block;
@@ -361,7 +387,15 @@ if (typeof ResizeObserver === 'function') {
 function paint() {
   log.innerHTML = '';
   for (const message of history) {
-    log.append(messageRow(message.role, message.html || escapeText(message.text || ''), message.at, false));
+    log.append(
+      messageRow(
+        message.role,
+        message.html || escapeText(message.text || ''),
+        message.at,
+        false,
+        message.images ? message.images.map((image) => ({ ...image, entryId: message.entryId })) : undefined,
+      ),
+    );
   }
   // The live turn: the streaming answer, and the status of whatever is running.
   if (liveText || busy || statusLine) {
@@ -508,6 +542,59 @@ draftBox.addEventListener('input', () => {
   saveDraft();
 });
 
+// --- Pasted images ---
+//
+// A screenshot on the clipboard is the most common thing anyone attaches to a
+// message, so paste is the way in: no file picker, no upload button. The bytes
+// stay in this page until send, as data URLs, and go up with the message.
+
+/** Pasted images waiting to be sent: `{dataUrl, mimeType, data}`. */
+let pendingImages = [];
+const attachmentsBox = document.getElementById('attachments');
+
+function renderAttachments() {
+  attachmentsBox.innerHTML = '';
+  attachmentsBox.hidden = pendingImages.length === 0;
+  pendingImages.forEach((image, index) => {
+    const figure = document.createElement('figure');
+    const img = document.createElement('img');
+    img.src = image.dataUrl;
+    img.alt = image.mimeType || 'pasted image';
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.textContent = '✕';
+    remove.title = 'Remove';
+    remove.onclick = () => {
+      pendingImages.splice(index, 1);
+      renderAttachments();
+    };
+    figure.append(img, remove);
+    attachmentsBox.append(figure);
+  });
+  fitBox();
+}
+
+draftBox.addEventListener('paste', (event) => {
+  const items = event.clipboardData ? Array.from(event.clipboardData.items) : [];
+  const files = items
+    .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+    .map((item) => item.getAsFile())
+    .filter((file) => file);
+  if (files.length === 0) return; // ordinary text paste: leave it alone
+  event.preventDefault();
+  for (const file of files) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = String(reader.result || '');
+      const comma = dataUrl.indexOf(',');
+      if (comma < 0) return;
+      pendingImages.push({ dataUrl: dataUrl, data: dataUrl.slice(comma + 1), mimeType: file.type });
+      renderAttachments();
+    };
+    reader.readAsDataURL(file);
+  }
+});
+
 // Enter sends, because this is a chat box and that is what a chat box does.
 // Shift-Enter and Ctrl-Enter (and Cmd-Enter) insert a newline instead, so a
 // multi-line message is still possible without reaching for the mouse. IME
@@ -525,20 +612,35 @@ document.getElementById('send').onsubmit = async (e) => {
   e.preventDefault();
   const box = textBox;
   const text = box.value.trim();
-  if (!text || !current) return;
+  if ((!text && pendingImages.length === 0) || !current) return;
+  const sending = pendingImages;
+  pendingImages = [];
+  renderAttachments();
   box.value = '';
   fitBox();
   const response = await fetch(rel('api/c/' + current + '/message'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({
+      text,
+      images: sending.map((image) => ({ data: image.data, mimeType: image.mimeType })),
+    }),
   });
   // Show it immediately, the way Chat echoes your message: waiting for the
   // history refetch at the end of the turn made it look lost.
   try {
     const result = await response.json();
     if (result && result.ok) {
-      history.push({ role: 'user', text: text, html: result.html, at: Date.now() });
+      history.push({
+        role: 'user',
+        text: text,
+        html: result.html,
+        at: Date.now(),
+        // The pasted image is shown from its data URL: it has no entry id until
+        // the transcript comes back, and re-reading it from disk mid-send would
+        // be slower than the copy already in hand.
+        images: sending.map((image) => ({ mimeType: image.mimeType, dataUrl: image.dataUrl })),
+      });
       paint();
     }
   } catch {

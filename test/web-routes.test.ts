@@ -19,12 +19,17 @@ import type { ProjectedView } from "../src/session-host/projection.js";
 const view: ProjectedView = { liveText: "", busy: false, lastAssistantText: "", tools: [] };
 
 const announced: string[] = [];
+const submitted: unknown[] = [];
 
 function fakeSeam(
   options: { conversations?: NamedConversation[]; artifacts?: unknown[]; history?: unknown[] } = {},
 ): SessionHost {
   return {
     history: async (id: number) => (id === 1 ? (options.history ?? []) : undefined),
+    image: async (id: number, entryId: number, index: number) =>
+      id === 1 && entryId === 5 && index === 0
+        ? { mimeType: "image/png", data: Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString("base64") }
+        : undefined,
     announce: async (_id: number, text: string) => {
       announced.push(text);
       return true;
@@ -37,8 +42,10 @@ function fakeSeam(
       return { snapshot: view, detach() {} };
     },
     artifacts: async (id: number) => (id === 1 ? (options.artifacts ?? []) : undefined),
-    submit: async (id: number, request: { content: unknown }) =>
-      id === 1 ? { submissionId: 7 } : { error: `no such conversation: ${id}` },
+    submit: async (id: number, request: { content: unknown }) => {
+      submitted.push(request.content);
+      return id === 1 ? { submissionId: 7 } : { error: `no such conversation: ${id}` };
+    },
   } as unknown as SessionHost;
 }
 
@@ -162,6 +169,72 @@ test("history arrives rendered, and the rendering cannot carry a script", async 
     // this into innerHTML, and this origin can submit messages.
     assert.ok(!rows[1].html.includes("<img"), rows[1].html);
     assert.match(rows[1].html, /&lt;img/);
+  } finally {
+    await served.close();
+  }
+});
+
+test("a pasted image reaches the host as a content part", async () => {
+  const served = await serve(fakeSeam());
+  try {
+    submitted.length = 0;
+    announced.length = 0;
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString("base64");
+    const response = await fetch(`${served.base}/web/api/c/1/message`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "look", images: [{ data: png, mimeType: "image/png" }] }),
+    });
+    assert.equal(response.status, 202);
+
+    // Text first, then the image, as Chat sends it: the transcript and the model
+    // both see the same shape.
+    assert.deepEqual(submitted[0], [
+      { type: "text", text: "look" },
+      { type: "image", data: png, mimeType: "image/png" },
+    ]);
+    // And the Chat thread's notice says an image came with it.
+    assert.equal(announced[0], "someone (webui): look [1 image]");
+  } finally {
+    await served.close();
+  }
+});
+
+test("a non-image or oversized attachment is refused", async () => {
+  const served = await serve(fakeSeam());
+  try {
+    const notImage = await fetch(`${served.base}/web/api/c/1/message`, {
+      method: "POST",
+      body: JSON.stringify({ text: "x", images: [{ data: "aGk=", mimeType: "text/html" }] }),
+    });
+    assert.equal(notImage.status, 400);
+
+    const tooBig = await fetch(`${served.base}/web/api/c/1/message`, {
+      method: "POST",
+      body: JSON.stringify({
+        text: "x",
+        images: [{ data: Buffer.alloc(9 * 1024 * 1024).toString("base64"), mimeType: "image/png" }],
+      }),
+    });
+    assert.equal(tooBig.status, 400);
+  } finally {
+    await served.close();
+  }
+});
+
+test("an image is served as bytes, with its own content type", async () => {
+  const served = await serve(fakeSeam());
+  try {
+    const response = await fetch(`${served.base}/web/api/c/1/image/5/0`);
+    assert.equal(response.status, 200);
+    // The browser must not be told this is text: an image served as anything else
+    // either renders as mojibake or refuses to render at all.
+    assert.equal(response.headers.get("content-type"), "image/png");
+    assert.equal(response.headers.get("cache-control"), "private, max-age=3600");
+    const bytes = Buffer.from(await response.arrayBuffer());
+    assert.deepEqual([...bytes], [0x89, 0x50, 0x4e, 0x47]);
+
+    assert.equal((await fetch(`${served.base}/web/api/c/1/image/9/9`)).status, 404);
   } finally {
     await served.close();
   }

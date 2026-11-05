@@ -14,7 +14,14 @@
 import { randomUUID } from "node:crypto";
 import type http from "node:http";
 
-import { attachWebClient, webPage, webPageVersion, webSubmit } from "./web.js";
+import {
+  attachWebClient,
+  MAX_WEB_IMAGE_BYTES,
+  webPage,
+  webPageVersion,
+  webSubmit,
+  type PastedImage,
+} from "./web.js";
 import { renderMarkdown } from "./markdown.js";
 import type { SessionHost } from "../session-host/api.js";
 import { logger } from "../logger.js";
@@ -141,6 +148,28 @@ export async function handleWebRequest(
     return true;
   }
 
+  // One image from the transcript. Bytes are served from here rather than inlined
+  // into `history`, so a page of messages stays small and only the images on
+  // screen are fetched.
+  const image = /^\/web\/api\/c\/(\d+)\/image\/(\d+)\/(\d+)$/.exec(path);
+  if (req.method === "GET" && image) {
+    const found = await seam.image(Number(image[1]), Number(image[2]), Number(image[3]));
+    if (!found) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "no such image" }));
+      return true;
+    }
+    const bytes = Buffer.from(found.data, "base64");
+    res.writeHead(200, {
+      "Content-Type": found.mimeType,
+      "Content-Length": String(bytes.length),
+      // Private: the image is a user's, not a public asset.
+      "Cache-Control": "private, max-age=3600",
+    });
+    res.end(bytes);
+    return true;
+  }
+
   // The artifact list for one conversation, same-origin: the page links to the
   // artifact host but never fetches from it, so no CORS is needed anywhere.
   const artifactList = /^\/web\/api\/c\/(\d+)\/artifacts$/.exec(path);
@@ -248,22 +277,41 @@ export async function handleWebRequest(
       res.end(JSON.stringify({ ok: false, error: "unauthorized" }));
       return true;
     }
-    const body = await readBody(req, 200_000);
+    // Room for a couple of pasted images: base64 inflates by a third, and the
+    // cap below is per image.
+    const body = await readBody(req, 24_000_000);
     if (body === null) {
       res.writeHead(413, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: false, error: "request body too large" }));
       return true;
     }
     let text = "";
+    let images: PastedImage[] = [];
     try {
-      const parsed = JSON.parse(body) as { text?: unknown };
+      const parsed = JSON.parse(body) as { text?: unknown; images?: unknown };
       text = typeof parsed.text === "string" ? parsed.text : "";
+      images = Array.isArray(parsed.images)
+        ? parsed.images.flatMap((entry) => {
+            const image = entry as { data?: unknown; mimeType?: unknown };
+            if (typeof image.data !== "string" || typeof image.mimeType !== "string") return [];
+            // A pasted file is untrusted input: refuse anything that is not an
+            // image, and anything too big to send to a model.
+            if (!image.mimeType.startsWith("image/")) return [];
+            if (Buffer.byteLength(image.data, "base64") > MAX_WEB_IMAGE_BYTES) return [];
+            return [{ data: image.data, mimeType: image.mimeType }];
+          })
+        : [];
+      if (Array.isArray(parsed.images) && images.length !== parsed.images.length) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: "unsupported or oversized image" }));
+        return true;
+      }
     } catch {
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: false, error: "invalid JSON body" }));
       return true;
     }
-    const result = await webSubmit(handleOptions, Number(send[1]), text);
+    const result = await webSubmit(handleOptions, Number(send[1]), text, "steer", images);
     if (result.ok) {
       // Chat cannot show this as the person who typed it, but the thread should
       // read as a conversation: say who spoke and what they said. Failure is
@@ -271,7 +319,8 @@ export async function handleWebRequest(
       const speaker = (who.email ?? "someone").split("@")[0];
       // Truncated: a long paste would be a Chat API error, and the notice is a
       // signpost to the conversation, not a copy of it.
-      const notice = text.length > 1200 ? `${text.slice(0, 1200)}…` : text;
+      const attachment = images.length === 0 ? "" : ` [${images.length} image${images.length === 1 ? "" : "s"}]`;
+      const notice = (text.length > 1200 ? `${text.slice(0, 1200)}…` : text) + attachment;
       void seam
         .announce(Number(send[1]), `${speaker} (webui): ${notice}`)
         .catch((error: unknown) => log.info(`[web] announce failed: ${(error as Error).message}`));

@@ -62,7 +62,7 @@ async function loadPage(
     pathname?: string;
     conversations?: { conversationId: number; chatKey: string; model: string; name?: string }[];
     /** Messages the fake host returns for one conversation's history. */
-    history?: { role: string; text: string; at?: number; html: string }[];
+    history?: { role: string; text: string; at?: number; html: string; entryId?: number; images?: { mimeType: string }[] }[];
     /** Page version the fake server reports; a different value asks for a reload. */
     pageVersion?: string;
     /** Draft text to seed into localStorage before the page's script runs. */
@@ -365,8 +365,10 @@ test("submitting posts the text to the open conversation", async () => {
     const post = h.requests.find((r) => r.method === "POST");
     assert.ok(post, "expected a POST");
     assert.match(post.url, /api\/c\/7\/message$/);
-    // Trimmed on the way out.
-    assert.deepEqual(JSON.parse(post.body!), { text: "hello" });
+    // Trimmed on the way out, and `images` is always present (empty here), because
+    // the route treats a missing list as "no attachments" and a present one as
+    // something to validate.
+    assert.deepEqual(JSON.parse(post.body!), { text: "hello", images: [] });
   } finally {
     h?.close();
   }
@@ -456,6 +458,67 @@ test("history renders as chat rows: you on the right, pi on the left, with times
     const when = chat[1].querySelector("time.at") as HTMLTimeElement;
     assert.ok(when.textContent && when.textContent.length > 0, "a message from today shows a clock time");
     assert.ok(when.title.includes(":"), "hover keeps the full timestamp");
+  } finally {
+    h?.close();
+  }
+});
+
+test("an image sent over Chat shows up in the transcript", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+      history: [
+        {
+          role: "user",
+          text: "what is this",
+          html: "<p>what is this</p>",
+          at: Date.now(),
+          entryId: 42,
+          images: [{ mimeType: "image/png" }],
+        },
+      ],
+    });
+    assert.deepEqual(h.errors, []);
+    const images = [...h.dom.window.document.querySelectorAll("#log .bubble img")] as HTMLImageElement[];
+    assert.equal(images.length, 1, "the photo must be in the transcript");
+    // Fetched from this origin by entry and index, so the payload stays text.
+    assert.match(images[0]!.getAttribute("src") ?? "", /^\/api\/c\/7\/image\/42\/0$/);
+  } finally {
+    h?.close();
+  }
+});
+
+test("a pasted image rides along with the message and shows straight away", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    const doc = h.dom.window.document;
+    const win = h.dom.window;
+
+    // jsdom has no clipboard files, so the event carries one the way a browser
+    // would: kind "file", type "image/png", with a real Blob behind it.
+    const png = new win.File([new win.Uint8Array([0x89, 0x50, 0x4e, 0x47])], "shot.png", { type: "image/png" });
+    const paste = new win.Event("paste", { cancelable: true }) as unknown as {
+      clipboardData: { items: unknown[] };
+    };
+    paste.clipboardData = { items: [{ kind: "file", type: "image/png", getAsFile: () => png }] };
+    doc.getElementById("text")!.dispatchEvent(paste as unknown as Event);
+    await h.settle();
+
+    // A thumbnail appears before sending, so you can see what you attached.
+    const thumbs = doc.querySelectorAll("#attachments img");
+    assert.equal(thumbs.length, 1);
+    assert.match(thumbs[0]!.getAttribute("src") ?? "", /^data:image\/png;base64,/);
+
+    // And it goes with the message.
+    doc.getElementById("send")!.dispatchEvent(new win.Event("submit", { cancelable: true }));
+    await h.settle();
+    const post = h.requests.find((request) => request.method === "POST");
+    const body = JSON.parse(post!.body!) as { text: string; images: { data: string; mimeType: string }[] };
+    assert.equal(body.images.length, 1);
+    assert.equal(body.images[0]!.mimeType, "image/png");
+    assert.ok(body.images[0]!.data.length > 0, "the bytes go, not a reference");
   } finally {
     h?.close();
   }

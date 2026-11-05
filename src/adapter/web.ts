@@ -162,13 +162,32 @@ export async function webIndex(options: Pick<WebOptions, "seam">): Promise<
  * the two frontends feel like one conversation — a browser message can redirect
  * a Chat-initiated turn mid-flight, which is the interaction that was asked for.
  */
+/** One pasted image: base64 as the browser read it, plus its type. */
+export interface PastedImage {
+  data: string;
+  mimeType: string;
+}
+
+/** Largest single image accepted from the web, in bytes after base64 decoding. */
+export const MAX_WEB_IMAGE_BYTES = 8 * 1024 * 1024;
+
 export async function webSubmit(
   options: WebOptions,
   conversationId: number,
   text: string,
   whenBusy: WhenBusy = "steer",
+  images: readonly PastedImage[] = [],
 ): Promise<{ ok: true; submissionId: number; html: string } | { ok: false; error: string }> {
-  const result = await options.seam.submit(conversationId, { content: text, whenBusy });
+  // Content parts, as Chat sends them: the model sees an image, the transcript
+  // stores one, and the pane can render it from the entry.
+  const content =
+    images.length === 0
+      ? text
+      : [
+          ...(text ? [{ type: "text" as const, text }] : []),
+          ...images.map((image) => ({ type: "image" as const, data: image.data, mimeType: image.mimeType })),
+        ];
+  const result = await options.seam.submit(conversationId, { content, whenBusy });
   return "error" in result
     ? { ok: false, error: result.error }
     : // Rendered here so the pane can show your message the moment it is sent,

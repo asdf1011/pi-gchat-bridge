@@ -69,6 +69,8 @@ export const TranscriptMessageSchema = Type.Object({
   role: Type.Union([Type.Literal("user"), Type.Literal("assistant")]),
   text: Type.String(),
   at: Type.Optional(Type.Number()),
+  entryId: Type.Optional(Type.Number()),
+  images: Type.Optional(Type.Array(Type.Object({ mimeType: Type.String() }))),
 });
 
 export const ArtifactSchema = Type.Object({
@@ -101,6 +103,10 @@ export const ConversationContract = remote("pi-bridge.conversation", {
         ),
         artifacts: method(Type.Object({}), Type.Array(ArtifactSchema)),
         history: method(Type.Object({ limit: Type.Number() }), Type.Array(TranscriptMessageSchema)),
+        image: method(
+          Type.Object({ entryId: Type.Number(), index: Type.Number() }),
+          Type.Union([Type.Object({ mimeType: Type.String(), data: Type.String() }), Type.Null()]),
+        ),
       },
     },
   },
