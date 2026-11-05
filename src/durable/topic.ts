@@ -60,7 +60,10 @@ export async function summarizeConversationTopic(
   config: TopicSummaryConfig,
   deps?: { post?: typeof postJson; maxChars?: number },
 ): Promise<string | undefined> {
-  const post = deps?.post ?? postJson;
+  // The durable path has its own copy of this call, and it was the copy that
+  // forgot the key: the hosted titler answered 401 while the legacy path worked.
+  const post = deps?.post ?? ((url: string, body: unknown, timeoutMs: number) =>
+    postJson(url, body, timeoutMs, config.apiKey));
   if (!turn.userText.trim() && !turn.assistantText.trim()) return undefined;
 
   const body = {
