@@ -235,3 +235,18 @@ test("health and notify are not the adapter's to answer", async () => {
     await served.close();
   }
 });
+
+test("the environment reports a page version, so a client can tell it changed", async () => {
+  const served = await serve(fakeSeam());
+  try {
+    const first = (await (await fetch(`${served.base}/web/api/environment`)).json()) as { pageVersion: string };
+    const second = (await (await fetch(`${served.base}/web/api/environment`)).json()) as { pageVersion: string };
+
+    assert.match(first.pageVersion, /^[0-9a-f]{12}$/, "a short fingerprint, not a timestamp");
+    // Stable for the life of the process: a page that compared this on every
+    // reconnect and saw it change every time would reload in a loop.
+    assert.equal(first.pageVersion, second.pageVersion);
+  } finally {
+    await served.close();
+  }
+});

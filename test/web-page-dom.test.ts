@@ -63,6 +63,10 @@ async function loadPage(
     conversations?: { conversationId: number; chatKey: string; model: string; name?: string }[];
     /** Messages the fake host returns for one conversation's history. */
     history?: { role: string; text: string; at?: number; html: string }[];
+    /** Page version the fake server reports; a different value asks for a reload. */
+    pageVersion?: string;
+    /** Draft text to seed into localStorage before the page's script runs. */
+    draft?: { conversationId: number; text: string };
     postStatus?: number;
   } = {},
 ): Promise<Harness> {
@@ -109,6 +113,11 @@ async function loadPage(
       }
       (win as unknown as Record<string, unknown>).EventSource = StubEventSource;
 
+      // A draft that was saved before a reload, as localStorage would hold it.
+      if (options.draft) {
+        win.localStorage.setItem(`pi-draft:${options.draft.conversationId}`, options.draft.text);
+      }
+
       // jsdom implements no fetch at all, so this is not optional.
       (win as unknown as Record<string, unknown>).fetch = async (
         input: unknown,
@@ -123,7 +132,11 @@ async function loadPage(
           return { ok: true, status: 200, json: async () => options.history ?? [] };
         }
         if (url.endsWith("api/environment")) {
-          return { ok: true, status: 200, json: async () => ({ artifactsBaseUrl: "" }) };
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ artifactsBaseUrl: "", pageVersion: options.pageVersion ?? "v1" }),
+          };
         }
         if (url.includes("/message")) {
           return { ok: true, status: options.postStatus ?? 202, json: async () => ({ ok: true }) };
@@ -427,6 +440,44 @@ test("history renders as chat rows: you on the right, pi on the left, with times
     const when = chat[1].querySelector("time.at") as HTMLTimeElement;
     assert.ok(when.textContent && when.textContent.length > 0, "a message from today shows a clock time");
     assert.ok(when.title.includes(":"), "hover keeps the full timestamp");
+  } finally {
+    h?.close();
+  }
+});
+
+test("typing saves a draft, so a reload does not lose it", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    const win = h.dom.window;
+    const box = win.document.getElementById("text") as HTMLTextAreaElement;
+
+    box.value = "half a thought";
+    box.dispatchEvent(new win.Event("input"));
+
+    assert.equal(win.localStorage.getItem("pi-draft:7"), "half a thought");
+
+    // An empty box clears the draft rather than storing whitespace.
+    box.value = "   ";
+    box.dispatchEvent(new win.Event("input"));
+    assert.equal(win.localStorage.getItem("pi-draft:7"), null);
+  } finally {
+    h?.close();
+  }
+});
+
+test("a draft is restored when the conversation opens", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+      draft: { conversationId: 7, text: "restored from before the reload" },
+    });
+    const box = h.dom.window.document.getElementById("text") as HTMLTextAreaElement;
+    assert.equal(box.value, "restored from before the reload");
+    // Cheap confidence the box was refitted to the restored text, not left at
+    // one line.
+    assert.ok(box.style.height !== "", "fitBox ran for the restored draft");
   } finally {
     h?.close();
   }

@@ -22,6 +22,7 @@
  * that connects mid-turn paints the in-progress answer instead of a blank page.
  * Measured: 8 concurrent subscribers receive identical frames with zero drift.
  */
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 
 import { logger } from "../logger.js";
@@ -214,4 +215,17 @@ export const WEB_PAGE = readPage();
  */
 export function webPage(): string {
   return process.env.BRIDGE_WEB_DEV === "1" ? readPage() : WEB_PAGE;
+}
+
+/**
+ * A short fingerprint of the page as this process serves it.
+ *
+ * The client compares this on every (re)connect and reloads itself when it
+ * changes, which is how a page that is already open picks up a rebuilt front end
+ * without anyone pressing anything. Hashed from the *served* bytes rather than a
+ * build stamp, so it is right in both modes: fixed for the life of the process
+ * normally, and fresh per read under `BRIDGE_WEB_DEV=1`.
+ */
+export function webPageVersion(): string {
+  return createHash("sha256").update(webPage()).digest("hex").slice(0, 12);
 }

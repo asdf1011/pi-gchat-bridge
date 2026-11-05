@@ -13,7 +13,7 @@
  */
 import type http from "node:http";
 
-import { attachWebClient, webIndex, webPage, webSubmit } from "./web.js";
+import { attachWebClient, webIndex, webPage, webPageVersion, webSubmit } from "./web.js";
 import { renderMarkdown } from "./markdown.js";
 import type { SessionHost } from "../session-host/api.js";
 import { logger } from "../logger.js";
@@ -91,7 +91,15 @@ export async function handleWebRequest(
   // shape stays the array the page already renders.
   if (req.method === "GET" && path === "/web/api/environment") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ artifactsBaseUrl: (options.artifactsBaseUrl ?? "").replace(/\/$/, "") }));
+    res.end(
+      JSON.stringify({
+        artifactsBaseUrl: (options.artifactsBaseUrl ?? "").replace(/\/$/, ""),
+        // The open page compares this on every reconnect and reloads itself when
+        // it changes, so a rebuilt front end reaches the browser without a manual
+        // refresh.
+        pageVersion: webPageVersion(),
+      }),
+    );
     return true;
   }
 

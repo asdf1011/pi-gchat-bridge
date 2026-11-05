@@ -168,6 +168,48 @@ let liveText = '';
 let liveHtml = '';
 let busy = false;
 let statusLine = '';
+// The page version this document was rendered from; compared on every (re)connect.
+let pageVersion = '';
+// One reload per page life: if the version somehow keeps changing, reloading in a
+// loop would be worse than a stale page.
+let reloadedForVersion = false;
+
+/**
+ * Draft text, kept per conversation.
+ *
+ * Saved on every keystroke so a reload — ours, or the browser's, or the device's —
+ * does not lose what you were typing. Cleared when the message is actually sent.
+ */
+function draftKey(id) {
+  return 'pi-draft:' + id;
+}
+
+function saveDraft() {
+  if (!current) return;
+  const box = document.getElementById('text');
+  const text = box.value;
+  try {
+    if (text.trim() === '') localStorage.removeItem(draftKey(current));
+    else localStorage.setItem(draftKey(current), text);
+  } catch {
+    // Private mode or a full quota: drafts are a convenience, not a feature to
+    // fail over.
+  }
+}
+
+function restoreDraft(id) {
+  const box = document.getElementById('text');
+  if (!id) {
+    box.value = '';
+    return;
+  }
+  try {
+    box.value = localStorage.getItem(draftKey(id)) || '';
+  } catch {
+    box.value = '';
+  }
+  fitBox();
+}
 
 /** Fallback when a frame arrives without rendered HTML (an older server). */
 function escapeText(text) {
@@ -275,6 +317,7 @@ function open(id) {
   statusLine = '';
   log.innerHTML = '';
   tool.textContent = '';
+  restoreDraft(id);
   void loadHistory();
   source = new EventSource(rel('api/c/' + id + '/events'));
   source.addEventListener('text', (e) => {
@@ -297,6 +340,25 @@ function open(id) {
       }, 300);
     }
   });
+  // The stream reconnects by itself when the server goes away and comes back.
+  // Comparing versions on each open is how an already-open page picks up a
+  // rebuilt front end: the draft is already saved, so the reload costs nothing.
+  source.addEventListener('open', async () => {
+    if (!pageVersion || reloadedForVersion) return;
+    try {
+      const environment = await (await fetch(rel('api/environment'))).json();
+      const latest = String(environment.pageVersion || '');
+      if (latest && latest !== pageVersion) {
+        reloadedForVersion = true;
+        saveDraft();
+        location.reload();
+      }
+    } catch {
+      // A failed probe means the server is not answering yet; the next open tries
+      // again.
+    }
+  });
+
   source.addEventListener('tool', (e) => {
     const d = JSON.parse(e.data);
     statusLine = d ? d.name + ' · ' + d.status + (d.detail ? ' — ' + d.detail : '') : '';
@@ -347,6 +409,11 @@ textBox.addEventListener('input', fitBox);
 // Paste can land a wall of text in one go, which fires `input` before the
 // layout has the new content in some browsers; re-fit after it has settled.
 textBox.addEventListener('paste', () => setTimeout(fitBox, 0));
+
+const draftBox = document.getElementById('text');
+draftBox.addEventListener('input', () => {
+  saveDraft();
+});
 
 document.getElementById('send').onsubmit = async (e) => {
   e.preventDefault();
@@ -458,6 +525,7 @@ void (async () => {
     const environment = await (await fetch(rel('api/environment'))).json();
     artifactsBase = String(environment.artifactsBaseUrl || '').replace(/\/$/, '');
     artifactsButton.hidden = artifactsBase === '';
+    pageVersion = String(environment.pageVersion || '');
   } catch {
     artifactsButton.hidden = true;
   }
