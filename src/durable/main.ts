@@ -228,6 +228,7 @@ async function main(): Promise<void> {
       port: artifactsPort,
       bind: config.bindAddress,
       redact: redactArtifact,
+      ...(config.webOrigin ? { webOrigin: config.webOrigin } : {}),
     });
   }
 

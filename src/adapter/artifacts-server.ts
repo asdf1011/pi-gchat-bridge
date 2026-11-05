@@ -35,6 +35,13 @@ export interface ArtifactsServerOptions {
   bind?: string;
   /** Applied to file content on the way out; the viewer bypasses the harness. */
   redact?: (text: string) => string;
+  /**
+   * Origin of the chat UI, allowed to frame these documents.
+   *
+   * `BRIDGE_WEB_ORIGIN` in deployment (`https://pi.hl.id.au`). Unset falls back to
+   * `'self'`, which only works if the viewer is served from this same origin.
+   */
+  webOrigin?: string;
 }
 
 /** Headers shared by every response: no sniffing, no caching, no framing by others. */
@@ -51,9 +58,29 @@ const BASE_HEADERS: Record<string, string> = {
  * by the inline `<style>` both documents carry, and is harmless in a document
  * that cannot load or run anything else.
  */
-const DOCUMENT_CSP =
-  "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:; " +
-  "form-action 'none'; base-uri 'none'; frame-ancestors 'self'";
+function documentCsp(frameAncestors: string): string {
+  return (
+    "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:; " +
+    `form-action 'none'; base-uri 'none'; frame-ancestors ${frameAncestors}`
+  );
+}
+
+/**
+ * Who may frame these documents.
+ *
+ * `'self'` alone means the chat UI — a *different* origin — gets
+ * "refused to connect", which is what the artifact drawer showed: the list came
+ * from the chat origin, but the document itself refused to be framed there. So
+ * the chat origin has to be named explicitly.
+ */
+function documentCspFor(webOrigin: string | undefined): string {
+  return documentCsp(frameAncestorsFor(webOrigin));
+}
+
+function frameAncestorsFor(webOrigin: string | undefined): string {
+  const origin = (webOrigin ?? "").trim().replace(/\/$/, "");
+  return origin === "" ? "'self'" : `'self' ${origin}`;
+}
 
 /** Raw text is inert by content type; the CSP is a second belt in case of sniffing. */
 const TEXT_CSP = "sandbox; default-src 'none'; style-src 'unsafe-inline'";
@@ -121,6 +148,7 @@ async function handle(
   res: http.ServerResponse,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://artifacts.invalid");
+  const documentCsp = documentCspFor(options.webOrigin);
 
   if (req.method === "GET" && url.pathname === "/healthz") {
     send(res, 200, "text/plain; charset=utf-8", TEXT_CSP, "ok");
@@ -146,7 +174,7 @@ async function handle(
   }
 
   if (rawKey === "") {
-    send(res, 200, "text/html; charset=utf-8", DOCUMENT_CSP, indexPage(conversationId, files));
+    send(res, 200, "text/html; charset=utf-8", documentCsp, indexPage(conversationId, files));
     return;
   }
 
@@ -189,7 +217,7 @@ async function handle(
   if (url.searchParams.has("render") && isMarkdown(key)) {
     const body = renderMarkdown(read.content);
     const note = read.truncated ? `<p class="meta">Truncated at ${read.content.length} of ${read.size} bytes.</p>` : "";
-    send(res, 200, "text/html; charset=utf-8", DOCUMENT_CSP, markdownDocument(key, body + note));
+    send(res, 200, "text/html; charset=utf-8", documentCsp, markdownDocument(key, body + note));
     return;
   }
 

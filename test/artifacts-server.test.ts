@@ -157,6 +157,28 @@ test("binary artifacts are reported rather than served", async () => {
   }
 });
 
+test("a configured chat origin may frame documents; without one, only our own", async () => {
+  const root = tempDir();
+  const files = ["notes.md"];
+  fs.writeFileSync(path.join(root, "notes.md"), "# hi\n");
+
+  const framed = await startArtifactsServer({
+    seam: fakeSeam([artifact(canonicalPath(root), "notes.md", path.join(root, "notes.md"))]),
+    port: 0,
+    webOrigin: "https://pi.hl.id.au/",
+  });
+  try {
+    const { port } = framed.address() as AddressInfo;
+    const response = await fetch(`http://127.0.0.1:${port}/c/1/notes.md?render`);
+    // The bug this fixes: "'self' alone made the chat UI's frame show
+    // 'artifacts.hl.id.au refused to connect'".
+    assert.match(response.headers.get("content-security-policy") ?? "", /frame-ancestors 'self' https:\/\/pi\.hl\.id\.au$/);
+  } finally {
+    await new Promise<void>((resolve) => framed.close(() => resolve()));
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("healthz answers without touching a conversation", async () => {
   const root = tempDir();
   const harness = await serve(root, []);
