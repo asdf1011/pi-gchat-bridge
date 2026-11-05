@@ -70,12 +70,21 @@
   /* The button sits on the baseline of the box, not stretched to its full
      height, so a grown textarea does not drag it into a tall slab. */
   form { display: flex; gap: .5rem; padding: .75rem; border-top: 1px solid #8884; align-items: flex-end; }
-  /* Starts at one comfortable line and grows with the message (see fitBox).
+  /* The box is shaped like the message it becomes: same colour, radius and
+     padding as a `me` bubble, with the tighter corner on the trailing side. The
+     send button matches it, so the composer and the sent message read as the
+     same object before and after pressing send.
+     Starts at one comfortable line and grows with the message (see fitBox).
      Past 40vh it stops and scrolls — a long paste should stay readable
      without pushing the whole conversation off the screen. */
   textarea { flex: 1; resize: none; min-height: 3.5rem; max-height: 40vh; overflow-y: auto;
-    font: inherit; padding: .5rem; }
-  button { padding: .5rem 1rem; font: inherit; }
+    font: inherit; color: inherit; background: var(--bubble-me); border: 0;
+    border-radius: 1rem; border-top-right-radius: .3rem; padding: .65rem .9rem; }
+  textarea::placeholder { color: color-mix(in srgb, CanvasText 55%, transparent); }
+  textarea:focus { outline: 2px solid color-mix(in srgb, CanvasText 25%, transparent); outline-offset: 1px; }
+  button { padding: .6rem 1.1rem; font: inherit; color: inherit; background: var(--bubble-me);
+    border: 0; border-radius: 1rem; border-top-right-radius: .3rem; cursor: pointer; }
+  button:hover { filter: brightness(.96); }
   /* Artifacts: a floating toggle and a drawer that is hidden until asked for.
      The pane is an iframe on the artifact origin — a different origin, so it is
      sandboxed there and cannot reach this page's DOM or cookies. */
