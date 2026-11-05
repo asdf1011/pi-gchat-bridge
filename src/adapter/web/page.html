@@ -21,6 +21,9 @@
   #list small { display: block; opacity: .6; font-size: .78em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #pane { flex: 1; display: flex; flex-direction: column; min-width: 0; }
   #log { flex: 1; overflow: auto; padding: 1rem; white-space: pre-wrap; word-break: break-word; margin: 0; }
+  #log .msg { margin: 0 0 .9rem; }
+  #log .who { display: block; font-size: .72em; text-transform: uppercase; letter-spacing: .04em; opacity: .55; }
+  #log .live { opacity: .95; }
   #tool { padding: .25rem 1rem; font: 12px ui-monospace, monospace; opacity: .7; min-height: 1.6em; }
   form { display: flex; gap: .5rem; padding: .75rem; border-top: 1px solid #8884; }
   textarea { flex: 1; resize: none; height: 3.5rem; font: inherit; padding: .5rem; }
@@ -99,16 +102,67 @@ let source;
 const log = document.getElementById('log');
 const tool = document.getElementById('tool');
 
+// The transcript so far, as the host bounded it, and the answer in flight.
+// Both are painted into #log: history first, then the live text, so a reload
+// mid-turn shows the conversation *and* the half-finished reply.
+let history = [];
+let liveText = '';
+
+function paint() {
+  log.innerHTML = '';
+  for (const message of history) {
+    const block = document.createElement('div');
+    block.className = 'msg';
+    const who = document.createElement('span');
+    who.className = 'who';
+    who.textContent = message.role === 'user' ? 'you' : 'pi';
+    const body = document.createElement('span');
+    body.textContent = message.text;
+    block.append(who, body);
+    log.append(block);
+  }
+  if (liveText) {
+    const block = document.createElement('div');
+    block.className = 'msg live';
+    const who = document.createElement('span');
+    who.className = 'who';
+    who.textContent = 'pi';
+    const body = document.createElement('span');
+    body.textContent = liveText;
+    block.append(who, body);
+    log.append(block);
+  }
+  log.scrollTop = log.scrollHeight;
+}
+
+async function loadHistory() {
+  if (!current) return;
+  try {
+    const rows = await (await fetch(rel('api/c/' + current + '/history'))).json();
+    history = Array.isArray(rows) ? rows : [];
+  } catch {
+    history = [];
+  }
+  paint();
+}
+
 function open(id) {
   if (source) source.close();
   current = id;
-  log.textContent = '';
+  history = [];
+  liveText = '';
+  log.innerHTML = '';
   tool.textContent = '';
+  void loadHistory();
   source = new EventSource(rel('api/c/' + id + '/events'));
   source.addEventListener('text', (e) => {
     const d = JSON.parse(e.data);
-    log.textContent = d.text;
-    log.scrollTop = log.scrollHeight;
+    const wasBusy = liveText !== '';
+    liveText = d.text;
+    paint();
+    // A turn that just finished has become history: refetch so the answer is
+    // shown as a completed message and the live block goes away.
+    if (!d.busy && wasBusy) setTimeout(() => { void loadHistory().then(() => { liveText = ''; paint(); }); }, 300);
   });
   source.addEventListener('tool', (e) => {
     const d = JSON.parse(e.data);

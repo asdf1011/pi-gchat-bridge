@@ -222,7 +222,11 @@ test("a text frame paints the answer pane", async () => {
     h = await loadPage({ conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
     const log = h.dom.window.document.getElementById("log")!;
     h.sources[0]!.emit("text", { text: "hello from the model", busy: true });
-    assert.equal(log.textContent, "hello from the model");
+    // The pane labels each block, so assert on the live message's body: history
+    // and the answer share #log, and the label is presentation.
+    const live = log.querySelector(".msg.live")!;
+    assert.equal(live.lastChild!.textContent, "hello from the model");
+    assert.equal(live.querySelector(".who")!.textContent, "pi");
   } finally {
     h?.close();
   }
@@ -236,7 +240,8 @@ test("a later text frame replaces the earlier one, not appends", async () => {
     const log = h.dom.window.document.getElementById("log")!;
     h.sources[0]!.emit("text", { text: "first" });
     h.sources[0]!.emit("text", { text: "second" });
-    assert.equal(log.textContent, "second");
+    assert.equal(log.querySelectorAll(".msg.live").length, 1, "one live block, not two");
+    assert.equal(log.querySelector(".msg.live")!.lastChild!.textContent, "second");
   } finally {
     h?.close();
   }

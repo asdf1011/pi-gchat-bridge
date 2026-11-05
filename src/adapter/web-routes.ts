@@ -94,6 +94,22 @@ export async function handleWebRequest(
     return true;
   }
 
+  // The last few messages, so opening a conversation shows what was being
+  // discussed instead of a blank pane (the stream only carries the live answer).
+  const history = /^\/web\/api\/c\/(\d+)\/history$/.exec(path);
+  if (req.method === "GET" && history) {
+    const limit = Math.min(Number(url.searchParams.get("limit") ?? 20) || 20, 100);
+    const messages = await seam.history(Number(history[1]), { limit });
+    if (messages === undefined) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: `no such conversation: ${history[1]}` }));
+      return true;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(messages));
+    return true;
+  }
+
   // The artifact list for one conversation, same-origin: the page links to the
   // artifact host but never fetches from it, so no CORS is needed anywhere.
   const artifactList = /^\/web\/api\/c\/(\d+)\/artifacts$/.exec(path);

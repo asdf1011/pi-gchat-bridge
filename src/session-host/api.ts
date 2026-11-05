@@ -109,6 +109,12 @@ export interface SubmitRequest {
 
 export type SubmitResult = { submissionId: number } | { error: string };
 
+/** One message as a viewer shows it: who said it, and what. */
+export interface TranscriptMessage {
+  role: "user" | "assistant";
+  text: string;
+}
+
 /**
  * How a submission ended.
  *
@@ -185,6 +191,18 @@ export interface SessionHost {
     agent: AgentConfig,
     options?: { signal?: AbortSignal },
   ): Promise<NamedConversation>;
+
+  /**
+   * The last few messages of the transcript, newest last.
+   *
+   * Bounded on purpose: the pane needs enough to know what was being discussed,
+   * not the conversation. Each message is truncated by the host, so the count is
+   * the only knob a caller needs.
+   */
+  history(
+    conversationId: number,
+    options?: { limit?: number; signal?: AbortSignal },
+  ): Promise<readonly TranscriptMessage[] | undefined>;
 
   /** What this conversation looks like right now. Small and bounded. */
   snapshot(conversationId: number, options?: { signal?: AbortSignal }): Promise<ProjectedView | undefined>;

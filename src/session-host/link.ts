@@ -36,6 +36,7 @@ import { createHost, type Host } from "@earendil-works/chord";
 
 import type {
   AgentConfig,
+  TranscriptMessage,
   AdapterEntry,
   AdapterVerdict,
   ConversationState,
@@ -128,6 +129,9 @@ export function serveSessionHost(seam: SessionHost): Host {
           ...(whenBusy === undefined ? {} : { whenBusy: whenBusy as SubmitRequest["whenBusy"] }),
         }),
       artifacts: async () => [...((await seam.artifacts(conversation)) ?? [])],
+      history: async ({ limit }: { limit: number }) => [
+        ...((await seam.history(conversation, { limit })) ?? []),
+      ],
     };
   });
 
@@ -225,6 +229,16 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
         return ("submissionId" in result && result.submissionId !== undefined
           ? { submissionId: result.submissionId }
           : { error: result.error ?? "submit failed" }) as SubmitResult;
+      } finally {
+        ref.release();
+      }
+    },
+
+    history: async (conversationId: number, options?: { limit?: number }) => {
+      const ref = await conversationRef(host, conversationId, session);
+      if (!ref) return undefined;
+      try {
+        return (await host.root((ctx) => ref.history({ limit: options?.limit ?? 20 }, ctx))) as readonly TranscriptMessage[];
       } finally {
         ref.release();
       }

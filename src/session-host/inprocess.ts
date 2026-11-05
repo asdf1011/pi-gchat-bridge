@@ -31,6 +31,7 @@ import type {
   ConversationState,
   ModelInfo,
   Settled,
+  TranscriptMessage,
   MessageContent,
   NamedConversation,
   HostInfo,
@@ -117,6 +118,10 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
         ...(agent.cwd === undefined ? {} : { cwd: agent.cwd }),
       });
       return named(name, bound.binding);
+    },
+
+    async history(conversationId: number, options?: { limit?: number }): Promise<readonly TranscriptMessage[] | undefined> {
+      return host.history(conversationId, options?.limit);
     },
 
     async snapshot(conversationId: number): Promise<ProjectedView | undefined> {

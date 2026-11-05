@@ -37,7 +37,14 @@ import { getSupportedThinkingLevels } from "@earendil-works/pi-ai/models";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 import { logger } from "../logger.js";
-import type { AdapterEntry, ConversationState, ModelInfo, Settled, UsageTotals } from "../session-host/api.js";
+import type {
+  AdapterEntry,
+  ConversationState,
+  ModelInfo,
+  Settled,
+  TranscriptMessage,
+  UsageTotals,
+} from "../session-host/api.js";
 import { BindingsDoc, type BindingsValue, type ConversationBinding } from "./bindings-doc.js";
 import { defineDoc } from "@earendil-works/pi-durable";
 import { ChatFormat } from "./extensions/chat-format.js";
@@ -544,6 +551,30 @@ export class BridgeHost {
     return (await this.harness.snapshot(VerdictsDoc, this.context))?.byThreadKey[chatKey];
   }
 
+  /** The last `limit` messages with text, newest last. See `SessionHost.history`. */
+  async history(conversationId: number, limit = 20): Promise<TranscriptMessage[] | undefined> {
+    const conversation = await this.harness.conversation(
+      conversationId as ConversationId,
+      this.context,
+    );
+    if (!conversation) return undefined;
+    const view = await conversation.viewState(this.context);
+    const entries = (view.value as { entries?: readonly unknown[] }).entries ?? [];
+    view.dispose();
+
+    const messages: TranscriptMessage[] = [];
+    for (const raw of entries) {
+      const model = (raw as { model?: readonly { role?: string; content?: unknown }[] }).model ?? [];
+      for (const message of model) {
+        if (message.role !== "user" && message.role !== "assistant") continue;
+        const text = textOf(message);
+        if (!text) continue;
+        messages.push({ role: message.role, text: text.slice(0, TRANSCRIPT_MESSAGE_CHARS) });
+      }
+    }
+    return messages.slice(-limit);
+  }
+
   /** The first user/assistant exchange, for a title. */
   async firstTurn(conversationId: number): Promise<{ userText: string; assistantText: string } | undefined> {
     const conversation = await this.harness.conversation(
@@ -646,6 +677,9 @@ const VerdictsDoc = defineDoc<VerdictsValue>({
   initial: () => ({ byThreadKey: {} }),
   checkpointWhen: () => true,
 });
+
+/** How much of one message the pane shows. Long tool output would swamp it. */
+const TRANSCRIPT_MESSAGE_CHARS = 4000;
 
 /** The first user message and the assistant reply that followed it. */
 function firstTurnOf(entries: readonly unknown[]): { userText: string; assistantText: string } | undefined {

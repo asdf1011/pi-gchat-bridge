@@ -18,8 +18,11 @@ import type { ProjectedView } from "../src/session-host/projection.js";
 
 const view: ProjectedView = { liveText: "", busy: false, lastAssistantText: "", tools: [] };
 
-function fakeSeam(options: { conversations?: NamedConversation[]; artifacts?: unknown[] } = {}): SessionHost {
+function fakeSeam(
+  options: { conversations?: NamedConversation[]; artifacts?: unknown[]; history?: unknown[] } = {},
+): SessionHost {
   return {
+    history: async (id: number) => (id === 1 ? (options.history ?? []) : undefined),
     list: async () => options.conversations ?? [],
     resolve: async () => undefined,
     snapshot: async () => view,
@@ -102,6 +105,33 @@ test("the environment route reports where artifacts live", async () => {
     assert.equal(body.artifactsBaseUrl, "");
   } finally {
     await without.close();
+  }
+});
+
+test("history comes back bounded, so an idle conversation is not a blank pane", async () => {
+  const seam = fakeSeam({
+    history: [
+      { role: "user", text: "can you check the logs" },
+      { role: "assistant", text: "Found it — the lock was stale." },
+    ],
+  });
+  const served = await serve(seam);
+  try {
+    const rows = (await (await fetch(`${served.base}/web/api/c/1/history`)).json()) as {
+      role: string;
+      text: string;
+    }[];
+    assert.deepEqual(rows.map((row) => row.role), ["user", "assistant"]);
+    assert.match(rows[1].text, /stale/);
+
+    // The limit is clamped: a viewer cannot ask the host to serialise everything.
+    const clamped = await fetch(`${served.base}/web/api/c/1/history?limit=99999`);
+    assert.equal(clamped.status, 200);
+
+    const missing = await fetch(`${served.base}/web/api/c/999/history`);
+    assert.equal(missing.status, 404);
+  } finally {
+    await served.close();
   }
 });
 

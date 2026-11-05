@@ -64,6 +64,11 @@ export const SubmitResultSchema = Type.Object({
   error: Type.Optional(Type.String()),
 });
 
+export const TranscriptMessageSchema = Type.Object({
+  role: Type.Union([Type.Literal("user"), Type.Literal("assistant")]),
+  text: Type.String(),
+});
+
 export const ArtifactSchema = Type.Object({
   key: Type.String(),
   root: Type.String(),
@@ -93,6 +98,7 @@ export const ConversationContract = remote("pi-bridge.conversation", {
           SubmitResultSchema,
         ),
         artifacts: method(Type.Object({}), Type.Array(ArtifactSchema)),
+        history: method(Type.Object({ limit: Type.Number() }), Type.Array(TranscriptMessageSchema)),
       },
     },
   },
