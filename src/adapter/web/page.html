@@ -20,8 +20,11 @@
      and the conversation's name, which is all the context the pane needs. */
   #app { flex: 1; display: flex; flex-direction: column; min-height: 0; }
   #app[hidden] { display: none; }
-  #conv-header { display: flex; align-items: center; gap: .5rem; padding: .35rem .6rem;
-    border-bottom: 1px solid #8884; flex: none; }
+  /* Header, log and composer share one column so the title sits over the
+     conversation rather than off at the edge of a wide window. */
+  #conv-header { display: flex; align-items: center; gap: .5rem; flex: none;
+    padding: .35rem max(.6rem, calc((100% - var(--content)) / 2));
+    border-bottom: 1px solid #8884; }
   #conv-header #back { text-decoration: none; color: inherit; font-size: 1.15rem;
     padding: .3rem .5rem; border-radius: .5rem; line-height: 1; }
   #conv-header #back:hover { background: #8882; }
@@ -36,11 +39,16 @@
      shrink below its content, so the composer is pushed past the window instead
      of the log shrinking. */
   #pane { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-  #log { flex: 1; overflow: auto; padding: 1rem; word-break: break-word; margin: 0; min-height: 0; }
+  /* A conversation reads as one column, not as two people at opposite ends of a
+     wide desk. Past `--content` the gutter grows instead of the gap between the
+     bubbles, so on a 1920px screen the exchange is still a conversation. */
+  #log { flex: 1; overflow: auto; word-break: break-word; margin: 0; min-height: 0;
+    padding: 1rem max(1rem, calc((100% - var(--content)) / 2)); }
   /* Chat-shaped rows: the agent on the left with an avatar and a name, you on
      the right with just a time. Bubbles cap their width so long answers stay
      readable, and the colours follow the system scheme. */
-  :root { --bubble-pi: #f1f2f4; --bubble-me: #d6e4fd; --bubble-code: Canvas; }
+  :root { --bubble-pi: #f1f2f4; --bubble-me: #d6e4fd; --bubble-code: Canvas;
+    --content: 54rem; }
   @media (prefers-color-scheme: dark) { :root { --bubble-pi: #2a2b2e; --bubble-me: #24405f; } }
   #log .msg { display: flex; gap: .55rem; margin: 0 0 .9rem; align-items: flex-start; }
   #log .msg.me { flex-direction: row-reverse; }
@@ -90,7 +98,8 @@
   #tool { padding: .25rem 1rem; font: 12px ui-monospace, monospace; opacity: .7; min-height: 1.6em; }
   /* The button sits on the baseline of the box, not stretched to its full
      height, so a grown textarea does not drag it into a tall slab. */
-  form { display: flex; gap: .5rem; padding: .75rem; border-top: 1px solid #8884; align-items: flex-end; }
+  form { display: flex; gap: .5rem; border-top: 1px solid #8884; align-items: flex-end;
+    padding: .75rem max(.75rem, calc((100% - var(--content)) / 2)); }
   /* The box is shaped like the message it becomes: same colour, radius and
      padding as a `me` bubble, with the tighter corner on the trailing side. The
      send button matches it, so the composer and the sent message read as the
