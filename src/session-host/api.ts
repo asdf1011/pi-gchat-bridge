@@ -224,15 +224,26 @@ export interface SessionHost {
   ): Promise<NamedConversation>;
 
   /**
-   * The last few messages of the transcript, newest last.
+   * A window of the transcript, newest last.
    *
-   * Bounded on purpose: the pane needs enough to know what was being discussed,
-   * not the conversation. Each message is truncated by the host, so the count is
-   * the only knob a caller needs.
+   * Bounded on purpose: the pane needs a screenful, not the conversation. Each
+   * message is truncated by the host, so the count is the only knob a caller
+   * needs for size.
+   *
+   * `offset` counts back from the *newest* message, which is the direction a
+   * conversation is read in: 0 is the last message, and `offset: limit` asks for
+   * the page before it. Paging from the end rather than the start is what makes
+   * "show earlier" work without a stable cursor — the store has no ordering the
+   * caller could resume from, and the newest message is the only anchor that
+   * cannot shift under a turn that is still appending.
+   *
+   * A window that runs off the front is short rather than an error, so the last
+   * page is the one that returns fewer than `limit`: that is how a caller learns
+   * it has reached the beginning.
    */
   history(
     conversationId: number,
-    options?: { limit?: number; signal?: AbortSignal },
+    options?: { limit?: number; offset?: number; signal?: AbortSignal },
   ): Promise<readonly TranscriptMessage[] | undefined>;
 
   /**

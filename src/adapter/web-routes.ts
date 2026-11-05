@@ -153,8 +153,14 @@ export async function handleWebRequest(
   // discussed instead of a blank pane (the stream only carries the live answer).
   const history = /^\/api\/c\/(\d+)\/history$/.exec(api);
   if (req.method === "GET" && history) {
-    const limit = Math.min(Number(url.searchParams.get("limit") ?? 20) || 20, 100);
-    const messages = await seam.history(Number(history[1]), { limit });
+    // A screenful by default rather than the whole conversation: the pane pages
+    // backwards from here on scroll, so the first paint stays small on a phone
+    // even for a thread with a thousand entries.
+    const limit = clamp(Number(url.searchParams.get("limit") ?? 50) || 50, 1, 200);
+    // Counted back from the newest message, which is the direction the pane
+    // pages in. Zero means "the most recent page".
+    const offset = Math.max(0, Number(url.searchParams.get("offset") ?? 0) || 0);
+    const messages = await seam.history(Number(history[1]), { limit, offset });
     if (messages === undefined) {
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: false, error: `no such conversation: ${history[1]}` }));

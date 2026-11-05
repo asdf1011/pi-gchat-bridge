@@ -649,8 +649,15 @@ export class BridgeHost {
     return (await this.harness.snapshot(VerdictsDoc, this.context))?.byThreadKey[chatKey];
   }
 
-  /** The last `limit` messages with text, newest last. See `SessionHost.history`. */
-  async history(conversationId: number, limit = 20): Promise<TranscriptMessage[] | undefined> {
+  /**
+   * A window of the transcript, newest last. See `SessionHost.history`.
+   *
+   * `offset` counts back from the newest message, so "the page before this one"
+   * is `offset: limit`. Sliced with explicit indices rather than `slice(-offset)`
+   * because the message list is built first: computing the window against the
+   * length is what lets a short final page signal the beginning.
+   */
+  async history(conversationId: number, limit = 20, offset = 0): Promise<TranscriptMessage[] | undefined> {
     const conversation = await this.harness.conversation(
       conversationId as ConversationId,
       this.context,
@@ -681,7 +688,10 @@ export class BridgeHost {
         });
       }
     }
-    return messages.slice(-limit);
+    // The window, counted back from the end. `end` is exclusive.
+    const end = Math.max(0, messages.length - Math.max(0, offset));
+    const start = Math.max(0, end - limit);
+    return messages.slice(start, end);
   }
 
   /** One image's bytes from a transcript entry. */

@@ -60,7 +60,22 @@
      wide desk. Past `--content` the gutter grows instead of the gap between the
      bubbles, so on a 1920px screen the exchange is still a conversation. */
   #log { flex: 1; overflow: auto; word-break: break-word; margin: 0; min-height: 0;
-    padding: 1rem max(1rem, calc((100% - var(--content)) / 2)); }
+    padding: 1rem max(1rem, calc((100% - var(--content)) / 2));
+    /* Newer browsers keep the visible content still when things are inserted
+       above it. Ours does the anchoring by hand as well (see `prependEarlier`),
+       because this is the one place a failure is obvious to the reader. */
+    overflow-anchor: auto; }
+  /* The top of the transcript: a stop for turning the page backwards, and a
+     status line while that page is in the air. It is the first child of #log, so
+     it scrolls out of sight with the rest of the conversation rather than
+     floating over it. */
+  #earlier { display: block; margin: 0 auto 1rem; padding: .45rem 1rem; font: inherit;
+    font-size: .85em; opacity: .8; color: inherit; background: #8882; border: 1px solid #8884;
+    border-radius: 1rem; cursor: pointer; }
+  #earlier:hover { filter: brightness(.96); }
+  #earlier[hidden] { display: none; }
+  #earlier.settled { cursor: default; opacity: .55; }
+  #earlier.settled:hover { filter: none; }
   /* Chat-shaped rows: the agent on the left with a name, you on the right with
      just a time. Bubbles cap their width so long answers stay readable, and the
      colours follow the system scheme. */
@@ -276,7 +291,7 @@
     <button id="artifacts-toggle" title="Files this conversation wrote" hidden aria-label="Artifacts">🗂</button>
   </header>
   <div id="pane">
-  <p id="log"></p>
+  <div id="log"></div>
   <div id="tool"></div>
     <div id="attachments" hidden></div>
     <p id="attach-notice" hidden role="status" aria-live="polite"></p>
@@ -502,9 +517,35 @@ function messageRow(role, html, at, live, images) {
  */
 let atBottom = true;
 const BOTTOM_SLACK_PX = 24;
+/** How close to the top counts as "about to scroll past the beginning". */
+const EARLIER_SLACK_PX = 240;
+/**
+ * Whether the log has been painted since this conversation opened.
+ *
+ * Before the first paint there is no position to scroll *from*: `scrollTop` is 0
+ * while `paint()` is still about to jump to the bottom, so a `scroll` event in that
+ * window is the browser settling, not a person asking for older messages. Without
+ * this the pane fetched a second page on every open.
+ *
+ * `painted` rather than "is the box short" is what makes this both testable and
+ * correct: a conversation shorter than the pane genuinely is at its bottom, and
+ * treats itself as complete anyway because its first page came back short.
+ */
+let painted = false;
 
 log.addEventListener('scroll', () => {
   atBottom = log.scrollHeight - log.scrollTop - log.clientHeight <= BOTTOM_SLACK_PX;
+  // Prefetch by a comfortable margin rather than waiting for the literal top: the
+  // page then lands before it is needed, so scrolling up feels continuous instead
+  // of stopping at a spinner every fifty messages.
+  //
+  // The only guard needed is `painted`: before the first paint `scrollTop` is 0
+  // while `paint()` is still about to jump to the bottom, and that is the browser
+  // settling rather than a person asking for older messages. `loadEarlier` already
+  // refuses when the history is complete or a page is in flight, so "is it at the
+  // bottom" does not need testing here — and testing it would be wrong anyway,
+  // since jsdom reports zero heights and so calls every position the bottom.
+  if (painted && log.scrollTop <= EARLIER_SLACK_PX) void loadEarlier();
 });
 
 // Growing the composer shrinks the log, and the browser keeps the scroll offset —
@@ -517,8 +558,136 @@ if (typeof ResizeObserver === 'function') {
   }).observe(log);
 }
 
+// --- Paging backwards through the transcript ---
+//
+// The pane opens at the newest messages and pulls older ones in as you scroll
+// up, the way a chat app does. A long conversation is a thousand entries; sending
+// all of them on open is a megabyte of JSON for a pane you are looking at the
+// bottom of.
+//
+// The awkward part of prepending is that it moves everything down, so the text
+// under your eyes jumps the moment a page lands. The fix is to measure
+// `scrollHeight` before and after and add the difference to `scrollTop`, which
+// keeps the pixel you were looking at exactly where it was.
+
+/** How many messages a page holds. Small enough to feel instant, big enough
+ *  that scrolling rarely waits. */
+const HISTORY_PAGE = 50;
+
+/** Messages loaded so far, oldest first. `transcript` is the same array. */
+let historyComplete = false;
+/** A page is in the air: a scroll must not ask for a second copy. */
+let loadingEarlier = false;
+/** How many messages the server has already given us, counting back from the end. */
+let historyOffset = 0;
+
+const earlierButton = document.createElement('button');
+earlierButton.type = 'button';
+earlierButton.id = 'earlier';
+earlierButton.hidden = true;
+earlierButton.textContent = 'Earlier messages';
+// The button is the accessible path; the scroll is the convenient one. Sending
+// the same request from both is fine because `loadingEarlier` gates it.
+earlierButton.addEventListener('click', () => void loadEarlier());
+log.append(earlierButton);
+
+/**
+ * Mark the top of the log: another page to come, or the beginning.
+ *
+ * Three states, and the difference between them is what the reader can act on:
+ *
+ *   - **nothing loaded yet** — hidden. There is no conversation to page through.
+ *   - **more to come** — a button, and the same request a scroll makes.
+ *   - **at the beginning** — "Start of conversation", disabled. A disabled button
+ *     rather than no button: a control that vanishes once used leaves the pane
+ *     looking like it failed to load anything above.
+ */
+function paintEarlier() {
+  if (transcript.length === 0) {
+    earlierButton.hidden = true;
+    return;
+  }
+  earlierButton.hidden = false;
+  earlierButton.classList.toggle('settled', historyComplete);
+  earlierButton.disabled = historyComplete || loadingEarlier;
+  earlierButton.textContent = historyComplete
+    ? 'Start of conversation'
+    : loadingEarlier
+      ? 'Loading earlier…'
+      : 'Earlier messages';
+}
+
+/**
+ * Insert older messages above what is already shown, without moving the reader.
+ *
+ * `scrollHeight` is read before the insert and again after it; the difference is
+ * exactly how much taller the log became, and adding that to `scrollTop` puts the
+ * same content back under the same pixel. Reading `scrollHeight` forces the
+ * layout, which is why the two reads are on either side of one DOM write rather
+ * than in a loop.
+ */
+function prependEarlier(older) {
+  if (older.length === 0) return;
+  const anchor = log.scrollHeight - log.scrollTop;
+  transcript = [...older, ...transcript];
+  // Built into a fragment and inserted after the button, so the header stays the
+  // first child and the messages keep their order.
+  const fragment = document.createDocumentFragment();
+  for (const message of older) {
+    fragment.append(
+      messageRow(
+        message.role,
+        message.html || escapeText(message.text || ''),
+        message.at,
+        false,
+        message.images ? message.images.map((image) => ({ ...image, entryId: message.entryId })) : undefined,
+      ),
+    );
+  }
+  earlierButton.after(fragment);
+  log.scrollTop = log.scrollHeight - anchor;
+}
+
+/**
+ * Fetch the page before the oldest one shown.
+ *
+ * Offset counts back from the *newest* message, so it grows by the number of
+ * messages already held — not by pages:
+ * a page can be short when the host drops entries with no text, and counting
+ * pages would then re-request the same window forever.
+ */
+async function loadEarlier() {
+  if (!current || loadingEarlier || historyComplete) return;
+  loadingEarlier = true;
+  paintEarlier();
+  const id = current;
+  try {
+    const url = rel('api/c/' + id + '/history?limit=' + HISTORY_PAGE + '&offset=' + historyOffset);
+    const rows = await (await fetch(url)).json();
+    // The user may have switched conversations while this was in flight. Dropping
+    // the page is right: its messages belong to a conversation that is no longer
+    // on screen, and appending them would mix two transcripts.
+    if (id !== current) return;
+    const older = Array.isArray(rows) ? rows : [];
+    historyOffset += older.length;
+    // A short page is the beginning. Empty is the same signal, and stops the
+    // button asking again forever.
+    historyComplete = older.length < HISTORY_PAGE;
+    prependEarlier(older);
+  } catch {
+    // Leave `historyComplete` alone so the next scroll tries again: a dropped
+    // request should not look like the start of the conversation.
+  } finally {
+    if (id === current) {
+      loadingEarlier = false;
+      paintEarlier();
+    }
+  }
+}
+
 function paint() {
   log.innerHTML = '';
+  log.append(earlierButton);
   for (const message of transcript) {
     log.append(
       messageRow(
@@ -543,16 +712,35 @@ function paint() {
     if (status.textContent) bubble.append(status);
     log.append(row);
   }
+  paintEarlier();
   if (atBottom) log.scrollTop = log.scrollHeight;
   else log.scrollTop = Math.min(log.scrollTop, log.scrollHeight);
+  // From here on a `scroll` event is a person moving, not the browser settling.
+  painted = true;
 }
 
+/**
+ * The first page: the newest messages, painted at the bottom.
+ *
+ * `offset` restarts at zero on every open, because a new conversation means a new
+ * transcript — carrying the previous one's counter over would ask for a window
+ * measured against a different thread.
+ */
 async function loadHistory() {
   if (!current) return;
+  historyOffset = 0;
+  historyComplete = false;
+  loadingEarlier = false;
+  painted = false;
+  const id = current;
   try {
-    const rows = await (await fetch(rel('api/c/' + current + '/history'))).json();
+    const rows = await (await fetch(rel('api/c/' + id + '/history?limit=' + HISTORY_PAGE))).json();
+    if (id !== current) return;
     transcript = Array.isArray(rows) ? rows : [];
+    historyOffset = transcript.length;
+    historyComplete = transcript.length < HISTORY_PAGE;
   } catch {
+    if (id !== current) return;
     transcript = [];
   }
   paint();

@@ -106,9 +106,22 @@ async function stubApi(
       : route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ ok: false }) });
   });
 
-  await page.route("**/api/c/*/history", (route) =>
-    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(options.history ?? []) }),
-  );
+  await page.route("**/api/c/*/history*", (route) => {
+    // Paged the way the real route pages, so a browser test exercises the same
+    // offsets a real conversation would: `offset` counts back from the newest
+    // message, and a short page means the beginning.
+    const all = options.history ?? [];
+    const query = new URL(route.request().url()).searchParams;
+    const limit = Number(query.get("limit") ?? 50) || 50;
+    const offset = Math.max(0, Number(query.get("offset") ?? 0) || 0);
+    const end = Math.max(0, all.length - offset);
+    const start = Math.max(0, end - limit);
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(all.slice(start, end)),
+    });
+  });
 
   await page.route("**/api/c/*/message", async (route) => {
     options.onPost?.(route.request().postDataJSON());
@@ -454,6 +467,89 @@ test("a refused attachment says why, and the message can still be sent", async (
   await page.locator("#send").evaluate((form) => (form as HTMLFormElement).requestSubmit());
   await expect.poll(() => posted.length).toBe(1);
   expect((posted[0] as { images: unknown[] }).images).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+test("scrolling up loads earlier messages, and the view does not jump", async ({ page }) => {
+  const errors = watchErrors(page);
+  // Enough to be several pages. Each message is distinct so the assertions can
+  // tell which slice is on screen.
+  const history = Array.from({ length: 160 }, (_, i) => ({
+    role: i % 2 === 0 ? "user" : "assistant",
+    text: `message ${i}`,
+    html: `<p>message ${i}</p>`,
+    at: Date.now() - (160 - i) * 60_000,
+  }));
+  await stubApi(page, { history });
+  await page.setViewportSize({ width: 900, height: 400 });
+  await page.goto("/7/");
+
+  const log = page.locator("#log");
+
+  // It opens at the bottom, showing the newest message rather than the oldest:
+  // this is the bug that made the pane look like the conversation started in the
+  // middle.
+  await expect(log).toContainText("message 159");
+  await expect(log).not.toContainText("message 0");
+
+  // Scroll to the top, which is what pulling up on a phone does. The page should
+  // arrive by itself, without pressing anything.
+  await log.evaluate((el) => {
+    el.scrollTop = 0;
+  });
+  await expect(log).toContainText("message 109");
+
+  // The critical part: the reader must not be thrown. After the older page lands,
+  // the pixel under the top of the viewport should still be the message that was
+  // there before — the prepend is compensated, not just appended.
+  const anchored = await log.evaluate((el) => {
+    // Find the message nearest the top of the visible area, and remember it.
+    const rows = [...el.querySelectorAll(".msg")];
+    const box = el.getBoundingClientRect();
+    const atTop = rows.find((row) => row.getBoundingClientRect().bottom > box.top);
+    return { text: atTop?.textContent?.trim(), scrollTop: el.scrollTop, scrolled: el.scrollTop > 0 };
+  });
+  // A jump would show scrollTop back near 0 with the *new* first message pinned
+  // under the viewport edge.
+  expect(anchored.scrolled, "the view stays where it was, not at the new top").toBe(true);
+
+  expect(errors).toEqual([]);
+});
+
+test("paging reaches the very beginning and then stops", async ({ page }) => {
+  const errors = watchErrors(page);
+  const history = Array.from({ length: 60 }, (_, i) => ({
+    role: "user",
+    text: `message ${i}`,
+    html: `<p>message ${i}</p>`,
+    at: Date.now() - (60 - i) * 60_000,
+  }));
+  await stubApi(page, { history });
+  await page.setViewportSize({ width: 900, height: 400 });
+  await page.goto("/7/");
+
+  const log = page.locator("#log");
+  await expect(log).toContainText("message 59");
+
+  // 60 messages in pages of 50: one scroll reaches the start.
+  await log.evaluate((el) => {
+    el.scrollTop = 0;
+  });
+  await expect(log).toContainText("message 0");
+  await expect(page.locator("#earlier")).toHaveText("Start of conversation");
+
+  // And scrolling again does not ask for more, so an idle wheel cannot spin.
+  const requests: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes("/history")) requests.push(request.url());
+  });
+  await log.evaluate((el) => {
+    el.scrollTop = 0;
+    el.dispatchEvent(new Event("scroll"));
+  });
+  await page.waitForTimeout(300);
+  expect(requests).toEqual([]);
+
   expect(errors).toEqual([]);
 });
 

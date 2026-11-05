@@ -142,8 +142,8 @@ export function serveSessionHost(seam: SessionHost): Host {
           ...(whenBusy === undefined ? {} : { whenBusy: whenBusy as SubmitRequest["whenBusy"] }),
         }),
       artifacts: async () => [...((await seam.artifacts(conversation)) ?? [])],
-      history: async ({ limit }: { limit: number }) => [
-        ...((await seam.history(conversation, { limit })) ?? []),
+      history: async ({ limit, offset }: { limit: number; offset: number }) => [
+        ...((await seam.history(conversation, { limit, offset })) ?? []),
       ],
       image: async ({ entryId, index }: { entryId: number; index: number }) =>
         (await seam.image(conversation, entryId, index)) ?? null,
@@ -258,11 +258,13 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
       }
     },
 
-    history: async (conversationId: number, options?: { limit?: number }) => {
+    history: async (conversationId: number, options?: { limit?: number; offset?: number }) => {
       const ref = await conversationRef(host, conversationId, session);
       if (!ref) return undefined;
       try {
-        return (await host.root((ctx) => ref.history({ limit: options?.limit ?? 20 }, ctx))) as readonly TranscriptMessage[];
+        return (await host.root((ctx) =>
+          ref.history({ limit: options?.limit ?? 20, offset: options?.offset ?? 0 }, ctx),
+        )) as readonly TranscriptMessage[];
       } finally {
         ref.release();
       }

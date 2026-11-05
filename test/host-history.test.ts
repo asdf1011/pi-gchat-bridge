@@ -67,6 +67,38 @@ test("history() returns the last messages with text, newest last", async () => {
   await host.harness.close(BACKGROUND_CONTEXT);
 });
 
+test("offset pages backwards from the newest message, and the last page is short", async () => {
+  const host = await memoryHost();
+  const created = await host.createNamed("threads/O", { model: { provider: "p", modelId: "m" } });
+  for (let i = 0; i < 10; i++) {
+    await host.writeEntry(created.conversationId, {
+      kind: "app.notice",
+      data: {},
+      model: [{ role: i % 2 === 0 ? "user" : "assistant", content: "m" + i }],
+    });
+  }
+
+  // offset counts back from the *newest*, so the window slides towards the start
+  // as it grows — which is the direction the pane pages in.
+  assert.deepEqual((await host.history(created.conversationId, 3, 0))?.map((m) => m.text), ["m7", "m8", "m9"]);
+  assert.deepEqual((await host.history(created.conversationId, 3, 3))?.map((m) => m.text), ["m4", "m5", "m6"]);
+  assert.deepEqual((await host.history(created.conversationId, 3, 6))?.map((m) => m.text), ["m1", "m2", "m3"]);
+
+  // The final page runs into the beginning and comes back short: that, and not an
+  // error, is how a caller learns there is nothing older.
+  assert.deepEqual((await host.history(created.conversationId, 3, 9))?.map((m) => m.text), ["m0"]);
+  assert.deepEqual((await host.history(created.conversationId, 3, 12)), []);
+
+  // The pages tile the transcript exactly: no message is skipped or repeated,
+  // which is the failure that would be invisible in a pane but wrong.
+  const paged: string[] = [];
+  for (let offset = 0; offset < 10; offset += 3) {
+    paged.unshift(...((await host.history(created.conversationId, 3, offset)) ?? []).map((m) => m.text));
+  }
+  assert.deepEqual(paged, ["m0", "m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8", "m9"]);
+  await host.harness.close(BACKGROUND_CONTEXT);
+});
+
 test("an image-only message is kept, with its entry id so the bytes can be fetched", async () => {
   const host = await memoryHost();
   const created = await host.createNamed("threads/C", { model: { provider: "p", modelId: "m" } });

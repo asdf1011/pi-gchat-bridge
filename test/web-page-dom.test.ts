@@ -45,6 +45,8 @@ interface Harness {
   sources: FakeSource[];
   /** Every fetch the page made, with method and body. */
   requests: { url: string; method: string; body?: string }[];
+  /** Each history request's paging parameters, in order. */
+  historyRequests: { limit: number; offset: number }[];
   /** Console errors the page produced — an empty list is the pass condition. */
   errors: string[];
   /** Resolve pending microtasks so the page's async work completes. */
@@ -79,6 +81,8 @@ async function loadPage(
   const sources: FakeSource[] = [];
   const requests: Harness["requests"] = [];
   const errors: string[] = [];
+  /** Every history request, so a test can assert how it paged. */
+  const historyRequests: { limit: number; offset: number }[] = [];
 
   // The stubs must exist BEFORE the page's script runs, and jsdom runs an inline
   // <script> during parsing. `beforeParse` is the only hook early enough — putting
@@ -138,7 +142,18 @@ async function loadPage(
           return { ok: Boolean(found), status: found ? 200 : 404, json: async () => found ?? {} };
         }
         if (url.includes("/history")) {
-          return { ok: true, status: 200, json: async () => options.history ?? [] };
+          // Paged the way the real route pages: `offset` counts back from the
+          // newest message. Honouring it matters — a stub that always returned
+          // the full list would report every first page as "short" and the page
+          // would decide it had reached the beginning of the conversation.
+          const all = options.history ?? [];
+          const query = new URL(url, "http://127.0.0.1").searchParams;
+          const limit = Number(query.get("limit") ?? 50) || 50;
+          const offset = Math.max(0, Number(query.get("offset") ?? 0) || 0);
+          historyRequests.push({ limit, offset });
+          const end = Math.max(0, all.length - offset);
+          const start = Math.max(0, end - limit);
+          return { ok: true, status: 200, json: async () => all.slice(start, end) };
         }
         if (url.endsWith("api/environment")) {
           return {
@@ -171,6 +186,7 @@ async function loadPage(
     dom,
     sources,
     requests,
+    historyRequests,
     errors,
     settle,
     close() {
@@ -474,6 +490,183 @@ test("history renders as chat rows: you on the right, pi on the left, with times
     const when = chat[1].querySelector("time.at") as HTMLTimeElement;
     assert.ok(when.textContent && when.textContent.length > 0, "a message from today shows a clock time");
     assert.ok(when.title.includes(":"), "hover keeps the full timestamp");
+  } finally {
+    h?.close();
+  }
+});
+
+// --- Paging backwards ---------------------------------------------------------
+
+/** `n` messages, oldest first, each distinguishable by its text. */
+function transcriptOf(n: number) {
+  return Array.from({ length: n }, (_, i) => ({
+    role: i % 2 === 0 ? "user" : "assistant",
+    text: "message " + i,
+    html: "<p>message " + i + "</p>",
+    at: Date.now(),
+  }));
+}
+
+/** The texts of the rendered chat rows, top to bottom. */
+function renderedTexts(h: Harness): string[] {
+  return [...h.dom.window.document.querySelectorAll("#log .msg")]
+    .filter((row) => !row.classList.contains("live"))
+    .map((row) => row.querySelector(".bubble")!.textContent ?? "");
+}
+
+test("the pane opens at the newest page, not the whole conversation", async () => {
+  let h: Harness | undefined;
+  try {
+    // 120 messages: more than one page, so this is the case that used to show
+    // only the newest 20 and look like the conversation started mid-sentence.
+    h = await loadPage({
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+      history: transcriptOf(120),
+    });
+    assert.deepEqual(h.errors, []);
+
+    // One page, and it is the *last* one: the newest messages.
+    assert.equal(h.historyRequests.length, 1, "one request to open");
+    assert.equal(h.historyRequests[0]!.offset, 0, "the newest page");
+    const shown = renderedTexts(h);
+    assert.equal(shown.length, 50);
+    assert.equal(shown[0], "message 70", "starts one page back from the end");
+    assert.equal(shown.at(-1), "message 119");
+  } finally {
+    h?.close();
+  }
+});
+
+test("scrolling to the top brings in the page before it", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+      history: transcriptOf(120),
+    });
+    const log = h.dom.window.document.getElementById("log")!;
+
+    // jsdom has no layout, so there is nothing to scroll: the scroll handler only
+    // compares scrollTop with a constant, and the anchoring maths is a no-op when
+    // scrollHeight is 0. Firing the event is therefore what a real scroll does to
+    // this code, without pretending to be a browser.
+    log.scrollTop = 0;
+    log.dispatchEvent(new h.dom.window.Event("scroll"));
+    await h.settle();
+
+    // The second page, offset by what is already held — counted in messages, not
+    // pages, so a short page cannot make it re-request the same window.
+    assert.equal(h.historyRequests.length, 2);
+    assert.equal(h.historyRequests[1]!.offset, 50);
+    const shown = renderedTexts(h);
+    assert.equal(shown.length, 100, "both pages are in the log");
+    assert.equal(shown[0], "message 20");
+    assert.equal(shown.at(-1), "message 119", "the newest is still at the bottom");
+  } finally {
+    h?.close();
+  }
+});
+
+test("paging stops at the beginning and says so", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+      history: transcriptOf(60),
+    });
+    const doc = h.dom.window.document;
+    const log = doc.getElementById("log")!;
+
+    log.scrollTop = 0;
+    log.dispatchEvent(new h.dom.window.Event("scroll"));
+    await h.settle();
+
+    // 60 messages in pages of 50: the second page is short, which is the signal
+    // that the beginning has been reached.
+    assert.equal(renderedTexts(h).length, 60);
+    assert.equal(renderedTexts(h)[0], "message 0", "the first message of the thread");
+
+    const earlier = doc.getElementById("earlier") as HTMLButtonElement;
+    assert.equal(earlier.disabled, true);
+    assert.equal(earlier.textContent, "Start of conversation");
+
+    // And asking again does nothing rather than looping on an empty page.
+    const asked = h.historyRequests.length;
+    earlier.click();
+    log.dispatchEvent(new h.dom.window.Event("scroll"));
+    await h.settle();
+    assert.equal(h.historyRequests.length, asked, "no further requests once complete");
+  } finally {
+    h?.close();
+  }
+});
+
+test("a short conversation says it is at the start rather than offering a page", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+      history: transcriptOf(3),
+    });
+    const doc = h.dom.window.document;
+    // One page came back short, so the page already knows it has everything.
+    assert.equal(renderedTexts(h).length, 3);
+    // The marker is shown but inert: hiding it would leave the pane looking like
+    // it might have failed to load something above the first message.
+    const earlier = doc.getElementById("earlier") as HTMLButtonElement;
+    assert.equal(earlier.hidden, false);
+    assert.equal(earlier.disabled, true);
+    assert.equal(earlier.textContent, "Start of conversation");
+    assert.equal(h.historyRequests.length, 1, "no paging for a single page");
+  } finally {
+    h?.close();
+  }
+});
+
+test("an empty conversation asks nothing and shows no pager", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ conversations: [{ conversationId: 7, chatKey: "k", model: "m" }], history: [] });
+    assert.equal(renderedTexts(h).length, 0);
+    // Nothing to page through, so no marker at all.
+    assert.equal(h.dom.window.document.getElementById("earlier")!.hidden, true);
+    assert.equal(h.historyRequests.length, 1, "only the opening request");
+  } finally {
+    h?.close();
+  }
+});
+
+test("paging state is per conversation, so a reload does not resume someone else's offset", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+      history: transcriptOf(120),
+    });
+    const win = h.dom.window;
+    const log = win.document.getElementById("log")!;
+
+    // Page 7 back once, so its offset has advanced past the first page.
+    log.scrollTop = 0;
+    log.dispatchEvent(new win.Event("scroll"));
+    await h.settle();
+    assert.equal(h.historyRequests.at(-1)!.offset, 50);
+
+    // Switching conversations is a full navigation in this page (the index links
+    // to `/<id>/`), so the equivalent of "opening another one" is a fresh load.
+    // What matters is that every load starts from `offset: 0`: a counter carried
+    // over would ask for a window measured against a different thread.
+    const second = await loadPage({
+      conversations: [{ conversationId: 9, chatKey: "k2", model: "m" }],
+      pathname: "/9/",
+      history: transcriptOf(120),
+    });
+    try {
+      assert.equal(second.historyRequests[0]!.offset, 0, "a new conversation starts at its newest page");
+      assert.equal(second.historyRequests.length, 1, "and asks for exactly one page");
+    } finally {
+      second.close();
+    }
   } finally {
     h?.close();
   }

@@ -102,7 +102,10 @@ export const ConversationContract = remote("pi-bridge.conversation", {
           SubmitResultSchema,
         ),
         artifacts: method(Type.Object({}), Type.Array(ArtifactSchema)),
-        history: method(Type.Object({ limit: Type.Number() }), Type.Array(TranscriptMessageSchema)),
+        history: method(
+          Type.Object({ limit: Type.Number(), offset: Type.Number() }),
+          Type.Array(TranscriptMessageSchema),
+        ),
         image: method(
           Type.Object({ entryId: Type.Number(), index: Type.Number() }),
           Type.Union([Type.Object({ mimeType: Type.String(), data: Type.String() }), Type.Null()]),
