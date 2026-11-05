@@ -124,6 +124,8 @@
   #index-pager { display: flex; gap: .5rem; align-items: center; margin-top: 1rem;
     max-width: 46rem; font-size: .85em; opacity: .85; }
   #index-pager span { flex: 1; opacity: .7; }
+  #index-pager button:disabled { opacity: .4; cursor: default; }
+  #index-pager button:disabled:hover { filter: none; }
   /* Pasted images waiting to be sent, above the composer. */
   #attachments { display: flex; gap: .5rem; padding: .5rem .75rem 0; flex-wrap: wrap; }
   #attachments[hidden] { display: none; }
@@ -157,7 +159,7 @@
     #index { padding: 1rem .75rem 5rem; }
     #index h1 { font-size: 1rem; }
     #index-list li { padding: .7rem .25rem; }
-    #log { padding: .6rem .5rem; }
+    #log { padding: .6rem .75rem; }
     #log .msg > .col { max-width: 92%; }
     #log .msg { gap: .4rem; }
     #pane { min-height: 0; }
@@ -191,13 +193,12 @@
   <div id="tool"></div>
     <div id="attachments" hidden></div>
     <form id="send">
-      <textarea id="text" placeholder="Message this conversation — same one Chat is in"></textarea>
+      <textarea id="text" placeholder="Message…" aria-label="Message this conversation"></textarea>
       <button>Send</button>
     </form>
   </div>
 </div>
 <button id="new-chat" title="Start a new conversation" aria-label="New chat">＋</button>
-<button id="artifacts-toggle" title="Files this conversation wrote" hidden aria-label="Artifacts">🗂</button>
 <aside id="artifacts" hidden>
   <header>
     <strong>Artifacts</strong>
@@ -825,10 +826,13 @@ const openId = conversationIdFromPath();
 if (openId === undefined) {
   document.getElementById('index').hidden = false;
   document.getElementById('app').hidden = true;
+  document.getElementById('new-chat').hidden = false;
   void loadIndex(0);
 } else {
   document.getElementById('index').hidden = true;
   document.getElementById('app').hidden = false;
+  // No floating ＋ on a conversation page: it sat exactly where Send is.
+  document.getElementById('new-chat').hidden = true;
   document.getElementById('back').href = mountRoot();
   current = openId;
   void loadTitle();

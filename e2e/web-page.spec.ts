@@ -431,3 +431,90 @@ test("the new chat button creates a conversation and opens it", async ({ page })
   await page.locator("#new-chat").click();
   await expect.poll(() => new URL(page.url()).pathname).toBe("/99/");
 });
+
+// --- Mobile ------------------------------------------------------------------
+//
+// A phone is where a chat UI is most likely to be read, and the layout failures
+// there are the ones nobody sees on a laptop: a scrollbar because something is
+// wider than the screen, a floating button over the Send button, a placeholder
+// that wraps and eats the composer.
+
+test("mobile: the index fits the screen, and its rows are tappable", async ({ page }) => {
+  await stubApi(page, {
+    conversations: [
+      { conversationId: 7, chatKey: "spaces/A/threads/T1", model: "m", name: "A title long enough to need truncating on a phone" },
+      { conversationId: 9, chatKey: "spaces/A/threads/T2", model: "m" },
+    ] as never,
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/");
+
+  const layout = await page.evaluate(() => {
+    const row = document.querySelector("#index-list li")!.getBoundingClientRect();
+    return {
+      scrollWidth: document.documentElement.scrollWidth,
+      viewport: window.innerWidth,
+      rowHeight: row.height,
+      fabVisible: !document.getElementById("new-chat")!.hidden,
+    };
+  });
+
+  expect(layout.scrollWidth).toBeLessThanOrEqual(layout.viewport);
+  expect(layout.rowHeight).toBeGreaterThanOrEqual(40); // the usual minimum tap target
+  expect(layout.fabVisible).toBe(true);
+});
+
+test("mobile: the composer is on screen and nothing floats over Send", async ({ page }) => {
+  await stubApi(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/7/");
+
+  const state = await page.evaluate(() => {
+    const button = document.querySelector("#send button")!;
+    const box = button.getBoundingClientRect();
+    const centre = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+    return {
+      scrollWidth: document.documentElement.scrollWidth,
+      viewport: window.innerWidth,
+      onScreen: box.bottom <= window.innerHeight + 1 && box.right <= window.innerWidth + 1,
+      // Whatever is at the button's centre must be the button: the ＋ used to sit
+      // exactly there, so a thumb aimed at Send opened a drawer.
+      topElement: centre === button || button.contains(centre) ? "send" : (centre?.id || centre?.tagName || "none"),
+      newChatHidden: document.getElementById("new-chat")!.hidden,
+      placeholder: (document.getElementById("text") as HTMLTextAreaElement).placeholder,
+    };
+  });
+
+  expect(state.scrollWidth).toBeLessThanOrEqual(state.viewport);
+  expect(state.onScreen).toBe(true);
+  expect(state.topElement).toBe("send");
+  expect(state.newChatHidden).toBe(true);
+  expect(state.placeholder).toBe("Message…"); // one line at any width
+});
+
+test("mobile: the artifact drawer takes the screen", async ({ page }) => {
+  await stubApi(page);
+  // The drawer's button is hidden unless the deployment says where artifacts live,
+  // so this test has to claim one.
+  await page.route("**/api/environment", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ artifactsBaseUrl: "https://artifacts.example", pageVersion: "test" }),
+    }),
+  );
+  await page.route("**/api/c/*/artifacts", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([{ key: "docs/a.md", wrote: 1, edited: 0, markdown: true }]),
+    }),
+  );
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/7/");
+  await page.locator("#artifacts-toggle").click();
+
+  const box = await page.locator("#artifacts").boundingBox();
+  expect(box).not.toBeNull();
+  expect(box!.width).toBeGreaterThanOrEqual(389);
+});
