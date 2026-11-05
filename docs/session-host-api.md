@@ -281,12 +281,29 @@ place until the last adapter is ported; the seam is additive.
     object is released, which is exactly "one attachment per client, disposed on disconnect".
   - **State must be schema-shaped** (TypeBox), so `ProjectedView` needs a schema. `tools[].arguments`
     is `unknown` today; it has to become `JsonValue`, or the tool line loses its arguments.
-  - **Not yet proved:** adapter → host *calls* over the link (`submit`, `attach`, `awaitSubmission`).
-    chord's RPC is the tutorial's first chapter, so this is low risk, but it is a 30-minute check
-    rather than an assumption.
+  A second spike proved the other direction — adapter → host *calls* — over the same IPC link:
+  `append()` returned in 29 ms, a deliberate `slow(1500)` returned in 1512 ms, and a state write made
+  inside that call was observed by the client as replicated state. So `submit`/`snapshot` are ordinary
+  remote methods, and a call that takes a second or two is fine.
 
-  Remaining work is then mechanical: a `ConversationView` contract, an adapter-side client host, and
-  `start-bridge.sh` supervising one more process.
+  Three more findings, all of them build-time constraints rather than risks:
+
+  - **Do not mix the two libraries' contexts.** Passing chord's method `ctx` into
+    `conversation.submit()` fails inside pi-durable with `Cannot read properties of undefined
+    (reading 'startSpan')` — pi-durable wants its own context (with its telemetry adapter), chord wants
+    its own (with a span). The seam implementation must keep them apart: pi-durable calls get
+    `BACKGROUND_CONTEXT`, chord state writes get the call's `ctx`.
+  - **The IPC channel belongs to `ipcLink`.** Anything else on `process.send`/`process.on("message")`
+    is parsed as link frames and errors out — which is how the first run of this spike failed. Adapter
+    processes report on stdout, or take a second channel.
+  - **`awaitSubmission` should be state, not a blocking call.** It can take minutes; chord's rule is
+    that a method must not wait for a person, a sleep, or an endless loop. Model it as a cell the
+    adapter observes (`{status, answerId, text}`), which is what the `settled` cell in this spike
+    already demonstrates.
+
+  What remains is mechanical: a `ConversationView` contract (and a TypeBox schema for
+  `ProjectedView`), a submission-state contract, an adapter-side client host, and `start-bridge.sh`
+  supervising one more process.
 
 ## Non-goals
 
