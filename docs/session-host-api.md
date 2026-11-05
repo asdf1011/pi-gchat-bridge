@@ -235,9 +235,11 @@ place until the last adapter is ported; the seam is additive.
   `attach`**, which removes the snapshot-versus-early-frame ordering hazard.
 - **S2 — port `queries.ts`.** Kills the 14 `host.modelRuntime` reach-throughs and the 9 `viewState`
   ones; `ModelInfo`/`ConversationStatus` become plain data.
-- **S3 — port `router.ts` and the `main.ts` turn path.** `submit` / `await` / `abort` / `write`; the
-  `AssistantEntry` commit and text flattening move into the host. Exit: the Chat handler in `main.ts`
-  contains no pi-durable import.
+- **S3 — port `router.ts` and the `main.ts` turn path. DONE.** `submit` / `awaitSubmission` / `abort` /
+  `write`. The `AssistantEntry` commit and the text flattening moved into the host, so `main.ts`
+  holds no pi-durable import, and `src/adapter/` has **zero** `host.*` reach-throughs. Submissions are
+  addressed by id (`harness.submission(id)`) rather than held as handles, which is why the wait
+  survives a restart and why this operation can cross a link later.
 - **S4 — port `commands.ts`, `posted-doc.ts`, `notify.ts`, `topic.ts`.** Adapter documents onto
   `doc.claim`/`doc.get`/`doc.set`; titles onto `title()`. Exit: add the guard test — adapter
   directory has zero pi-durable imports.
@@ -272,18 +274,18 @@ place until the last adapter is ported; the seam is additive.
 will move behind an adapter or stay host wiring.
 
 ```
-src/adapter/queries.ts       26
-src/adapter/commands.ts      24
-src/adapter/router.ts         7
+src/adapter/queries.ts        0   ← S2
+src/adapter/commands.ts       0   ← S2
+src/adapter/router.ts         0   ← S3
 src/adapter/web.ts            0   ← S1
 src/adapter/artifacts-server.ts 0 ← S1
 ----                     ----
-adapters                     57
+adapters                      0
 
-src/durable/notify.ts         9
-src/durable/posted-doc.ts     6
-src/durable/main.ts           4
-src/durable/topic.ts          4
+src/durable/notify.ts         9   ← S4 (adapter-scoped docs)
+src/durable/posted-doc.ts     6   ← S4
+src/durable/main.ts           4   ← host wiring, stays
+src/durable/topic.ts          4   ← S4 (title op)
 ```
 
 By symbol: `host.context` 48, `host.harness` 22, `host.bindingFor` 16, `host.modelRuntime` 14,
@@ -293,10 +295,9 @@ Conversation methods reached from outside `host.ts`: `viewState` 10, `submit` 7,
 `reset` 2, `configure` 2, `agent` 2, `compact` 1, `abort` 1 — plus `opened.subscribe` twice and
 `opened.dispose` three times, which is the attach/dispose lifecycle the seam formalises.
 
-Library imports inside `src/adapter/`: `pi-durable` in `queries.ts`, `router.ts`, `view-sink.ts`,
-`web.ts`, `artifacts-server.ts`; `chord` in `router.ts`, `view-sink.ts`, `web.ts`. `projection.ts` is
-library-free already, and `commands.ts` reaches for `pi-coding-agent` only for `SettingsManager` and
-`getAgentDir`.
+Library imports inside `src/adapter/`: **one**, `commands.ts` reaching for `pi-coding-agent`'s
+`SettingsManager` and `getAgentDir` — pi's `settings.json`, which is shared with the TUI and cron and
+deliberately not the host's. No `pi-durable` and no `chord` anywhere in the adapter layer.
 
 `artifacts-server.ts` is the newest and smallest: two reach-throughs, both `host.harness` +
 `host.context`, to take one snapshot. It is also the clearest case for `snapshot()` existing — two
