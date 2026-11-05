@@ -102,7 +102,8 @@ binding record, minus its storage representation.
 
 | Op | Replaces | Missing today |
 |---|---|---|
-| `snapshot(conversationId) → { view, entries }` | `conversation.viewState()`'s snapshot half (5 sites in adapters, 10 in `src/`), and the raw `entries` the artifact index walks | Entries must arrive as plain data, or `deriveArtifacts` keeps a pi-durable type (D11) |
+| `snapshot(conversationId) → ProjectedView` | `conversation.viewState()`'s snapshot half (10 sites in `src/`) | Done — see "Boundary readiness" for why it is a projection and not entries |
+| `artifacts(conversationId) → ArtifactFile[]` | the artifact index walking `entries` and filtering paths itself | Done — derived host-side, so 19 records cross instead of 1,085 entries |
 | `attach(conversationId, sink) → ViewHandle` | `conversation.viewState()`'s subscribe half + `projectView()` called in each adapter | Projection must move host-side (D3), or every adapter keeps a pi-durable type |
 | `status(conversationId) → ConversationStatus` | `queries.conversationStatus()` / the `/model` card: `conversation.agent()` + `viewState()` + usage, assembled in the adapter | Assembling "what `/status` shows" is host knowledge |
 
@@ -193,11 +194,32 @@ left. Everything durable — the turn, the projection, the answer, the redactor 
 - **D10 — sinks are non-blocking.** A Chat PATCH that takes 300 ms must not delay a commit. Today that
   is free (in-process, sync callback); over a socket it needs a bounded per-sink queue with
   drop-oldest, safe because every frame is a whole snapshot.
-- **D11 — the seam carries entries, not derived artifacts.** `snapshot()` returns the projection
-  *and* the entries as plain data; `deriveArtifacts()` stays in the adapter. Putting artifact
-  derivation behind the seam would make every future view of "what did this conversation touch" go
-  through the host, and give the host a presentation concern. The alternative it must not take: an
-  `artifacts()` op, which would also have to own Markdown rendering's contract.
+- **D11 — the seam carries a projection and a derived list, not entries.** *(Revised: the original said
+  the seam should carry entries and keep derivation in the adapter. Measurement killed that.)* The
+  largest conversation here is 1,085 entries / 2.8 MB / ~28 ms to marshal — per attach, per client,
+  and chord deflates large frames before they cross, which costs CPU on data that does not compress.
+  So `snapshot()` returns `ProjectedView` (bounded by construction) and `artifacts()` returns derived
+  records. Entries never cross. Markdown rendering stays in the adapter: that is presentation.
+
+## Boundary readiness
+
+The processes are always on one machine, so latency and bandwidth are not the costs. **Marshalling
+is**, and it is per byte regardless of distance. Measured on this store: 1,085 entries = 2.8 MB =
+~28 ms to stringify plus ~15 ms to parse, per attach, per client. Chord also deflates frames above
+`PACK_THRESHOLD`, which costs more CPU on data that is already compressed (base64 images gain
+nothing).
+
+So the rule is: **structure crosses by value, bytes cross by reference.**
+
+| Shape | Ops | Why |
+|---|---|---|
+| **Calls** — small JSON in, small JSON out | `list`, `resolve`, `getOrCreate`, `snapshot`, `artifacts`, `setModel`, `status`, `agent`, `usage`, `models`, `info`, `bind`, `label`, `unbind`, `doc.get`, `doc.set`, `doc.claim`, `abort` | Bounded by construction: a projection, a derived list, an id, a record |
+| **Frames** — server-pushed state, one attachment id | `attach` | A callback cannot be serialized. Over a link this is "send to attachment N" + `detach(id)`; chord's replicated state is already this shape |
+| **References** — a path instead of the bytes | `submit` content parts, `secret` | An image is a path the host reads at submit time; a secret is a file the host reads once. Implemented and tested for images |
+| **Tasks** — start, then observe | `submit`+`await`, `compact`, `title` | `compact` and `title` are model calls (the local titler's timeout is 15 min). A blocking request that can take minutes loses its work when a link drops |
+
+Two operations that look like calls and are not: `compact` and `title`. They are turns in disguise and
+need a `start…() → taskId` shape before they cross anything.
 
 ## Migration steps
 
@@ -206,10 +228,11 @@ place until the last adapter is ported; the seam is additive.
 
 - **S0 — the seam exists.** `src/session-host/api.ts` (types only) and `src/session-host/inprocess.ts`
   (implements it over `BridgeHost`). No adapter changes. Exit: typecheck clean, no behaviour change.
-- **S1 — port the read-only adapters: web and artifacts.** `list`, `snapshot`, `attach`, `submit`.
-  Exit: neither `web.ts` nor `artifacts-server.ts` imports pi-durable or chord, and
-  `test/artifacts-server.test.ts` runs against a fake host with no SQLite. Two small consumers, so
-  the shape is proved twice before it is applied to the Chat path.
+- **S1 — port the read-only adapters: web and artifacts. DONE.** `list`, `snapshot`, `attach`,
+  `submit`, `artifacts`. `web.ts` and `artifacts-server.ts` import neither library and never touch
+  `host.harness`; `test/web.test.ts` and `test/artifacts-server.test.ts` run against a fake seam with
+  no SQLite. One contract change came out of it: **the current state arrives as the first frame of
+  `attach`**, which removes the snapshot-versus-early-frame ordering hazard.
 - **S2 — port `queries.ts`.** Kills the 14 `host.modelRuntime` reach-throughs and the 9 `viewState`
   ones; `ModelInfo`/`ConversationStatus` become plain data.
 - **S3 — port `router.ts` and the `main.ts` turn path.** `submit` / `await` / `abort` / `write`; the
@@ -244,18 +267,18 @@ place until the last adapter is ported; the seam is additive.
 
 ## Appendix: measured coupling
 
-`host.*` reach-throughs by file — the list the seam has to eliminate. The first block is the
-adapters themselves; the second is Chat-side code that will move behind an adapter (`notify`,
-`topic`, `posted-doc`) or stays host wiring (`main`).
+`host.*` reach-throughs by file — the list the seam has to eliminate. `web.ts` and
+`artifacts-server.ts` are now at zero (S1); what remains is the Chat path plus Chat-side helpers that
+will move behind an adapter or stay host wiring.
 
 ```
 src/adapter/queries.ts       26
 src/adapter/commands.ts      24
-src/adapter/web.ts            7
 src/adapter/router.ts         7
-src/adapter/artifacts-server.ts 2
+src/adapter/web.ts            0   ← S1
+src/adapter/artifacts-server.ts 0 ← S1
 ----                     ----
-adapters                     66
+adapters                     57
 
 src/durable/notify.ts         9
 src/durable/posted-doc.ts     6
