@@ -216,7 +216,7 @@ So the rule is: **structure crosses by value, bytes cross by reference.**
 |---|---|---|
 | **Calls** — small JSON in, small JSON out | `list`, `resolve`, `getOrCreate`, `snapshot`, `artifacts`, `setModel`, `status`, `agent`, `usage`, `models`, `info`, `bind`, `label`, `unbind`, `doc.get`, `doc.set`, `doc.claim`, `abort` | Bounded by construction: a projection, a derived list, an id, a record |
 | **Frames** — server-pushed state, one attachment id | `attach` | A callback cannot be serialized. Over a link this is "send to attachment N" + `detach(id)`; chord's replicated state is already this shape |
-| **References** — a path instead of the bytes | `submit` content parts, `secret` | An image is a path the host reads at submit time; a secret is a file the host reads once. Implemented and tested for images |
+| **Inline, once per message** | `submit` content parts | A Chat attachment arrives already base64 and is one payload, not a repeated frame — so it travels as-is. The "bytes by reference" rule is about the 100 ms frame channel, and applying it here cost a working feature for a boundary that does not exist yet. A file-reference form arrives when a caller has a file |
 | **Tasks** — start, then observe | `submit`+`await`, `compact`, `title` | `compact` and `title` are model calls (the local titler's timeout is 15 min). A blocking request that can take minutes loses its work when a link drops |
 
 Two operations that look like calls and are not: `compact` and `title`. They are turns in disguise and
@@ -241,7 +241,9 @@ place until the last adapter is ported; the seam is additive.
   holds no pi-durable import, and `src/adapter/` has **zero** `host.*` reach-throughs. Submissions are
   addressed by id (`harness.submission(id)`) rather than held as handles, which is why the wait
   survives a restart and why this operation can cross a link later.
-- **S4 — adapter-owned state and titles. DONE.** The claim on an answer, the notifier's verdicts and
+- **S4 — adapter-owned state and titles. DONE** (with the guard test: `test/seam-guard.test.ts` fails the
+  build if an adapter names pi-durable or chord, reaches through `host.*`, or a new file appears in
+  `src/adapter/` without being added to the list). The claim on an answer, the notifier's verdicts and
   a conversation's first turn are seam operations; `posted-doc.ts` is gone and `notify.ts`/`topic.ts`
   take the seam. One deviation, recorded rather than hidden: D5 said `doc.get/set/claim` — a generic
   namespaced store — but the claims that exist are *typed* and live in documents that predate the

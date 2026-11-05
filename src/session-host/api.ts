@@ -79,10 +79,18 @@ export interface AgentConfig {
   cwd?: string;
 }
 
-/** One part of a message. Binary travels by reference, never inline. */
+/**
+ * One part of a message.
+ *
+ * Images travel **inline**: a Chat attachment arrives as base64, and it is one
+ * payload per message rather than a repeated frame — the "bytes by reference"
+ * rule is about the 100 ms frame channel, not about a single upload. A
+ * file-reference form belongs here the day something actually has a file to
+ * point at; until then it would be a shape with no caller.
+ */
 export type ContentPart =
   | { type: "text"; text: string }
-  | { type: "image"; path: string; mimeType: string };
+  | { type: "image"; data: string; mimeType: string };
 
 export type MessageContent = string | readonly ContentPart[];
 

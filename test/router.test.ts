@@ -37,17 +37,17 @@ test("a plain message is a bare string, no content blocks", () => {
 
 test("an image message becomes content blocks, text first", () => {
   const content = buildContent("what is this", [image]);
+  // Chat hands the bytes over base64, so they travel inline: one payload per
+  // message, and no disk round-trip to get it to the model.
   assert.deepEqual(content, [
     { type: "text", text: "what is this" },
-    // Chat hands images over as base64. The seam's reference form is for bytes
-    // already on disk; an attachment is described here and read by the host.
-    { type: "text", text: "[image: image/png]" },
+    { type: "image", data: "aGk=", mimeType: "image/png" },
   ]);
 });
 
 test("an image-only message has no empty text block", () => {
   const content = buildContent("", [image]);
-  assert.deepEqual(content, [{ type: "text", text: "[image: image/png]" }]);
+  assert.deepEqual(content, [{ type: "image", data: "aGk=", mimeType: "image/png" }]);
 });
 
 test("a notification is a write with model content, never a run", () => {

@@ -20,7 +20,7 @@
  * decides what to submit and under which name.
  */
 import type { PiImage } from "../session-file.js";
-import type { MessageContent, NamedConversation, SessionHost } from "../session-host/api.js";
+import type { ContentPart, NamedConversation, SessionHost } from "../session-host/api.js";
 
 /** An image as Google Chat gives it to us: base64 data plus its media type. */
 export type IncomingImage = PiImage;
@@ -38,15 +38,15 @@ export interface IncomingChatMessage {
  * The message content for the host.
  *
  * A bare string when there are no images keeps the transcript readable in
- * `entries`; with images it becomes content blocks, which is what a model sees.
- * Images travel as data here because Chat hands them to us that way — the seam's
- * reference form is for bytes that are already on disk (see docs/artifacts.md).
+ * `entries`; with images it becomes content blocks, which is what the model
+ * sees. Chat hands the bytes over already base64-encoded, so they travel inline:
+ * this is one payload per message, not a repeated frame.
  */
-export function buildContent(text: string, images?: readonly IncomingImage[]): MessageContent {
+export function buildContent(text: string, images?: readonly IncomingImage[]): ContentPart[] | string {
   if (!images || images.length === 0) return text;
   return [
     ...(text ? [{ type: "text" as const, text }] : []),
-    ...images.map((image) => ({ type: "text" as const, text: `[image: ${image.mimeType}]` })),
+    ...images.map((image) => ({ type: "image" as const, data: image.data, mimeType: image.mimeType })),
   ];
 }
 

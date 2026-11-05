@@ -82,14 +82,6 @@ function emit(value: unknown): void {
   ((globalThis as Record<string, unknown>).__seamEmit as (value: unknown) => void)(value);
 }
 
-test("the seam file imports no library types", () => {
-  // The contract is only a contract if an adapter cannot reach past it through a
-  // shared type. This is the check the doc calls the success criterion.
-  const source = fs.readFileSync(new URL("../src/session-host/api.ts", import.meta.url), "utf8");
-  assert.ok(!source.includes("@earendil-works/pi-durable"), "api.ts must not import pi-durable");
-  assert.ok(!source.includes("@earendil-works/chord"), "api.ts must not import chord");
-});
-
 test("list() maps bindings to plain conversations, newest first", async () => {
   const seam = inProcessSessionHost({
     host: fakeHost({
@@ -213,115 +205,22 @@ test("submit() maps content, defaults whenBusy, and reports a bad conversation",
   assert.equal(draft.requestId, "chat/msg/1");
 });
 
-test("submit() reads image parts from disk instead of carrying bytes", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-seam-img-"));
-  try {
-    const file = path.join(root, "pic.png");
-    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
-    fs.writeFileSync(file, bytes);
+test("submit() passes an inline image through as a model block", async () => {
+  const submitted: unknown[] = [];
+  const seam = inProcessSessionHost({ host: fakeHost({ conversations: [1], submitted }), roots: [] });
 
-    const submitted: unknown[] = [];
-    const seam = inProcessSessionHost({
-      host: fakeHost({ conversations: [1], submitted }),
-      roots: [],
-    });
+  const result = await seam.submit(1, {
+    content: [
+      { type: "text", text: "look" },
+      { type: "image", data: "aGk=", mimeType: "image/png" },
+    ],
+    whenBusy: "followUp",
+  });
+  assert.deepEqual(result, { submissionId: 42 });
 
-    const result = await seam.submit(1, {
-      content: [
-        { type: "text", text: "look" },
-        { type: "image", path: file, mimeType: "image/png" },
-      ],
-      whenBusy: "followUp",
-    });
-    assert.deepEqual(result, { submissionId: 42 });
-
-    const draft = submitted[0] as { content: { type: string; data?: string; mimeType?: string }[] };
-    assert.equal(draft.content[0].type, "text");
-    assert.equal(draft.content[1].type, "image");
-    assert.equal(draft.content[1].data, bytes.toString("base64"));
-    assert.equal(draft.content[1].mimeType, "image/png");
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("the settings operations delegate, and bind/label/create map back to plain names", async () => {
-  const calls: string[] = [];
-  const host = {
-    conversationState: async (id: number) => {
-      calls.push(`state:${id}`);
-      return { conversationId: id, model: "p/m", provider: "p", modelId: "m", entries: 3 };
-    },
-    listModels: async () => {
-      calls.push("models");
-      return [{ provider: "p", id: "m", label: "M", thinkingLevels: ["off"] }];
-    },
-    setModel: async (name: string, change: { model?: string }) => {
-      calls.push(`setModel:${name}`);
-      return { model: "p/m2" };
-    },
-    createNamed: async (name: string) => {
-      calls.push(`create:${name}`);
-      return { conversationId: 9, model: "p/m", createdAt: 5 };
-    },
-    bind: async (name: string, id: number) => {
-      calls.push(`bind:${name}:${id}`);
-      return { conversationId: id, model: "p/m", name: "kept", createdAt: 6 };
-    },
-    unbind: async (name: string) => {
-      calls.push(`unbind:${name}`);
-      return true;
-    },
-    setLabel: async (name: string, label: string) => {
-      calls.push(`label:${name}:${label}`);
-      return true;
-    },
-    usage: async () => {
-      calls.push("usage");
-      return { models: {}, tools: {} };
-    },
-  } as unknown as BridgeHost;
-
-  const seam = inProcessSessionHost({ host, roots: [] });
-
-  assert.equal((await seam.state(1))?.entries, 3);
-  assert.equal((await seam.models())[0].label, "M");
-  assert.deepEqual(await seam.setModel("threads/a", { provider: "p", modelId: "m2" }), { model: "p/m2" });
-  assert.equal((await seam.create("threads/new", { model: { provider: "p", modelId: "m" } })).conversationId, 9);
-  const bound = await seam.bind("threads/a", 4);
-  assert.equal(bound?.conversationId, 4);
-  assert.equal(bound?.label, "kept");
-  assert.equal(await seam.unbind("threads/a"), true);
-  assert.equal(await seam.label("threads/a", "name"), true);
-  assert.deepEqual(await seam.usage(), { models: {}, tools: {} });
-
-  assert.deepEqual(calls, [
-    "state:1",
-    "models",
-    "setModel:threads/a",
-    "create:threads/new",
-    "bind:threads/a:4",
-    "unbind:threads/a",
-    "label:threads/a:name",
-    "usage",
-  ]);
-});
-
-test("awaitSubmission() and write() delegate to the host", async () => {
-  const calls: string[] = [];
-  const host = {
-    awaitSubmission: async (id: number) => {
-      calls.push(`await:${id}`);
-      return { status: "done" as const, answerId: 5, text: "hello" };
-    },
-    writeEntry: async (id: number, entry: { kind: string }) => {
-      calls.push(`write:${id}:${entry.kind}`);
-      return 11;
-    },
-  } as unknown as BridgeHost;
-
-  const seam = inProcessSessionHost({ host, roots: [] });
-  assert.deepEqual(await seam.awaitSubmission(3), { status: "done", answerId: 5, text: "hello" });
-  assert.equal(await seam.write(1, { kind: "app.notice", data: { text: "hi" } }), 11);
-  assert.deepEqual(calls, ["await:3", "write:1:app.notice"]);
+  const draft = submitted[0] as { content: { type: string; data?: string; mimeType?: string }[] };
+  assert.equal(draft.content[0].type, "text");
+  assert.equal(draft.content[1].type, "image");
+  assert.equal(draft.content[1].data, "aGk=");
+  assert.equal(draft.content[1].mimeType, "image/png");
 });

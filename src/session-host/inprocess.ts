@@ -21,8 +21,6 @@
 import type { Context } from "@earendil-works/chord";
 import type { AgentChange, ConversationId, UserInput } from "@earendil-works/pi-durable";
 
-import fs from "node:fs";
-
 import { deriveArtifacts, type ArtifactEntryLike, type ArtifactFile } from "../durable/artifacts.js";
 import type { BridgeHost } from "../durable/host.js";
 import { projectView, type ProjectedView, type ViewLike } from "./projection.js";
@@ -59,15 +57,14 @@ function parseModel(model: string): { provider: string; modelId: string } {
   return { provider: model.slice(0, slash), modelId: model.slice(slash + 1) };
 }
 
-/** The seam's content → the harness's content, reading file-backed parts. */
+/** The seam's content → the harness's content. Both sides are already the same shape. */
 function toUserInput(content: MessageContent): UserInput {
   if (typeof content === "string") return content;
-  return content.map((part) => {
-    if (part.type === "text") return { type: "text" as const, text: part.text };
-    // Read at submit time: the adapter hands over a path, not megabytes.
-    const data = fs.readFileSync(part.path).toString("base64");
-    return { type: "image" as const, data, mimeType: part.mimeType };
-  });
+  return content.map((part) =>
+    part.type === "text"
+      ? { type: "text" as const, text: part.text }
+      : { type: "image" as const, data: part.data, mimeType: part.mimeType },
+  );
 }
 
 export function inProcessSessionHost(options: InProcessOptions): SessionHost {
