@@ -1,4 +1,5 @@
 import type { SessionStats } from "@earendil-works/pi-coding-agent";
+import type { ProviderQuota } from "./quota.js";
 import type {
   ConversationSettingsResult,
   DefaultSettings,
@@ -258,6 +259,43 @@ export function statusCard(info: {
   ];
 }
 
+/** Per-provider quota report for /quota. One section per provider: status,
+ *  balance (when the provider exposes a quota API), models queried through it,
+ *  and a Top up button for anything that bills per token. */
+export function quotaCard(quotas: ProviderQuota[]): unknown[] {
+  const statusLine = (q: ProviderQuota): string => {
+    if (q.available === true) return "✅ available";
+    if (q.available === false) return "❌ unavailable";
+    return "❓ unknown";
+  };
+  const sections = quotas.map((q) => {
+    const lines = [
+      `<b>${escapeHtml(q.provider)}</b> — ${statusLine(q)}${q.queried ? "" : " <i>(not queried)</i>"}`,
+    ];
+    if (q.balance) lines.push(escapeHtml(q.balance));
+    if (q.note) lines.push(`<i>${escapeHtml(q.note)}</i>`);
+    lines.push(`Models: ${q.models.map((m) => escapeHtml(m)).join(", ") || "(none)"}`);
+    const widgets: unknown[] = [{ textParagraph: { text: lines.join("<br>") } }];
+    if (q.topUpUrl) {
+      widgets.push({
+        buttonList: {
+          buttons: [{ text: "Top up", onClick: { openLink: { url: q.topUpUrl } } }],
+        },
+      });
+    }
+    return { widgets };
+  });
+  return [
+    {
+      cardId: "quota",
+      card: {
+        header: { title: "Provider quota" },
+        sections: [{ widgets: [{ textParagraph: { text: "Quota per provider this bridge queries." } }] }, ...sections],
+      },
+    },
+  ];
+}
+
 /** Dropdown + submit card listing models + thinking levels to switch THIS
  *  conversation to. With `newConversation` (no session yet) the same pick starts
  *  the conversation on that model instead — copy changes, action stays the same.
@@ -485,6 +523,7 @@ export function helpCard(): unknown[] {
     ["<b>/model</b>", "Switch this conversation's model and thinking level — or start this conversation on a model if it has none yet"],
     ["<b>/settings</b>", "Change the default model and thinking level for new conversations (existing ones keep theirs)"],
     ["<b>/status</b>", "Show this conversation's model, thinking level, context usage, and tokens"],
+    ["<b>/quota</b>", "Show quota/balance for every provider the bridge can query (top-up links for paid ones)"],
     ["<b>/resume</b>", "Resume a session (dropdown picker)"],
     ["<b>/sessions</b>", "Same as /resume"],
     ["<b>/list</b>", "Same as /resume"],

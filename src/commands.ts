@@ -1,4 +1,5 @@
 import type { AgentRouter, ConversationSettingsResult, DefaultSettingsResult } from "./agent-sessions.js";
+import { checkProviderQuotas } from "./quota.js";
 import {
   confirmCard,
   errorCard,
@@ -7,6 +8,7 @@ import {
   modelConfirmCard,
   modelPickerCard,
   pickerCard,
+  quotaCard,
   sessionStatsCard,
   settingsCard,
   settingsConfirmCard,
@@ -196,10 +198,23 @@ const SLASH_COMMANDS: SlashCommand[] = [
     },
   },
   {
+    pattern: /^\/quota\b/,
+    // Read-only, like /status: no interrupt, and it never opens a session.
+    run: async ({ client, router, spaceName, threadName, display }) => {
+      const models = await router.listModels();
+      const quotas = await checkProviderQuotas(models);
+      await client.createCardMessage(spaceName, quotaCard(quotas), "Provider quota.", threadName);
+      logger.info(
+        `[chat] ${display}: posted quota card (${quotas.length} providers, queried ${quotas.filter((q) => q.queried).length})`,
+      );
+      return "ok";
+    },
+  },
+  {
     pattern: /^\/help\b/,
     interrupt: true,
     run: async ({ client, spaceName, threadName, display }) => {
-      await client.createCardMessage(spaceName, helpCard(), "Available commands: /model, /settings, /resume, /sessions, /list, /help.", threadName);
+      await client.createCardMessage(spaceName, helpCard(), "Available commands: /model, /settings, /status, /quota, /resume, /sessions, /list, /help.", threadName);
       logger.info(`[chat] ${display}: posted help card`);
       return "ok";
     },
