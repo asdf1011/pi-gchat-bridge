@@ -135,6 +135,33 @@ test("history comes back bounded, so an idle conversation is not a blank pane", 
   }
 });
 
+test("history arrives rendered, and the rendering cannot carry a script", async () => {
+  const seam = fakeSeam({
+    history: [
+      { role: "assistant", text: "## Heading\n\nUse `npm test` — see [docs](https://example.com)." },
+      { role: "user", text: "<img src=x onerror=alert(1)>" },
+    ],
+  });
+  const served = await serve(seam);
+  try {
+    const rows = (await (await fetch(`${served.base}/web/api/c/1/history`)).json()) as {
+      role: string;
+      text: string;
+      html: string;
+    }[];
+    // Markdown becomes real markup, and code spans stay code.
+    assert.match(rows[0].html, /<h2>Heading<\/h2>/);
+    assert.match(rows[0].html, /<code>npm test<\/code>/);
+    assert.match(rows[0].html, /href="https:\/\/example.com"/);
+    // Raw HTML in a message is escaped, never passed through: the page assigns
+    // this into innerHTML, and this origin can submit messages.
+    assert.ok(!rows[1].html.includes("<img"), rows[1].html);
+    assert.match(rows[1].html, /&lt;img/);
+  } finally {
+    await served.close();
+  }
+});
+
 test("the artifact list is same-origin, small, and says which files render", async () => {
   const seam = fakeSeam({
     artifacts: [

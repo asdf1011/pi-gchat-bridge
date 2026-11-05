@@ -20,10 +20,28 @@
   #list li.on { background: #8882; }
   #list small { display: block; opacity: .6; font-size: .78em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #pane { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-  #log { flex: 1; overflow: auto; padding: 1rem; white-space: pre-wrap; word-break: break-word; margin: 0; }
-  #log .msg { margin: 0 0 .9rem; }
+  #log { flex: 1; overflow: auto; padding: 1rem; word-break: break-word; margin: 0; }
+  #log .msg { margin: 0 0 1.1rem; }
   #log .who { display: block; font-size: .72em; text-transform: uppercase; letter-spacing: .04em; opacity: .55; }
   #log .live { opacity: .95; }
+  /* Rendered markdown. The HTML comes from the server's escape-first renderer,
+     so every tag here is ours; these rules only make it readable in a pane. */
+  #log .body > :first-child { margin-top: 0; }
+  #log .body > :last-child { margin-bottom: 0; }
+  #log .body p, #log .body ul, #log .body ol { margin: .5rem 0; }
+  #log .body h1, #log .body h2, #log .body h3, #log .body h4 { margin: .9rem 0 .4rem; line-height: 1.25; }
+  #log .body h1 { font-size: 1.25em; } #log .body h2 { font-size: 1.15em; } #log .body h3 { font-size: 1.05em; }
+  #log .body code { font-family: ui-monospace, SFMono-Regular, monospace; font-size: .9em;
+    background: #8881; padding: .1em .3em; border-radius: 3px; }
+  #log .body pre { background: #8881; padding: .6rem .75rem; border-radius: 6px; overflow-x: auto; margin: .6rem 0; }
+  #log .body pre code { background: none; padding: 0; }
+  #log .body ul, #log .body ol { padding-left: 1.3rem; }
+  #log .body blockquote { margin: .6rem 0; padding-left: .8rem; border-left: 3px solid #8886; opacity: .85; }
+  #log .body table { border-collapse: collapse; margin: .6rem 0; display: block; overflow-x: auto; }
+  #log .body th, #log .body td { border: 1px solid #8886; padding: .3rem .5rem; text-align: left; vertical-align: top; }
+  #log .body th { background: #8882; }
+  #log .body hr { border: 0; border-top: 1px solid #8886; margin: 1rem 0; }
+  #log .body a { color: inherit; }
   #tool { padding: .25rem 1rem; font: 12px ui-monospace, monospace; opacity: .7; min-height: 1.6em; }
   form { display: flex; gap: .5rem; padding: .75rem; border-top: 1px solid #8884; }
   textarea { flex: 1; resize: none; height: 3.5rem; font: inherit; padding: .5rem; }
@@ -107,6 +125,14 @@ const tool = document.getElementById('tool');
 // mid-turn shows the conversation *and* the half-finished reply.
 let history = [];
 let liveText = '';
+let liveHtml = '';
+
+/** Fallback when a frame arrives without rendered HTML (an older server). */
+function escapeText(text) {
+  const holder = document.createElement('div');
+  holder.textContent = text;
+  return holder.innerHTML;
+}
 
 function paint() {
   log.innerHTML = '';
@@ -116,8 +142,11 @@ function paint() {
     const who = document.createElement('span');
     who.className = 'who';
     who.textContent = message.role === 'user' ? 'you' : 'pi';
-    const body = document.createElement('span');
-    body.textContent = message.text;
+    const body = document.createElement('div');
+    body.className = 'body';
+    // Server-rendered markdown: the renderer escapes source before emitting any
+    // tag, so this HTML is ours and cannot carry a script.
+    body.innerHTML = message.html || '';
     block.append(who, body);
     log.append(block);
   }
@@ -127,8 +156,9 @@ function paint() {
     const who = document.createElement('span');
     who.className = 'who';
     who.textContent = 'pi';
-    const body = document.createElement('span');
-    body.textContent = liveText;
+    const body = document.createElement('div');
+    body.className = 'body';
+    body.innerHTML = liveHtml || escapeText(liveText);
     block.append(who, body);
     log.append(block);
   }
@@ -151,6 +181,7 @@ function open(id) {
   current = id;
   history = [];
   liveText = '';
+  liveHtml = '';
   log.innerHTML = '';
   tool.textContent = '';
   void loadHistory();
@@ -159,10 +190,19 @@ function open(id) {
     const d = JSON.parse(e.data);
     const wasBusy = liveText !== '';
     liveText = d.text;
+    liveHtml = d.html || '';
     paint();
     // A turn that just finished has become history: refetch so the answer is
     // shown as a completed message and the live block goes away.
-    if (!d.busy && wasBusy) setTimeout(() => { void loadHistory().then(() => { liveText = ''; paint(); }); }, 300);
+    if (!d.busy && wasBusy) {
+      setTimeout(() => {
+        void loadHistory().then(() => {
+          liveText = '';
+          liveHtml = '';
+          paint();
+        });
+      }, 300);
+    }
   });
   source.addEventListener('tool', (e) => {
     const d = JSON.parse(e.data);

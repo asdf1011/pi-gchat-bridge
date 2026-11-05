@@ -14,6 +14,7 @@
 import type http from "node:http";
 
 import { attachWebClient, webIndex, webPage, webSubmit } from "./web.js";
+import { renderMarkdown } from "./markdown.js";
 import type { SessionHost } from "../session-host/api.js";
 import { logger } from "../logger.js";
 
@@ -105,8 +106,13 @@ export async function handleWebRequest(
       res.end(JSON.stringify({ ok: false, error: `no such conversation: ${history[1]}` }));
       return true;
     }
+    // Rendered here, not in the browser: the renderer escapes every byte of
+    // source before it emits a tag, so what reaches the page's innerHTML can
+    // only be our markup. Doing it client-side would mean shipping either a
+    // second renderer or an unsanitised `innerHTML` — and this origin can submit
+    // messages, so an injected script would be able to run tools.
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(messages));
+    res.end(JSON.stringify(messages.map((m) => ({ ...m, html: renderMarkdown(m.text) }))));
     return true;
   }
 
@@ -155,13 +161,21 @@ export async function handleWebRequest(
       send(event: string, data: unknown) {
         if (!alive) return;
         try {
-          res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+          // Answer frames carry the raw text *and* its rendering. Rendering here
+          // rather than in the page is deliberate: our renderer escapes every
+          // byte before emitting a tag, so the HTML the pane assigns cannot
+          // contain a script — and this origin can submit messages, so an
+          // injected one could drive tools.
+          const payload =
+            event === "text" && typeof (data as { text?: unknown }).text === "string"
+              ? { ...(data as object), html: renderMarkdown((data as { text: string }).text) }
+              : data;
+          res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
         } catch {
           alive = false;
         }
       },
     };
-    const handle = await attachWebClient(handleOptions, conversationId, client);
     // A comment line keeps proxies from closing an idle stream.
     const keepalive = setInterval(() => {
       if (!alive) return;
@@ -171,6 +185,7 @@ export async function handleWebRequest(
         alive = false;
       }
     }, 15_000);
+    const handle = await attachWebClient(handleOptions, conversationId, client);
     req.on("close", () => {
       alive = false;
       clearInterval(keepalive);
