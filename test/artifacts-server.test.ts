@@ -6,33 +6,25 @@ import path from "node:path";
 import type { AddressInfo } from "node:net";
 
 import { startArtifactsServer } from "../src/adapter/artifacts-server.js";
-import { canonicalPath, type ArtifactEntryLike } from "../src/durable/artifacts.js";
-import type { BridgeHost } from "../src/durable/host.js";
+import { canonicalPath, type ArtifactFile } from "../src/durable/artifacts.js";
+import type { SessionHost } from "../src/session-host/api.js";
 
 /**
- * A host stand-in: one conversation whose entries are the tool calls given.
+ * A seam stand-in: one conversation's artifact list, already derived.
  *
- * The fake is deliberately four fields wide (`harness.conversation` returning
- * something with `viewState`) because that is the whole contract this server
- * has with the harness — and a fake that matched less would mean the server was
- * reaching for more.
+ * The adapter no longer walks the transcript — derivation moved host-side — so
+ * the fake is a list of records, which is a much smaller thing to fake than a
+ * chord view subscription.
  */
-function fakeHost(entries: readonly ArtifactEntryLike[], conversations = [1]): BridgeHost {
+function fakeSeam(files: readonly ArtifactFile[], conversations = [1]): SessionHost {
   return {
-    context: {},
-    harness: {
-      conversation: async (id: number) =>
-        conversations.includes(id)
-          ? {
-              viewState: async () => ({ value: { entries }, dispose() {} }),
-            }
-          : undefined,
-    },
-  } as unknown as BridgeHost;
+    artifacts: async (id: number) => (conversations.includes(id) ? files : undefined),
+  } as unknown as SessionHost;
 }
 
-function entry(id: number, name: string, args: Record<string, unknown>): ArtifactEntryLike {
-  return { id, model: [{ content: [{ type: "toolCall", name, arguments: args }] }] };
+/** One derived artifact pointing at a real file. */
+function artifact(root: string, key: string, path: string): ArtifactFile {
+  return { key, root, path, wrote: 1, edited: 0 };
 }
 
 interface Harness {
@@ -40,17 +32,11 @@ interface Harness {
   close(): Promise<void>;
 }
 
-async function serve(
-  root: string,
-  files: string[],
-  options: { maxBytes?: number; conversations?: number[] } = {},
-): Promise<Harness> {
-  const entries = files.map((file, index) => entry(index + 1, "write", { path: path.join(root, file), content: "x" }));
+async function serve(root: string, files: string[], options: { conversations?: number[] } = {}): Promise<Harness> {
+  const artifacts = files.map((file) => artifact(canonicalPath(root), file, path.join(root, file)));
   const server = await startArtifactsServer({
-    host: fakeHost(entries, options.conversations ?? [1]),
+    seam: fakeSeam(artifacts, options.conversations ?? [1]),
     port: 0,
-    roots: [canonicalPath(root)],
-    ...(options.maxBytes === undefined ? {} : { redact: undefined }),
   });
   const { port } = server.address() as AddressInfo;
   return {

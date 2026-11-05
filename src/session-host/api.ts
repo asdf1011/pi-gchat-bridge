@@ -118,6 +118,10 @@ export interface SessionHost {
   /**
    * Snapshot, then frames. Returns `undefined` when the conversation is gone.
    *
+   * The **current state arrives as the first frame**, before any commit, so a
+   * caller never needs a separate initial paint and cannot paint a stale
+   * snapshot over a newer frame.
+   *
    * The frame callback is why this operation cannot cross a link unchanged: a
    * function is the one thing a serializing boundary cannot carry. Over a link
    * this becomes "send frames to attachment N" plus a detach call — chord's

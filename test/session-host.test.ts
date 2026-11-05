@@ -140,7 +140,7 @@ test("snapshot() returns a projection, not a transcript", async () => {
   assert.equal(counters().disposed, 1, "the view subscription must be disposed");
 });
 
-test("attach() delivers frames and detaches exactly once", async () => {
+test("attach() delivers the current state first, then frames, and detaches once", async () => {
   const seam = inProcessSessionHost({
     host: fakeHost({ view: { entries: [], docs: {} } }),
     roots: [],
@@ -150,13 +150,17 @@ test("attach() delivers frames and detaches exactly once", async () => {
   assert.ok(handle);
   assert.equal(typeof handle.snapshot.liveText, "string");
 
+  // Contract: the current state is the first frame, so a caller never has to
+  // paint a snapshot separately (and cannot paint a stale one over a new frame).
+  assert.equal(frames.length, 1, "the snapshot arrives as the first frame");
+
   emit({ entries: [], docs: {} });
-  assert.equal(frames.length, 1);
+  assert.equal(frames.length, 2);
 
   handle.detach();
   handle.detach();
   emit({ entries: [], docs: {} });
-  assert.equal(frames.length, 1, "no frame after detach");
+  assert.equal(frames.length, 2, "no frame after detach");
   assert.equal(counters().disposed, 1, "detach is idempotent");
 });
 

@@ -140,8 +140,13 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
         if (!attached) return;
         onFrame(projectView(value as unknown as ViewLike));
       });
+      // The current state as the first frame, emitted after subscribing so it
+      // cannot overwrite a newer commit: the subscription is installed before
+      // this paint, and every later frame supersedes it.
+      const snapshot = projectView(opened.value as unknown as ViewLike);
+      onFrame(snapshot);
       return {
-        snapshot: projectView(opened.value as unknown as ViewLike),
+        snapshot,
         detach() {
           if (!attached) return;
           attached = false;

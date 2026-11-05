@@ -36,6 +36,7 @@ import { handleDurableNotify } from "./notify.js";
 import { attachWebClient, webIndex, webPage, webSubmit } from "../adapter/web.js";
 import { startArtifactsServer } from "../adapter/artifacts-server.js";
 import { artifactRoots } from "./artifacts.js";
+import { inProcessSessionHost } from "../session-host/inprocess.js";
 import { SecretRegistry } from "./extensions/redact.js";
 import { secretsFromEnvironment } from "./extensions/secret-redactor.js";
 import { applyDurableTopicSummary } from "./topic.js";
@@ -95,6 +96,14 @@ async function main(): Promise<void> {
     ...(defaults.thinkingLevel ? { thinkingLevel: defaults.thinkingLevel as never } : {}),
   });
   logger.info(`[bridge] default model ${defaultModel.provider}/${defaultModel.modelId}`);
+
+  // --- The seam every adapter talks to. ---
+  //
+  // In-process today, but constructed once and passed to each adapter, so the
+  // adapters depend on the interface rather than on this object. The artifact
+  // roots are decided here because deriving artifacts is the host's job: a viewer
+  // asks for a list, it does not walk the transcript and filter paths itself.
+  const seam = inProcessSessionHost({ host, roots: artifactRoots(config.cwd, getAgentDir()) });
 
   // --- Health + /notify, the same surface the SDK host exposes. ---
   if (config.healthPort > 0) {
@@ -176,7 +185,7 @@ async function main(): Promise<void> {
           }
           if (req.method === "GET" && webPath(url.pathname) === "/web/api/conversations") {
             res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify(await webIndex(host)));
+            res.end(JSON.stringify(await webIndex({ seam })));
             return;
           }
           const events = /^\/web\/api\/c\/(\d+)\/events$/.exec(webPath(url.pathname));
@@ -201,7 +210,7 @@ async function main(): Promise<void> {
               },
             };
             const handle = await attachWebClient(
-              { host, model: defaultModel, ...(config.webToken ? { token: config.webToken } : {}) },
+              { seam, model: defaultModel, ...(config.webToken ? { token: config.webToken } : {}) },
               conversationId,
               client,
             );
@@ -244,7 +253,7 @@ async function main(): Promise<void> {
               return;
             }
             const result = await webSubmit(
-              { host, model: defaultModel, ...(config.webToken ? { token: config.webToken } : {}) },
+              { seam, model: defaultModel, ...(config.webToken ? { token: config.webToken } : {}) },
               Number(send[1]),
               text,
             );
@@ -309,10 +318,9 @@ async function main(): Promise<void> {
       ]).redact(text);
     };
     artifactsServer = await startArtifactsServer({
-      host,
+      seam,
       port: artifactsPort,
       bind: config.bindAddress,
-      roots: artifactRoots(config.cwd, getAgentDir()),
       redact: redactArtifact,
     });
   }

@@ -21,35 +21,20 @@
  */
 import http from "node:http";
 
-import type { Context } from "@earendil-works/chord";
-// The one pi-durable type this adapter still names. It is a brand on a number,
-// so the cast is the whole cost; removing it is part of the SessionHostApi seam
-// (docs/session-host-api.md), not of this file.
-import type { ConversationId } from "@earendil-works/pi-durable";
-
-import {
-  deriveArtifacts,
-  isMarkdown,
-  readArtifact,
-  type ArtifactEntryLike,
-  type ArtifactFile,
-} from "../durable/artifacts.js";
-import type { BridgeHost } from "../durable/host.js";
+import { isMarkdown, readArtifact, type ArtifactFile } from "../durable/artifacts.js";
 import { logger } from "../logger.js";
+import type { SessionHost } from "../session-host/api.js";
 import { escapeHtml, markdownDocument, renderMarkdown } from "./markdown.js";
 
 export interface ArtifactsServerOptions {
-  host: BridgeHost;
+  /** The conversation host. In-process today; a link would satisfy the same shape. */
+  seam: SessionHost;
   /** Port on the loopback interface. 0 picks a free one (tests). */
   port: number;
   /** Bind address. Loopback by default: the tunnel is the only way in. */
   bind?: string;
-  /** Directories a request may serve from. */
-  roots: readonly string[];
   /** Applied to file content on the way out; the viewer bypasses the harness. */
   redact?: (text: string) => string;
-  /** Context for host calls. */
-  context?: Context;
 }
 
 /** Headers shared by every response: no sniffing, no caching, no framing by others. */
@@ -90,27 +75,12 @@ function hrefFor(key: string): string {
   return key.split("/").map((segment) => encodeURIComponent(segment)).join("/");
 }
 
-/** The conversation's artifacts, newest transcript state first derived each request. */
+/** The conversation's artifacts, derived by the host from its own transcript. */
 async function artifactsOf(
   options: ArtifactsServerOptions,
   conversationId: number,
-): Promise<ArtifactFile[] | undefined> {
-  const { host } = options;
-  const context = options.context ?? host.context;
-  const conversation = await host.harness.conversation(
-    conversationId as unknown as ConversationId,
-    context,
-  );
-  if (!conversation) return undefined;
-  const opened = await conversation.viewState(context);
-  try {
-    // `viewState()` is a full structural snapshot; its `entries` are in commit
-    // order, which is exactly what `deriveArtifacts` expects.
-    const entries = (opened.value.entries ?? []) as unknown as readonly ArtifactEntryLike[];
-    return deriveArtifacts(entries, options.roots);
-  } finally {
-    opened.dispose();
-  }
+): Promise<readonly ArtifactFile[] | undefined> {
+  return options.seam.artifacts(conversationId);
 }
 
 function indexPage(conversationId: number, files: readonly ArtifactFile[]): string {
@@ -251,7 +221,7 @@ export function startArtifactsServer(options: ArtifactsServerOptions): Promise<h
       server.off("error", reject);
       const address = server.address();
       const port = typeof address === "object" && address !== null ? address.port : options.port;
-      logger.info(`[artifacts] listening on http://${bind}:${port} roots=${options.roots.join(":")}`);
+      logger.info(`[artifacts] listening on http://${bind}:${port}`);
       resolve(server);
     });
   });

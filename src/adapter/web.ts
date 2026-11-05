@@ -14,18 +14,19 @@
  * notification in its storage, so a separate server process could not see a
  * Chat turn commit. In-process is not a shortcut here, it is the architecture.
  *
- * One `viewState()` per connected client, seeded from its snapshot, so a browser
+ * The adapter itself never touches the harness: it uses `SessionHost` (see
+ * `src/session-host/api.ts`). What is in-process today is one *implementation*
+ * of that seam, which is why this file imports no pi-durable or chord type.
+ *
+ * One attachment per connected client, seeded from its snapshot, so a browser
  * that connects mid-turn paints the in-progress answer instead of a blank page.
  * Measured: 8 concurrent subscribers receive identical frames with zero drift.
  */
 import fs from "node:fs";
 
-import type { Context } from "@earendil-works/chord";
-import type { ConversationId } from "@earendil-works/pi-durable";
-
-import { projectView, type ViewLike } from "../session-host/projection.js";
-import type { BridgeHost } from "../durable/host.js";
 import { logger } from "../logger.js";
+import type { ProjectedView } from "../session-host/projection.js";
+import type { SessionHost, WhenBusy } from "../session-host/api.js";
 
 /** One connected client. Kept structural so tests need no HTTP server. */
 export interface SseClient {
@@ -36,7 +37,8 @@ export interface SseClient {
 }
 
 export interface WebOptions {
-  host: BridgeHost;
+  /** The conversation host. In-process today; a link would satisfy the same shape. */
+  seam: SessionHost;
   /** Bearer token required for writes. Empty disables the check (tailnet-only). */
   token?: string;
   /** Default model for conversations started from the web. */
@@ -60,22 +62,14 @@ export async function attachWebClient(
   conversationId: number,
   client: SseClient,
 ): Promise<WebClientHandle> {
-  const { host } = options;
-  const conversation = await host.harness.conversation(conversationId as ConversationId, host.context);
-  if (!conversation) {
-    client.send("error", { error: `no such conversation: ${conversationId}` });
-    return { close() {} };
-  }
-
-  let closed = false;
   let lastText = "";
   let lastTool = "";
 
-  const opened = await conversation.viewState(host.context);
-  opened.subscribe((value: unknown) => {
-    if (closed || !client.open) return;
+  // The seam sends the current state as the first frame, so there is nothing to
+  // paint separately: the delta guards below make a repeat harmless anyway.
+  const paint = (projected: ProjectedView): void => {
+    if (!client.open) return;
     try {
-      const projected = projectView(value as ViewLike);
       // Send the in-flight answer as a whole snapshot, not a delta: the Chat
       // sink paints whole snapshots too, and it means a client that misses a
       // frame is still correct on the next one.
@@ -91,35 +85,37 @@ export async function attachWebClient(
         client.send("tool", tool ? { name: tool.name, status: tool.status, output: tool.output } : null);
       }
     } catch (error) {
-      // A projection fault must not kill the client's stream: log it and keep
-      // the connection so the next commit can still be painted.
-      logger.error("[web] projection failed:", (error as Error).message);
+      // A rendering fault must not kill the client's stream: log it and keep the
+      // connection so the next frame can still be painted.
+      logger.error("[web] frame failed:", (error as Error).message);
     }
-  });
+  };
+
+  const handle = await options.seam.attach(conversationId, paint);
+  if (!handle) {
+    client.send("error", { error: `no such conversation: ${conversationId}` });
+    return { close() {} };
+  }
 
   return {
     close() {
-      if (closed) return;
-      closed = true;
-      opened.dispose();
+      handle.detach();
     },
   };
 }
 
 /** The conversation list a browser opens with, newest first. */
-export async function webIndex(host: BridgeHost): Promise<
+export async function webIndex(options: Pick<WebOptions, "seam">): Promise<
   { conversationId: number; chatKey: string; model: string; name?: string; createdAt: number }[]
 > {
-  const all = await host.bindings();
-  return Object.entries(all.byChatKey)
-    .map(([chatKey, binding]) => ({
-      conversationId: binding.conversationId,
-      chatKey,
-      model: binding.model,
-      ...(binding.name ? { name: binding.name } : {}),
-      createdAt: binding.createdAt,
-    }))
-    .sort((a, b) => b.createdAt - a.createdAt);
+  const all = await options.seam.list();
+  return all.map((conversation) => ({
+    conversationId: conversation.conversationId,
+    chatKey: conversation.name,
+    model: conversation.model,
+    ...(conversation.label === undefined ? {} : { name: conversation.label }),
+    createdAt: conversation.createdAt,
+  }));
 }
 
 /**
@@ -134,17 +130,10 @@ export async function webSubmit(
   options: WebOptions,
   conversationId: number,
   text: string,
-  whenBusy: "steer" | "followUp" | "reject" = "steer",
+  whenBusy: WhenBusy = "steer",
 ): Promise<{ ok: true; submissionId: number } | { ok: false; error: string }> {
-  const { host } = options;
-  const conversation = await host.harness.conversation(conversationId as ConversationId, host.context);
-  if (!conversation) return { ok: false, error: `no such conversation: ${conversationId}` };
-  if (!text.trim()) return { ok: false, error: "empty message" };
-  const submission = await conversation.submit(
-    { type: "input", content: [{ type: "text", text }], whenBusy },
-    host.context,
-  );
-  return { ok: true, submissionId: submission.id as unknown as number };
+  const result = await options.seam.submit(conversationId, { content: text, whenBusy });
+  return "error" in result ? { ok: false, error: result.error } : { ok: true, submissionId: result.submissionId };
 }
 
 /**
