@@ -236,6 +236,80 @@ test("layout: the text box grows with the message instead of scrolling its own t
   expect(capped.height).toBeLessThanOrEqual(800 * 0.4 + 1);
 });
 
+test("layout: a grown composer pushes the conversation up instead of overflowing it", async ({ page }) => {
+  // The bug: the composer grows but the pane does not give up the space, so the
+  // box runs past the bottom of the window and the last message is cut off
+  // mid-sentence behind it.
+  await stubApi(page, {
+    history: Array.from({ length: 12 }, (_, i) => ({
+      role: i % 2 === 0 ? "user" : "assistant",
+      text: `message ${i + 1} of a conversation long enough to overflow`,
+      html: `<p>message ${i + 1} of a conversation long enough to overflow</p>`,
+      at: Date.now() - i * 60_000,
+    })),
+  });
+  // Deliberately short: this is the shape that broke — a laptop window with a
+  // system bar, where 40vh of composer is most of the pane.
+  const viewportHeight = 480;
+  await page.setViewportSize({ width: 1280, height: viewportHeight });
+  await page.goto("/web/");
+
+  const log = page.locator("#log");
+  const form = page.locator("form");
+  const logBefore = (await log.boundingBox())!;
+
+  await page.locator("#text").fill(Array.from({ length: 8 }, (_, i) => `line ${i + 1}`).join("\n"));
+
+  const logAfter = (await log.boundingBox())!;
+  const formAfter = (await form.boundingBox())!;
+
+  // The conversation ends where the composer begins: no overlap.
+  expect(logAfter.y + logAfter.height).toBeLessThanOrEqual(formAfter.y + 1);
+  // The composer is entirely on screen.
+  expect(formAfter.y + formAfter.height).toBeLessThanOrEqual(viewportHeight + 1);
+  // The pane gave up the space rather than growing past the window.
+  expect(logAfter.height).toBeLessThan(logBefore.height - 40);
+  // …and is still usable.
+  expect(logAfter.height).toBeGreaterThan(80);
+});
+
+test("layout: growing the composer keeps the newest message whole", async ({ page }) => {
+  // The subtler half of the same bug: the log shrinks correctly, but the browser
+  // keeps its scroll offset, so the last message ends up cut in half at the
+  // composer's edge. A chat should slide up to stay anchored to its end.
+  await stubApi(page, {
+    history: Array.from({ length: 20 }, (_, i) => ({
+      role: i % 2 === 0 ? "user" : "assistant",
+      text: `message ${i + 1}`,
+      html: `<p>message ${i + 1} of a conversation long enough to overflow the pane</p>`,
+      at: Date.now() - i * 60_000,
+    })),
+  });
+  await page.setViewportSize({ width: 1280, height: 700 });
+  await page.goto("/web/");
+  await expect(page.locator("#log .bubble").last()).toBeVisible();
+
+  await page.locator("#text").fill(Array.from({ length: 10 }, (_, i) => `line ${i + 1}`).join("\n"));
+  await page.waitForTimeout(150); // let the ResizeObserver run
+
+  const geometry = await page.evaluate(() => {
+    const log = document.getElementById("log")!;
+    const bubbles = log.querySelectorAll(".bubble");
+    const last = bubbles[bubbles.length - 1]!.getBoundingClientRect();
+    const box = log.getBoundingClientRect();
+    return {
+      lastBottom: last.bottom,
+      logBottom: box.bottom,
+      gap: log.scrollHeight - log.scrollTop - log.clientHeight,
+    };
+  });
+
+  // Pinched to the end, and the final message sits inside the visible area
+  // rather than straddling the boundary.
+  expect(geometry.gap).toBeLessThanOrEqual(1);
+  expect(geometry.lastBottom).toBeLessThanOrEqual(geometry.logBottom + 1);
+});
+
 test("a path without a trailing slash is normalised to one", async ({ page }) => {
   // Without this the page's relative API paths resolve one level too high and
   // every call 404s.

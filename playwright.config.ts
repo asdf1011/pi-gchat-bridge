@@ -56,6 +56,9 @@ export default defineConfig({
       PUBSUB_SUBSCRIPTION: "",
       PI_CWD: "/tmp",
       LOG_LEVEL: "error",
+      // The artifact listener is off by default in the page tests: a live bridge
+      // already owns 8082 on this machine, and these tests never touch artifacts.
+      BRIDGE_ARTIFACTS_PORT: "0",
     },
   },
 });

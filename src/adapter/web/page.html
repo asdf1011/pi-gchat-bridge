@@ -19,8 +19,12 @@
   #list li { padding: .5rem .75rem; cursor: pointer; border-bottom: 1px solid #8882; }
   #list li.on { background: #8882; }
   #list small { display: block; opacity: .6; font-size: .78em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #pane { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-  #log { flex: 1; overflow: auto; padding: 1rem; word-break: break-word; margin: 0; }
+  /* `min-height: 0` on both the pane and the log is what lets the conversation
+     give up space when the composer grows. Without it a flex item refuses to
+     shrink below its content, so the composer is pushed past the window instead
+     of the log shrinking. */
+  #pane { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  #log { flex: 1; overflow: auto; padding: 1rem; word-break: break-word; margin: 0; min-height: 0; }
   /* Chat-shaped rows: the agent on the left with an avatar and a name, you on
      the right with just a time. Bubbles cap their width so long answers stay
      readable, and the colours follow the system scheme. */
@@ -279,6 +283,29 @@ function messageRow(role, html, at, live) {
   return block;
 }
 
+/**
+ * Whether the conversation is scrolled to its end.
+ *
+ * Only then should it follow new content: reading history further up must not be
+ * yanked to the bottom because a frame arrived or the composer grew.
+ */
+let atBottom = true;
+const BOTTOM_SLACK_PX = 24;
+
+log.addEventListener('scroll', () => {
+  atBottom = log.scrollHeight - log.scrollTop - log.clientHeight <= BOTTOM_SLACK_PX;
+});
+
+// Growing the composer shrinks the log, and the browser keeps the scroll offset —
+// which leaves the newest message cut in half at the boundary. Re-anchor when the
+// log's box changes and we were already at the end, so the conversation slides up
+// to stay whole instead of being clipped.
+if (typeof ResizeObserver === 'function') {
+  new ResizeObserver(() => {
+    if (atBottom) log.scrollTop = log.scrollHeight;
+  }).observe(log);
+}
+
 function paint() {
   log.innerHTML = '';
   for (const message of history) {
@@ -293,7 +320,8 @@ function paint() {
     row.querySelector('.col').append(status);
     log.append(row);
   }
-  log.scrollTop = log.scrollHeight;
+  if (atBottom) log.scrollTop = log.scrollHeight;
+  else log.scrollTop = Math.min(log.scrollTop, log.scrollHeight);
 }
 
 async function loadHistory() {
