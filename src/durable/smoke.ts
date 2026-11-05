@@ -1,16 +1,25 @@
 /**
- * M2 smoke test: the harness host, end to end, from the command line.
+ * End-to-end smoke test: one real prompt, one real model, one scratch database.
  *
- *   npx tsx src/durable/smoke.ts <db> <chatKey> <provider/modelId> "<prompt>"
+ *   npx tsx src/durable/smoke.ts /tmp/smoke.sqlite smoke/1 deepseek/deepseek-flash "hello"
  *
- * Run it twice with the same db and chatKey: the second run must reuse the same
- * conversation (bindings document) and must not re-answer the same prompt
- * (`requestId`). That is the whole content of M2's exit criteria — the parts
- * that will later be driven by Google Chat events are driven by argv here.
+ * Run it twice with the same db, chatKey and prompt. The second run must reuse
+ * the same conversation (the binding) and must not re-answer the prompt (the
+ * `requestId`), which are the two properties the whole harness exists for and
+ * the two that are hardest to see from a unit test.
+ *
+ * It is a *diagnostic*, not a test: no Chat app, no Pub/Sub, no Pub/Sub
+ * credentials, and it is the only path in this repository that exercises a real
+ * model end to end. That is why it survives while the one-shot migration tools
+ * did not — it answers "is this box's stack working?" in one command, and stays
+ * useful for as long as there are models to call.
+ *
+ * Written against the seam on purpose: if this stops compiling, the seam changed
+ * underneath every adapter.
  */
-import { AssistantEntry } from "@earendil-works/pi-durable";
-
-import { BridgeHost, parseModelRef } from "./host.js";
+import { BridgeHost } from "./host.js";
+import { parseModelRef } from "./host.js";
+import { inProcessSessionHost } from "../session-host/inprocess.js";
 
 const [dbPath, chatKey, modelRef, prompt] = process.argv.slice(2);
 if (!dbPath || !chatKey || !modelRef || !prompt) {
@@ -18,50 +27,40 @@ if (!dbPath || !chatKey || !modelRef || !prompt) {
   process.exit(2);
 }
 
-const textOf = (message: any): string =>
-  (message?.content ?? [])
-    .flatMap((block: any) => (block.type === "text" ? [block.text] : []))
-    .join("");
-
 const host = await BridgeHost.open({
   dbPath,
   cwd: process.env.PI_CWD ?? "/workspace",
 });
+const seam = inProcessSessionHost({ host, roots: [] });
 
-const { conversation, binding } = await host.conversationFor(chatKey, {
-  model: parseModelRef(modelRef),
-  thinkingLevel: (process.env.SMOKE_THINKING as never) ?? undefined,
-});
-console.log(`[bind] ${chatKey} -> conversation ${binding.conversationId} (${binding.model})`);
+try {
+  const conversation = await seam.getOrCreate(chatKey, {
+    model: parseModelRef(modelRef),
+    ...(process.env.SMOKE_THINKING === undefined ? {} : { thinkingLevel: process.env.SMOKE_THINKING }),
+  });
+  console.log(`[bind] ${chatKey} -> conversation ${conversation.conversationId} (${conversation.model})`);
 
-// The Chat sink's future input: watch the view and paint the partial answer.
-const view = await conversation.viewState(host.context);
-let painted = "";
-view.subscribe((value: any) => {
-  const partial = textOf(value?.docs?.["pi.live"]?.generation?.message);
-  if (partial !== painted) {
-    painted = partial;
+  // Watch the answer arrive, the way a sink does: frames, then the settled text.
+  const handle = await seam.attach(conversation.conversationId, (frame) => {
+    if (frame.liveText) process.stdout.write(`\r[stream] ${frame.liveText.length} chars`);
+  });
+  console.log();
+
+  const requestId = `smoke-${Buffer.from(prompt).toString("base64url").slice(0, 24)}`;
+  const submitted = await seam.submit(conversation.conversationId, { content: prompt, requestId });
+  if ("error" in submitted) throw new Error(submitted.error);
+  console.log(`[submit] requestId=${requestId} submission=${submitted.submissionId}`);
+
+  const settled = await seam.awaitSubmission(submitted.submissionId);
+  console.log(`[settled] ${settled.status}${settled.status === "unanswered" ? ` (${settled.reason ?? "no reason"})` : ""}`);
+  if (settled.status === "done") {
+    console.log(`[answer] ${JSON.stringify(settled.text.slice(0, 200))}`);
   }
-});
 
-const requestId = `smoke-${Buffer.from(prompt).toString("base64url").slice(0, 24)}`;
-const submission = await conversation.submit(
-  { type: "input", content: prompt, requestId },
-  host.context,
-);
-console.log(`[submit] requestId=${requestId} submission=${submission.id}`);
-const settled = await submission.wait(host.context);
-console.log(`[submit] settled: ${settled.status}`);
-
-const answer = await conversation.commit(
-  (tx: any) => tx.entry(AssistantEntry, settled.answer),
-  host.context,
-);
-console.log(`[answer] ${JSON.stringify(textOf(answer?.model?.[0]).slice(0, 200))}`);
-
-const all = await host.bindings();
-console.log(`[bindings] ${Object.keys(all.byChatKey).length} key(s):`, JSON.stringify(all.byChatKey[chatKey]));
-
-view.dispose();
-await host.close();
+  handle?.detach();
+  const bindings = await seam.list();
+  console.log(`[bindings] ${bindings.length} key(s):`, JSON.stringify(await seam.resolve(chatKey)));
+} finally {
+  await host.close();
+}
 console.log("[done]");

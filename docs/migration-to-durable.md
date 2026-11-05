@@ -242,7 +242,8 @@ Net: ~1,600 removed, ~500–700 added.
 ## Open questions
 
 1. **Existing history — decided.** Nice-to-have, not a blocker, and only if it needs nothing
-   persistently hacky. It doesn't: the import is a **one-shot offline script** (`tools/import-legacy.ts`)
+   persistently hacky. It doesn't: the import is a **one-shot offline script** (`src/durable/import-legacy.ts`
+   at the time — deleted after the cutover, see git history)
    that reads `sessions/*.jsonl` and writes `pi.user` / `pi.assistant` entries through the public
    `init`/`submit` API **once**, then is never run again. What would be hacky and is explicitly
    ruled out: a live dual-read path, keeping `session-file.ts` around, or teaching the runtime to

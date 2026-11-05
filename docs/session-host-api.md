@@ -93,7 +93,7 @@ binding record, minus its storage representation.
 | `submit(conversationId, { requestId, content, whenBusy }) → { submissionId }` | `router.deliver()` → `conversation.submit()`, and the `requestId` dedupe contract | Nothing structural; it needs a documented "accepted" meaning (D2) |
 | `await(submissionId, { signal }) → Settled` | `submission.wait()` **plus** the four lines in `main.ts` that commit `AssistantEntry`, flatten `model[].content[].text` and inspect `reason`/`detail` | The final-text extraction belongs on the host; adapters should never see an entry (D4) |
 | `abort(conversationId) → boolean` | `conversation.abort()` (`router.interrupt()`) | — |
-| `write(conversationId, entry) → entryId` | `router.noticeSubmission()` (an `app.notice` write) and `conversation.reset()` in `import-legacy.ts` | Adapter-authored entry kinds need a declared schema on the seam |
+| `write(conversationId, entry) → entryId` | `router.noticeSubmission()` (an `app.notice` write) | Adapter-authored entry kinds need a declared schema on the seam |
 
 `Settled = { status: "done", answerId, text } | { status: "unanswered", reason?, detail? }`.
 `answerId` stays on the seam because the Chat adapter's delivery claim is keyed by it (`posted-doc.ts`).
@@ -291,17 +291,16 @@ posted-doc.ts                 gone  ← S4
 ----                       ----
 adapters + Chat helpers         0
 
-src/durable/import-legacy.ts   12   ← one-shot migration tools, not adapters
-src/durable/smoke.ts            6
-src/durable/replay.ts           5
-src/durable/import-all.ts       4
-src/durable/prefix-probe.ts     4
+src/durable/smoke.ts            0   ← rewritten against the seam
+(deleted: import-all, import-legacy, replay, prefix-probe — one-shot tools)
 ```
 
-The remainder are host-side *tools*: they import a database from an old session format, replay a
-conversation, or probe a model. They run from a shell with the bridge stopped, so requiring the
-harness directly is the correct thing for them to do — and wrapping them in the seam would mean a
-tool that cannot run when it is needed.
+The one-shot migration tools — `import-all`, `import-legacy`, `replay`, `prefix-probe` — were deleted
+once the cutover was behind us: they existed to move history and to compare engines, both of which
+are finished, and each was a standing typecheck burden against APIs that keep moving. Git history
+has them. `smoke.ts` survives because it answers a question that does not expire — "is this box's
+stack working?" — and it is now written against the seam, so it fails to compile if the seam moves
+underneath every adapter.
 
 By symbol: `host.context` 48, `host.harness` 22, `host.bindingFor` 16, `host.modelRuntime` 14,
 `host.conversationFor` 9, `host.cwdPath` 8, `host.close` 6, `host.bindings` 3, `host.dbPath` 1.

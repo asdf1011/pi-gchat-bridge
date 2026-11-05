@@ -111,10 +111,12 @@ twice.
 - **`/secret`** lists stored secrets (names and a tail, never values); **`/secret set NAME`** posts a card for out-of-band entry; **`/secret remove NAME`** deletes. Values never enter the conversation — see [Security notes](#security-notes).
 - **`/sessions`** lists conversations; **`/resume`** rebinds a thread to one of
   them. `/name` gives one a display name (Chat-side label only).
-- **Legacy history was imported once.** `src/durable/import-all.ts` replays old
-  JSONL sessions into the store. It is a one-shot migration tool, lossy by
-  design (thinking, tool calls and branches stay in the JSONL files, which are
-  never modified), not a live fallback.
+- **Legacy history was imported once, at cutover.** The one-shot migration tools
+  (`import-all`, `import-legacy`, `replay`, `prefix-probe`) were deleted once the
+  cutover was done — they are in git history if a re-import is ever needed. What
+  remains is `src/durable/smoke.ts`: one real prompt through one real model
+  against a scratch database, the only end-to-end check that needs no Chat app,
+  no Pub/Sub and no credentials.
 - **One process owns the database.** `bridge.sqlite.lock` is a pid file: a
   second bridge refuses to start rather than serving the same Chat messages
   from a second, blind in-memory harness. Two supervisors cannot run either
