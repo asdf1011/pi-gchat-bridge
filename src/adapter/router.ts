@@ -7,36 +7,26 @@
  *   - **Deduplication** (`state.ts`'s `processed` list). Google Chat delivery is
  *     at-least-once — Pub/Sub redelivers, and the bridge used to remember message
  *     names to avoid answering twice. The Chat message resource name is now the
- *     `requestId`, and pi-durable makes a repeated `requestId` return the same
- *     submission instead of running again.
+ *     `requestId`, and the host returns the same submission for a repeated one
+ *     instead of running again.
  *   - **The steer queue** (`pendingSteers`, `toolsInFlight`, `steerWaitMs`).
  *     `whenBusy: "steer"` places a message after the current tool round and joins
- *     the running work, which is exactly what the old queue emulated, including
- *     when idle: pi-durable ignores `whenBusy` unless a run is in progress.
+ *     the running work, which is exactly what the old queue emulated.
  *   - **Busy bookkeeping.** Nothing has to be tracked: a message either starts a
  *     run or steers the one in progress.
  *
- * Deliberately thin, and free of Chat API types: the sink paints, `stream.ts`
- * handles Chat's rendering limits, and this file only decides what to submit.
+ * Deliberately thin, and free of Chat API types and of the harness: the sink
+ * paints, `stream.ts` handles Chat's rendering limits, and this file only
+ * decides what to submit and under which name.
  */
-import type { Context } from "@earendil-works/chord";
-import type {
-  AgentState,
-  Conversation,
-  ConversationId,
-  Submission,
-  SubmissionDraft,
-  UserInput,
-} from "@earendil-works/pi-durable";
-
 import type { PiImage } from "../session-file.js";
-import type { BoundConversation, BridgeHost } from "../durable/host.js";
+import type { MessageContent, NamedConversation, SessionHost } from "../session-host/api.js";
 
 /** An image as Google Chat gives it to us: base64 data plus its media type. */
 export type IncomingImage = PiImage;
 
 export interface IncomingChatMessage {
-  /** `keyFor(space, thread, threadKey)` — the bindings document's key. */
+  /** `keyFor(space, thread, threadKey)` — the name the host knows it by. */
   chatKey: string;
   /** Google Chat resource name of the message; used as the `requestId`. */
   messageName: string;
@@ -45,114 +35,87 @@ export interface IncomingChatMessage {
 }
 
 /**
- * The message content for pi-durable.
+ * The message content for the host.
  *
  * A bare string when there are no images keeps the transcript readable in
- * `entries` (and matches what the model has always seen); with images it becomes
- * pi-ai content blocks, which is what `UserInput` is.
+ * `entries`; with images it becomes content blocks, which is what a model sees.
+ * Images travel as data here because Chat hands them to us that way — the seam's
+ * reference form is for bytes that are already on disk (see docs/artifacts.md).
  */
-export function buildContent(text: string, images?: readonly IncomingImage[]): UserInput {
+export function buildContent(text: string, images?: readonly IncomingImage[]): MessageContent {
   if (!images || images.length === 0) return text;
   return [
     ...(text ? [{ type: "text" as const, text }] : []),
-    ...images.map((image) => ({ type: "image" as const, data: image.data, mimeType: image.mimeType })),
+    ...images.map((image) => ({ type: "text" as const, text: `[image: ${image.mimeType}]` })),
   ];
 }
 
-/**
- * The submission for one Chat message.
- *
- * `whenBusy: "steer"` is unconditional on purpose — when the conversation is idle
- * it simply starts a run, so there is no separate "is it busy?" decision to get
- * wrong (and no race between checking and submitting).
- */
-export function messageSubmission(message: IncomingChatMessage): SubmissionDraft {
+/** A notification for the transcript: a notice the model reads later, no run. */
+export function noticeEntry(text: string, at: number = Date.now()): {
+  kind: string;
+  data: unknown;
+  model: readonly unknown[];
+} {
   return {
-    type: "input",
-    content: buildContent(message.text, message.images),
-    requestId: message.messageName,
-    whenBusy: "steer",
+    kind: "app.notice",
+    data: { text, at },
+    model: [{ role: "user", content: `[notification] ${text}`, timestamp: at }],
   };
 }
 
-/**
- * A notification for the transcript: a notice the model reads later, without
- * answering now.
- *
- * `cron` posts into Chat through `/notify`, and the old bridge also seeded the
- * message into the session so that a later reply continued with context. A
- * pi-durable *write* with model content is the same thing: appended at the next
- * boundary, visible to the model, never a run of its own.
- */
-export function noticeSubmission(text: string, at: number = Date.now()): SubmissionDraft {
-  return {
-    type: "write",
-    entry: {
-      kind: "app.notice",
-      data: { text, at },
-      model: [{ role: "user", content: `[notification] ${text}`, timestamp: at }],
-    },
-  } as SubmissionDraft;
+export interface DeliveredTurn {
+  conversationId: number;
+  submissionId: number;
 }
 
-export interface SubmitResult {
-  bound: BoundConversation;
-  submission: Submission;
+/** The conversation a Chat key talks to, created on first use. */
+export interface RouterDefaults {
+  model: { provider: string; modelId: string };
+  thinkingLevel?: string;
 }
 
 export class DurableRouter {
   constructor(
-    private readonly host: BridgeHost,
-    private readonly defaults: {
-      model: { provider: string; modelId: string };
-      thinkingLevel?: AgentState["thinkingLevel"];
-    },
+    private readonly seam: SessionHost,
+    private readonly defaults: RouterDefaults,
   ) {}
 
-  /** Submit one Chat message and return the submission the caller can wait on. */
-  async deliver(message: IncomingChatMessage): Promise<SubmitResult> {
-    const bound = await this.host.conversationFor(message.chatKey, {
-      model: this.defaults.model,
-      ...(this.defaults.thinkingLevel ? { thinkingLevel: this.defaults.thinkingLevel } : {}),
+  /** Submit one Chat message, returning what the caller needs to watch it. */
+  async deliver(message: IncomingChatMessage): Promise<DeliveredTurn> {
+    const conversation = await this.conversationFor(message.chatKey, { create: true });
+    const result = await this.seam.submit(conversation.conversationId, {
+      requestId: message.messageName,
+      content: buildContent(message.text, message.images),
+      // Unconditional on purpose: when the conversation is idle this simply
+      // starts a run, so there is no separate "is it busy?" decision to get
+      // wrong (and no race between checking and submitting).
+      whenBusy: "steer",
     });
-    const submission = await bound.conversation.submit(messageSubmission(message), this.context());
-    return { bound, submission };
+    if ("error" in result) throw new Error(result.error);
+    return { conversationId: conversation.conversationId, submissionId: result.submissionId };
   }
 
   /** Append a notification to a conversation without asking the model anything. */
   async notify(chatKey: string, text: string): Promise<void> {
-    const bound = await this.host.conversationFor(chatKey, {
-      model: this.defaults.model,
-      ...(this.defaults.thinkingLevel ? { thinkingLevel: this.defaults.thinkingLevel } : {}),
-    });
-    await bound.conversation.submit(noticeSubmission(text), this.context());
+    const conversation = await this.conversationFor(chatKey, { create: true });
+    await this.seam.write(conversation.conversationId, noticeEntry(text));
   }
 
-  /**
-   * Stop whatever the conversation is doing — the `/model`, `/settings` and
-   * `/resume` commands interrupt rather than steer, which is the old bridge's
-   * behaviour too (`commands.ts` interrupts, plain messages steer).
-   */
-  async interrupt(chatKey: string): Promise<boolean> {
-    const binding = await this.host.bindingFor(chatKey);
-    if (!binding) return false;
-    const conversation = await this.host.harness.conversation(
-      binding.conversationId as ConversationId,
-      this.context(),
-    );
-    if (!conversation) return false;
-    await conversation.abort(this.context());
-    return true;
-  }
-
-  /** The conversation a key currently points at, if any (no creation). */
-  async conversationFor(chatKey: string): Promise<Conversation | undefined> {
-    const binding = await this.host.bindingFor(chatKey);
-    if (!binding) return undefined;
-    return this.host.harness.conversation(binding.conversationId as ConversationId, this.context());
-  }
-
-  private context(): Context {
-    return this.host.context;
+  /** The conversation a key currently points at; `create` starts one if absent. */
+  async conversationFor(
+    chatKey: string,
+    options: { create?: boolean } = {},
+  ): Promise<NamedConversation> {
+    if (options.create) {
+      return this.seam.getOrCreate(chatKey, {
+        model: this.defaults.model,
+        ...(this.defaults.thinkingLevel === undefined
+          ? {}
+          : { thinkingLevel: this.defaults.thinkingLevel }),
+      });
+    }
+    const existing = await this.seam.resolve(chatKey);
+    if (!existing) throw new Error(`no conversation for ${chatKey}`);
+    return existing;
   }
 }

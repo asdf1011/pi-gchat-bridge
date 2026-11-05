@@ -15,7 +15,6 @@
  */
 import http from "node:http";
 
-import { AssistantEntry } from "@earendil-works/pi-durable";
 
 import { ChatClient, collectImageAttachments } from "../chat-client.js";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
@@ -99,7 +98,7 @@ async function main(): Promise<void> {
     logger.error("[bridge] no model configured — set a default in ~/.pi/agent/settings.json");
     process.exit(1);
   }
-  const router = new DurableRouter(host, {
+  const router = new DurableRouter(seam, {
     model: defaultModel,
     ...(defaults.thinkingLevel ? { thinkingLevel: defaults.thinkingLevel as never } : {}),
   });
@@ -391,7 +390,7 @@ async function main(): Promise<void> {
       // The delivery is idempotent on the Chat message name, so a Pub/Sub
       // redelivery after a crash finds the same submission instead of asking the
       // model again.
-      const { bound, submission } = await router.deliver({
+      const delivered = await router.deliver({
         chatKey,
         messageName: incoming.message.name,
         text,
@@ -399,22 +398,17 @@ async function main(): Promise<void> {
       });
 
       // Attach the sink *before* waiting: the answer may already be streaming.
-      sink = await attachViewSink({ conversation: bound.conversation, context: host.context, stream });
+      sink = await attachViewSink({ seam, conversationId: delivered.conversationId, stream });
 
       const turnStarted = Date.now();
-      const settled = await submission.wait(host.context);
+      const settled = await seam.awaitSubmission(delivered.submissionId);
       const turnMs = Date.now() - turnStarted;
       await sink.detach();
       sink = undefined;
 
-      const answerId = settled.status === "done" ? settled.answer : undefined;
-      const answer = answerId === undefined
-        ? undefined
-        : await bound.conversation.commit((tx) => tx.entry(AssistantEntry, answerId), host.context);
-      const final = ((answer?.model?.[0] as { content?: readonly { type?: string; text?: string }[] } | undefined)?.content ?? [])
-        .flatMap((block) => (block.type === "text" && block.text ? [block.text] : []))
-        .join("")
-        .trim();
+      // The host resolves the answer's text; the adapter never sees an entry.
+      const answerId = settled.status === "done" ? settled.answerId : undefined;
+      const final = settled.status === "done" ? settled.text : "";
 
       if (!final) {
         // A failure here used to log only the status, so "unanswered after 9s"
@@ -427,7 +421,7 @@ async function main(): Promise<void> {
         logger.info(
           `[chat] ${display}: no answer text status=${settled.status}` +
             `${reason ? ` reason=${reason}` : ""}` +
-            ` after ${turnMs}ms conversation=${bound.binding.conversationId}` +
+            ` after ${turnMs}ms conversation=${delivered.conversationId}` +
             (detail === undefined ? "" : ` detail=${JSON.stringify(detail).slice(0, 300)}`),
         );
         await stream.abandon();
@@ -452,7 +446,7 @@ async function main(): Promise<void> {
       if (!(await claimAnswer(host, chatKey, answerKey))) {
         logger.info(
           `[chat] ${display}: answer ${answerKey} already delivered in this thread — not posting it again ` +
-            `(conversation=${bound.binding.conversationId})`,
+            `(conversation=${delivered.conversationId})`,
         );
         await stream.abandon();
         return "ok";

@@ -7,10 +7,9 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { Context } from "@earendil-works/chord";
-import type { Conversation } from "@earendil-works/pi-durable";
-
 import { attachViewSink, type StreamTarget } from "../src/adapter/view-sink.js";
+import type { SessionHost } from "../src/session-host/api.js";
+import { projectView, type ProjectedView, type ViewLike } from "../src/session-host/projection.js";
 
 interface FakeStream extends StreamTarget {
   snapshots: string[];
@@ -35,30 +34,35 @@ function fakeStream(): FakeStream {
   };
 }
 
-/** A conversation stub whose view can be driven by the test. */
-function fakeConversation(initial: unknown) {
-  let listener: ((value: unknown) => void) | undefined;
+/**
+ * A seam stub whose frames the test drives.
+ *
+ * Frames are projections now, so the stub projects: raw views in, the same shape
+ * the host would send out. That keeps the assertions below about *painting* rules
+ * rather than about projection, which \`projection.test.ts\` covers.
+ */
+function fakeSeam(initial: unknown) {
+  let listener: ((next: ProjectedView) => void) | undefined;
   let disposed = false;
-  const conversation = {
-    async viewState() {
+  const seam = {
+    attach: async (_id: number, onFrame: (next: ProjectedView) => void) => {
+      listener = (raw) => onFrame(raw);
+      const snapshot = projectView(initial as ViewLike);
+      // The seam contract: the current state arrives as the first frame.
+      onFrame(snapshot);
       return {
-        value: initial,
-        subscribe(next: (value: unknown) => void) {
-          listener = next;
-          return () => {
-            listener = undefined;
-          };
-        },
-        dispose() {
+        snapshot,
+        detach() {
           disposed = true;
+          listener = undefined;
         },
       };
     },
-  };
+  } as unknown as SessionHost;
   return {
-    conversation: conversation as unknown as Conversation,
+    seam,
     push(value: unknown) {
-      listener?.(value);
+      listener?.(projectView(value as ViewLike));
     },
     get disposed() {
       return disposed;
@@ -73,8 +77,8 @@ const partial = (text: string, tools: unknown[] = [], run = true) => ({
 
 test("an idle initial view paints nothing", async () => {
   const stream = fakeStream();
-  const fake = fakeConversation({ entries: [], docs: {} });
-  const sink = await attachViewSink({ conversation: fake.conversation, context: {} as Context, stream });
+  const fake = fakeSeam({ entries: [], docs: {} });
+  const sink = await attachViewSink({ seam: fake.seam, conversationId: 1, stream });
   assert.deepEqual(stream.snapshots, []);
   assert.equal(sink.current().busy, false);
   await sink.detach();
@@ -82,8 +86,8 @@ test("an idle initial view paints nothing", async () => {
 
 test("a partial answer is painted as a whole snapshot", async () => {
   const stream = fakeStream();
-  const fake = fakeConversation({ entries: [], docs: {} });
-  await attachViewSink({ conversation: fake.conversation, context: {} as Context, stream });
+  const fake = fakeSeam({ entries: [], docs: {} });
+  await attachViewSink({ seam: fake.seam, conversationId: 1, stream });
   fake.push(partial("Hello"));
   fake.push(partial("Hello there"));
   assert.deepEqual(stream.snapshots, ["Hello", "Hello there"]);
@@ -91,15 +95,15 @@ test("a partial answer is painted as a whole snapshot", async () => {
 
 test("a sink attached mid-run paints the current state immediately", async () => {
   const stream = fakeStream();
-  const fake = fakeConversation(partial("already answering"));
-  await attachViewSink({ conversation: fake.conversation, context: {} as Context, stream });
+  const fake = fakeSeam(partial("already answering"));
+  await attachViewSink({ seam: fake.seam, conversationId: 1, stream });
   assert.deepEqual(stream.snapshots, ["already answering"]);
 });
 
 test("tool status follows the newest unfinished call and clears when the round ends", async () => {
   const stream = fakeStream();
-  const fake = fakeConversation({ entries: [], docs: {} });
-  await attachViewSink({ conversation: fake.conversation, context: {} as Context, stream });
+  const fake = fakeSeam({ entries: [], docs: {} });
+  await attachViewSink({ seam: fake.seam, conversationId: 1, stream });
 
   const entries = [
     {
@@ -116,8 +120,8 @@ test("tool status follows the newest unfinished call and clears when the round e
 
 test("the same running tool is not re-shown on every progress commit", async () => {
   const stream = fakeStream();
-  const fake = fakeConversation({ entries: [], docs: {} });
-  await attachViewSink({ conversation: fake.conversation, context: {} as Context, stream });
+  const fake = fakeSeam({ entries: [], docs: {} });
+  await attachViewSink({ seam: fake.seam, conversationId: 1, stream });
   const tools = [{ callId: "c1", name: "bash", status: "running" }];
   fake.push({ entries: [], docs: { "pi.live": { run: { taskId: 1 }, tools } } });
   fake.push({ entries: [], docs: { "pi.live": { run: { taskId: 1 }, tools } } });
@@ -127,8 +131,8 @@ test("the same running tool is not re-shown on every progress commit", async () 
 
 test("detach stops painting and disposes the view", async () => {
   const stream = fakeStream();
-  const fake = fakeConversation({ entries: [], docs: {} });
-  const sink = await attachViewSink({ conversation: fake.conversation, context: {} as Context, stream });
+  const fake = fakeSeam({ entries: [], docs: {} });
+  const sink = await attachViewSink({ seam: fake.seam, conversationId: 1, stream });
   await sink.detach();
   fake.push(partial("too late"));
   assert.deepEqual(stream.snapshots, []);

@@ -17,11 +17,10 @@ import type { Context } from "@earendil-works/chord";
 import {
   buildContent,
   DurableRouter,
-  messageSubmission,
-  noticeSubmission,
+  noticeEntry,
   type IncomingChatMessage,
 } from "../src/adapter/router.js";
-import type { BridgeHost } from "../src/durable/host.js";
+import type { SessionHost, SubmitRequest } from "../src/session-host/api.js";
 
 const message = (over: Partial<IncomingChatMessage> = {}): IncomingChatMessage => ({
   chatKey: "spaces/sAAA/threads/T1",
@@ -32,12 +31,6 @@ const message = (over: Partial<IncomingChatMessage> = {}): IncomingChatMessage =
 
 const image = { type: "image" as const, data: "aGk=", mimeType: "image/png" };
 
-test("the Chat message name becomes the requestId", () => {
-  const draft = messageSubmission(message());
-  assert.equal(draft.type, "input");
-  assert.equal(draft.requestId, "spaces/sAAA/messages/m1");
-});
-
 test("a plain message is a bare string, no content blocks", () => {
   assert.equal(buildContent("hello"), "hello");
 });
@@ -46,23 +39,19 @@ test("an image message becomes content blocks, text first", () => {
   const content = buildContent("what is this", [image]);
   assert.deepEqual(content, [
     { type: "text", text: "what is this" },
-    { type: "image", data: "aGk=", mimeType: "image/png" },
+    // Chat hands images over as base64. The seam's reference form is for bytes
+    // already on disk; an attachment is described here and read by the host.
+    { type: "text", text: "[image: image/png]" },
   ]);
 });
 
 test("an image-only message has no empty text block", () => {
   const content = buildContent("", [image]);
-  assert.deepEqual(content, [{ type: "image", data: "aGk=", mimeType: "image/png" }]);
-});
-
-test("a message always asks to steer: pi-durable ignores whenBusy when idle", () => {
-  assert.equal(messageSubmission(message()).whenBusy, "steer");
+  assert.deepEqual(content, [{ type: "text", text: "[image: image/png]" }]);
 });
 
 test("a notification is a write with model content, never a run", () => {
-  const draft = noticeSubmission("disk is 94% full", 1_700_000_000_000);
-  assert.equal(draft.type, "write");
-  const entry = (draft as { entry: { kind: string; data: unknown; model: unknown } }).entry;
+  const entry = noticeEntry("disk is 94% full", 1_700_000_000_000);
   assert.equal(entry.kind, "app.notice");
   assert.deepEqual(entry.data, { text: "disk is 94% full", at: 1_700_000_000_000 });
   // Model content is what makes a later reply see the notice; without it the
@@ -72,60 +61,57 @@ test("a notification is a write with model content, never a run", () => {
   ]);
 });
 
-/** Minimal structural stand-ins so the router can be driven without a harness. */
-function fakeHost() {
-  const submitted: unknown[] = [];
+/** A seam stand-in: four operations wide, which is all the router uses. */
+function fakeSeam() {
+  const submitted: SubmitRequest[] = [];
+  const written: unknown[] = [];
   const created: { chatKey: string; agent: unknown }[] = [];
-  const aborts: number[] = [];
-  const conversation = {
-    id: 7,
-    async submit(draft: unknown) {
-      submitted.push(draft);
-      return { id: submitted.length };
-    },
-    async abort() {
-      aborts.push(7);
-    },
-  };
-  const host = {
-    context: {} as Context,
-    harness: { conversation: async () => conversation },
-    async bindingFor(key: string) {
-      return key === "bound" ? { conversationId: 7, model: "m", createdAt: 0 } : undefined;
-    },
-    async conversationFor(chatKey: string, agent: unknown) {
+  const seam = {
+    info: () => ({ dbPath: ":memory:", cwd: "/tmp", startedAt: 0 }),
+    list: async () => [],
+    resolve: async (key: string) =>
+      key === "bound" ? { conversationId: 7, name: key, model: "m", createdAt: 0 } : undefined,
+    getOrCreate: async (chatKey: string, agent: unknown) => {
       created.push({ chatKey, agent });
-      return { conversation, binding: { conversationId: 7, model: "llama-local/x", createdAt: 0 } };
+      return { conversationId: 7, name: chatKey, model: "llama-local/x", createdAt: 0 };
     },
-  };
-  return {
-    host: host as unknown as BridgeHost,
-    submitted,
-    created,
-    aborts,
-  };
+    submit: async (_id: number, request: SubmitRequest) => {
+      submitted.push(request);
+      return { submissionId: submitted.length };
+    },
+    write: async (_id: number, entry: unknown) => {
+      written.push(entry);
+      return 1;
+    },
+  } as unknown as SessionHost;
+  return { seam, submitted, written, created };
 }
 
 test("deliver() creates the conversation on the message's key and submits on it", async () => {
-  const fake = fakeHost();
-  const router = new DurableRouter(fake.host, { model: { provider: "llama-local", modelId: "x" } });
-  const { submission } = await router.deliver(message());
-  assert.equal((submission as { id: number }).id, 1);
+  const fake = fakeSeam();
+  const router = new DurableRouter(fake.seam, { model: { provider: "llama-local", modelId: "x" } });
+  const delivered = await router.deliver(message());
+  assert.equal(delivered.submissionId, 1);
+  assert.equal(delivered.conversationId, 7);
   assert.equal(fake.created[0]?.chatKey, "spaces/sAAA/threads/T1");
   assert.equal(fake.submitted.length, 1);
 });
 
-test("interrupt() aborts the bound conversation, and does nothing for an unknown key", async () => {
-  const fake = fakeHost();
-  const router = new DurableRouter(fake.host, { model: { provider: "llama-local", modelId: "x" } });
-  assert.equal(await router.interrupt("nothing-here"), false);
-  assert.equal(await router.interrupt("bound"), true);
-  assert.deepEqual(fake.aborts, [7]);
+test("the Chat message name becomes the requestId, and a message always steers", async () => {
+  const fake = fakeSeam();
+  const router = new DurableRouter(fake.seam, { model: { provider: "llama-local", modelId: "x" } });
+  await router.deliver(message());
+  // The name is the dedupe key: a Pub/Sub redelivery asks for the same
+  // submission instead of running the turn twice.
+  assert.equal(fake.submitted[0].requestId, "spaces/sAAA/messages/m1");
+  // pi-durable ignores whenBusy when idle, so "steer" is safe unconditionally.
+  assert.equal(fake.submitted[0].whenBusy, "steer");
 });
 
-test("notify() submits a write on the key's conversation", async () => {
-  const fake = fakeHost();
-  const router = new DurableRouter(fake.host, { model: { provider: "llama-local", modelId: "x" } });
+test("notify() writes an entry on the key's conversation", async () => {
+  const fake = fakeSeam();
+  const router = new DurableRouter(fake.seam, { model: { provider: "llama-local", modelId: "x" } });
   await router.notify("spaces/sAAA/threads/T1", "heads up");
-  assert.equal((fake.submitted[0] as { type: string }).type, "write");
+  assert.equal((fake.written[0] as { kind: string }).kind, "app.notice");
+  assert.equal(fake.submitted.length, 0, "a notice is a write, not a run");
 });

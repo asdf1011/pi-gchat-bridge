@@ -101,6 +101,26 @@ export interface SubmitRequest {
 
 export type SubmitResult = { submissionId: number } | { error: string };
 
+/**
+ * How a submission ended.
+ *
+ * `done` carries the answer's text, extracted by the host: an adapter should
+ * never have to know how an assistant entry is shaped. `answerId` stays because
+ * the Chat adapter's "post this answer once" claim is keyed by it.
+ */
+export type Settled =
+  | { status: "done"; answerId: number; text: string }
+  | { status: "unanswered"; reason?: string; detail?: unknown };
+
+/** An entry an adapter writes for itself: a notice, not a model turn. */
+export interface AdapterEntry {
+  /** Entry kind, e.g. `app.notice`. Namespaced by convention. */
+  kind: string;
+  data: unknown;
+  /** Messages the model should see for it, if any. */
+  model?: readonly unknown[];
+}
+
 /** A view attachment. `detach()` is idempotent. */
 export interface ViewHandle {
   /** The state at attach time, before any frame arrives. */
@@ -226,6 +246,18 @@ export interface SessionHost {
 
   /** Set a conversation's display label. Adapter-facing text only. */
   label(name: string, label: string, options?: { signal?: AbortSignal }): Promise<boolean>;
+
+  /**
+   * Wait for a submission to settle.
+   *
+   * Durable: the id is enough, so a host that restarted mid-turn can still
+   * answer this (the turn resumes). That is why the seam returns an id rather
+   * than a handle — a handle would only exist in the process that submitted.
+   */
+  awaitSubmission(submissionId: number, options?: { signal?: AbortSignal }): Promise<Settled>;
+
+  /** Write an adapter-authored entry into a conversation. Returns its id. */
+  write(conversationId: number, entry: AdapterEntry, options?: { signal?: AbortSignal }): Promise<number>;
 
   /** Compact the conversation's context now. Instructions are free text. */
   compact(conversationId: number, instructions?: string, options?: { signal?: AbortSignal }): Promise<void>;

@@ -17,6 +17,7 @@
  */
 import path from "node:path";
 import {
+  AssistantEntry,
   configure,
   createRegistry,
   Harness,
@@ -36,7 +37,7 @@ import { getSupportedThinkingLevels } from "@earendil-works/pi-ai/models";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 import { logger } from "../logger.js";
-import type { ConversationState, ModelInfo, UsageTotals } from "../session-host/api.js";
+import type { AdapterEntry, ConversationState, ModelInfo, Settled, UsageTotals } from "../session-host/api.js";
 import { BindingsDoc, type BindingsValue, type ConversationBinding } from "./bindings-doc.js";
 import { ChatFormat } from "./extensions/chat-format.js";
 import { createCodingToolsWithDelivery } from "./extensions/coding-tools.js";
@@ -402,6 +403,68 @@ export class BridgeHost {
       doc.byChatKey[chatKey] = { ...current, name };
       return true;
     }, this.context);
+  }
+
+  /**
+   * Wait for a submission, and resolve its answer text.
+   *
+   * The submission is looked up by id rather than held as a handle, so this works
+   * after a restart: the turn resumes and the wait still resolves.
+   */
+  async awaitSubmission(submissionId: number): Promise<Settled> {
+    const submission = await this.harness.submission(submissionId as never, this.context);
+    if (!submission) return { status: "unanswered", reason: "unknown submission" };
+    const settled = await submission.wait(this.context);
+    if (settled.status !== "done" || settled.answer === undefined) {
+      return {
+        status: "unanswered",
+        ...(settled.reason === undefined ? {} : { reason: settled.reason }),
+        ...(settled.detail === undefined ? {} : { detail: settled.detail }),
+      };
+    }
+    const answerId = settled.answer as unknown as number;
+    const text = await this.answerText(settled.conversationId as unknown as number, answerId);
+    return { status: "done", answerId, text };
+  }
+
+  /** The text of one assistant entry, concatenated from its content blocks. */
+  async answerText(conversationId: number, answerId: number): Promise<string> {
+    const conversation = await this.harness.conversation(
+      conversationId as ConversationId,
+      this.context,
+    );
+    if (!conversation) return "";
+    const entry = await conversation.commit(
+      (tx) => tx.entry(AssistantEntry, answerId as never),
+      this.context,
+    );
+    const content = (entry?.model?.[0] as { content?: readonly { type?: string; text?: string }[] } | undefined)
+      ?.content;
+    return (content ?? [])
+      .flatMap((block) => (block.type === "text" && block.text ? [block.text] : []))
+      .join("")
+      .trim();
+  }
+
+  /** Write an adapter-authored entry (a notice) into a conversation. */
+  async writeEntry(conversationId: number, entry: AdapterEntry): Promise<number> {
+    const conversation = await this.harness.conversation(
+      conversationId as ConversationId,
+      this.context,
+    );
+    if (!conversation) throw new Error(`no such conversation: ${conversationId}`);
+    const submission = await conversation.submit(
+      {
+        type: "write",
+        entry: {
+          kind: entry.kind,
+          data: entry.data as never,
+          ...(entry.model === undefined ? {} : { model: entry.model as never }),
+        },
+      } as never,
+      this.context,
+    );
+    return submission.id as unknown as number;
   }
 
   /** Compact a conversation's context. */

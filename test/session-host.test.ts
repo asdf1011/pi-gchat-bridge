@@ -306,3 +306,22 @@ test("the settings operations delegate, and bind/label/create map back to plain 
     "usage",
   ]);
 });
+
+test("awaitSubmission() and write() delegate to the host", async () => {
+  const calls: string[] = [];
+  const host = {
+    awaitSubmission: async (id: number) => {
+      calls.push(`await:${id}`);
+      return { status: "done" as const, answerId: 5, text: "hello" };
+    },
+    writeEntry: async (id: number, entry: { kind: string }) => {
+      calls.push(`write:${id}:${entry.kind}`);
+      return 11;
+    },
+  } as unknown as BridgeHost;
+
+  const seam = inProcessSessionHost({ host, roots: [] });
+  assert.deepEqual(await seam.awaitSubmission(3), { status: "done", answerId: 5, text: "hello" });
+  assert.equal(await seam.write(1, { kind: "app.notice", data: { text: "hi" } }), 11);
+  assert.deepEqual(calls, ["await:3", "write:1:app.notice"]);
+});

@@ -13,10 +13,8 @@
  * way. Ordering is guaranteed by the caller awaiting the submission *after*
  * attaching the sink, so `finish()` can never be followed by a late snapshot.
  */
-import type { Context } from "@earendil-works/chord";
-import type { Conversation } from "@earendil-works/pi-durable";
-
-import { activeTool, projectView, type ProjectedView, type ViewLike } from "../session-host/projection.js";
+import { activeTool, projectView, type ProjectedView } from "../session-host/projection.js";
+import type { SessionHost } from "../session-host/api.js";
 
 /** The slice of `ReplyStream` the sink drives. Structural, so tests need no Chat client. */
 export interface StreamTarget {
@@ -26,8 +24,9 @@ export interface StreamTarget {
 }
 
 export interface ViewSinkOptions {
-  conversation: Conversation;
-  context: Context;
+  /** The conversation host: the sink needs one attachment, nothing else. */
+  seam: SessionHost;
+  conversationId: number;
   stream: StreamTarget;
   /** Called for a snapshot the sink cannot paint (never fatal). */
   onError?: (error: unknown) => void;
@@ -48,7 +47,7 @@ export interface ViewSink {
  * stale line (ReplyStream additionally debounces the show).
  */
 export async function attachViewSink(options: ViewSinkOptions): Promise<ViewSink> {
-  const { conversation, context, stream, onError } = options;
+  const { seam, conversationId, stream, onError } = options;
 
   let projected = projectView(undefined);
   let shownCallId: string | undefined;
@@ -59,9 +58,9 @@ export async function attachViewSink(options: ViewSinkOptions): Promise<ViewSink
   // placeholder). Painting "" here would flash an empty message before the answer.
   let painted = "";
 
-  const apply = (view: ViewLike | undefined): void => {
+  const apply = (next: ProjectedView): void => {
     if (detached) return;
-    projected = projectView(view);
+    projected = next;
     if (projected.liveText !== painted) {
       painted = projected.liveText;
       if (painted !== "") stream.onSnapshot(painted);
@@ -77,25 +76,27 @@ export async function attachViewSink(options: ViewSinkOptions): Promise<ViewSink
     }
   };
 
-  const opened = await conversation.viewState(context);
-  // Paint the state at attach time first: a sink attached mid-run (a reconnect,
-  // or a message that arrived while the run was already going) must not start
-  // from a blank placeholder.
-  apply(opened.value as ViewLike);
-  opened.subscribe((value: unknown) => {
+  // The seam sends the state at attach time as the first frame, so a sink
+  // attached mid-run (a reconnect, or a message that arrived while the run was
+  // already going) never starts from a blank placeholder.
+  const handle = await seam.attach(conversationId, (next) => {
     try {
-      apply(value as ViewLike);
+      apply(next);
     } catch (error) {
       onError?.(error);
     }
   });
+  if (!handle) throw new Error(`no such conversation: ${conversationId}`);
+
+  // Belt and braces for the ordering: if a frame somehow did not arrive first.
+  if (painted === "" && projected.liveText === "" && handle.snapshot.liveText !== "") apply(handle.snapshot);
 
   return {
     current: () => projected,
     detach: async () => {
       if (detached) return;
       detached = true;
-      opened.dispose();
+      handle.detach();
     },
   };
 }

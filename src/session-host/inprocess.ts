@@ -27,9 +27,11 @@ import { deriveArtifacts, type ArtifactEntryLike, type ArtifactFile } from "../d
 import type { BridgeHost } from "../durable/host.js";
 import { projectView, type ProjectedView, type ViewLike } from "./projection.js";
 import type {
+  AdapterEntry,
   AgentConfig,
   ConversationState,
   ModelInfo,
+  Settled,
   MessageContent,
   NamedConversation,
   HostInfo,
@@ -206,6 +208,14 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
 
     async label(name: string, label: string): Promise<boolean> {
       return host.setLabel(name, label);
+    },
+
+    async awaitSubmission(submissionId: number): Promise<Settled> {
+      return host.awaitSubmission(submissionId);
+    },
+
+    async write(conversationId: number, entry: AdapterEntry): Promise<number> {
+      return host.writeEntry(conversationId, entry);
     },
 
     async compact(conversationId: number, instructions?: string): Promise<void> {

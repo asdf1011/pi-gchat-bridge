@@ -146,8 +146,8 @@ const SLASH_COMMANDS: SlashCommand[] = [
   {
     pattern: /^\/new\b/,
     interrupt: true,
-    run: async ({ client, seam, router, chatKey, spaceName, threadName, display }) => {
-      await router.interrupt(chatKey);
+    run: async ({ client, seam, chatKey, spaceName, threadName, display }) => {
+      await stopConversation(seam, chatKey);
       const current = await conversationStatus(seam, chatKey);
       const defaults = await defaultSettings(seam);
       if (!current.isNew && current.provider && current.modelId) {
@@ -168,8 +168,8 @@ const SLASH_COMMANDS: SlashCommand[] = [
   {
     pattern: /^\/abort\b/,
     interrupt: false,
-    run: async ({ client, router, chatKey, spaceName, threadName, display }) => {
-      const stopped = await router.interrupt(chatKey);
+    run: async ({ client, seam, chatKey, spaceName, threadName, display }) => {
+      const stopped = await stopConversation(seam, chatKey);
       await client.sendMessage(
         spaceName,
         stopped ? "Stopped the running reply." : "Nothing to stop in this conversation.",
@@ -801,10 +801,17 @@ export async function runDurableCommand(ctx: DurableCommandContext): Promise<Han
   const trimmed = text.trim();
   for (const command of SLASH_COMMANDS) {
     if (!command.pattern.test(trimmed)) continue;
-    if (command.interrupt && router && (await isBusy(seam, chatKey))) await router.interrupt(chatKey);
+    if (command.interrupt && (await isBusy(seam, chatKey))) await stopConversation(seam, chatKey);
     return command.run(ctx);
   }
   return null;
+}
+
+/** Stop whatever the conversation is doing. False when there was nothing to stop. */
+async function stopConversation(seam: SessionHost, chatKey: string): Promise<boolean> {
+  const named = await seam.resolve(chatKey);
+  if (!named) return false;
+  return seam.abort(named.conversationId);
 }
 
 /** Whether a run currently owns the conversation. */
