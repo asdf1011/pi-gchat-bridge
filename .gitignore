@@ -27,3 +27,6 @@ backups/
 # Playwright
 test-results/
 playwright-report/
+
+# Runtime: the supervisor pid file, rewritten at every start.
+.start-bridge.pid
