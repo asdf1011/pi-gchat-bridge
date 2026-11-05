@@ -30,11 +30,35 @@ engine_port() {
   echo "${port:-8081}"
 }
 
+# The bridge's pid.
+#
+# The database lock is the authority: whichever process owns `bridge.sqlite.lock`
+# is the one serving, and it is the one to restart. Matching on the command line
+# alone was wrong in a way that cost three restarts: a *scratch* instance run from
+# this directory (`BRIDGE_DB=/tmp/… node dist/durable/main.js`) matches the same
+# pattern, so the script killed the developer's throwaway process and declared the
+# real bridge healthy — healthy because it had never been touched.
 bridge_pid() {
+  local lock="$PROJECT/bridge.sqlite.lock"
+  if [ -f "$lock" ]; then
+    local owner
+    owner=$(cat "$lock" 2>/dev/null || true)
+    if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+      echo "$owner"
+      return
+    fi
+  fi
+  # Fallback: the process whose *cwd* is this project, so a test instance started
+  # elsewhere is not mistaken for the bridge.
   for p in /proc/[0-9]*; do
     c=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)
     case "$c" in
-      "node dist/durable/main.js "*|"node dist/index.js "*) basename "$p"; return ;;
+      "node dist/durable/main.js "*|"node dist/index.js "*)
+        if [ "$(readlink "$p/cwd" 2>/dev/null)" = "$PROJECT" ]; then
+          basename "$p"
+          return
+        fi
+        ;;
     esac
   done
 }
