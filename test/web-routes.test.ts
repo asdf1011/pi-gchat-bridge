@@ -205,7 +205,9 @@ test("the conversation list and a submit still answer as before", async () => {
       body: JSON.stringify({ text: "hello" }),
     });
     assert.equal(sent.status, 202);
-    assert.deepEqual(await sent.json(), { ok: true, submissionId: 7 });
+    // The echo carries the rendered message, so the pane can show what you sent
+    // before the transcript comes back.
+    assert.deepEqual(await sent.json(), { ok: true, submissionId: 7, html: "<p>hello</p>" });
 
     const missing = await fetch(`${served.base}/web/api/c/9/message`, {
       method: "POST",

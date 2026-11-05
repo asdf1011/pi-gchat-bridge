@@ -41,6 +41,11 @@
   #log .msg.pi .bubble { background: var(--bubble-pi); border-top-left-radius: .3rem; }
   #log .msg.me .bubble { background: var(--bubble-me); border-top-right-radius: .3rem; }
   #log .live .bubble { outline: 1px dashed #8884; }
+  /* The live turn's status: which tool is running, or "thinking" before any
+     text arrives. Chat shows the same thing inside the message it is editing. */
+  #log .status { margin: .25rem 0 0 .15rem; font: .78em ui-monospace, SFMono-Regular, monospace;
+    opacity: .7; white-space: pre-wrap; word-break: break-word; }
+  #log .status:empty { display: none; }
   /* Rendered markdown. The HTML comes from the server's escape-first renderer,
      so every tag here is ours; these rules only make it readable in a pane. */
   /* Code and quotes sit on the page colour, like Chat's own code blocks. */
@@ -145,6 +150,8 @@ const tool = document.getElementById('tool');
 let history = [];
 let liveText = '';
 let liveHtml = '';
+let busy = false;
+let statusLine = '';
 
 /** Fallback when a frame arrives without rendered HTML (an older server). */
 function escapeText(text) {
@@ -219,7 +226,15 @@ function paint() {
   for (const message of history) {
     log.append(messageRow(message.role, message.html || escapeText(message.text || ''), message.at, false));
   }
-  if (liveText) log.append(messageRow('assistant', liveHtml || escapeText(liveText), undefined, true));
+  // The live turn: the streaming answer, and the status of whatever is running.
+  if (liveText || busy || statusLine) {
+    const row = messageRow('assistant', liveText ? (liveHtml || escapeText(liveText)) : '', undefined, true);
+    const status = document.createElement('div');
+    status.className = 'status';
+    status.textContent = statusLine || (busy && !liveText ? 'thinking…' : '');
+    row.querySelector('.col').append(status);
+    log.append(row);
+  }
   log.scrollTop = log.scrollHeight;
 }
 
@@ -240,6 +255,8 @@ function open(id) {
   history = [];
   liveText = '';
   liveHtml = '';
+  busy = false;
+  statusLine = '';
   log.innerHTML = '';
   tool.textContent = '';
   void loadHistory();
@@ -249,6 +266,8 @@ function open(id) {
     const wasBusy = liveText !== '';
     liveText = d.text;
     liveHtml = d.html || '';
+    busy = Boolean(d.busy);
+    if (busy) statusLine = '';
     paint();
     // A turn that just finished has become history: refetch so the answer is
     // shown as a completed message and the live block goes away.
@@ -264,10 +283,14 @@ function open(id) {
   });
   source.addEventListener('tool', (e) => {
     const d = JSON.parse(e.data);
-    tool.textContent = d ? d.name + ' · ' + d.status : '';
+    statusLine = d ? d.name + ' · ' + d.status + (d.detail ? ' — ' + d.detail : '') : '';
+    tool.textContent = '';
+    paint();
   });
   source.addEventListener('error', () => {
-    // EventSource reconnects by itself; show it so a restart is visible not mysterious.
+    // EventSource reconnects by itself; show it so a restart is visible not
+    // mysterious. Connection state is not conversation content, so it stays in
+    // the footer rather than in the pane.
     tool.textContent = 'reconnecting…';
   });
 }
@@ -297,11 +320,23 @@ document.getElementById('send').onsubmit = async (e) => {
   const text = box.value.trim();
   if (!text || !current) return;
   box.value = '';
-  await fetch(rel('api/c/' + current + '/message'), {
+  const response = await fetch(rel('api/c/' + current + '/message'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text }),
   });
+  // Show it immediately, the way Chat echoes your message: waiting for the
+  // history refetch at the end of the turn made it look lost.
+  try {
+    const result = await response.json();
+    if (result && result.ok) {
+      history.push({ role: 'user', text: text, html: result.html, at: Date.now() });
+      paint();
+    }
+  } catch {
+    // A failed submit is already visible as a missing message; the turn's own
+    // error, if any, arrives on the stream.
+  }
 };
 
 // --- Artifacts: a drawer over the conversation, hidden until asked for. ---

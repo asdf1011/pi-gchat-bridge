@@ -258,15 +258,19 @@ test("a later text frame replaces the earlier one, not appends", async () => {
   }
 });
 
-test("a tool frame shows the tool, and null clears it", async () => {
+test("a tool frame shows in the pane, and null clears it", async () => {
   let h: Harness | undefined;
   try {
     h = await loadPage({ conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
-    const tool = h.dom.window.document.getElementById("tool")!;
-    h.sources[0]!.emit("tool", { name: "bash", status: "running" });
-    assert.equal(tool.textContent, "bash · running");
+    const log = h.dom.window.document.getElementById("log")!;
+    h.sources[0]!.emit("tool", { name: "bash", status: "running", detail: "sleep 10" });
+    // In the pane, next to the live answer — the same place Chat shows it,
+    // rather than a footer line that scrolls out of sight.
+    assert.equal(log.querySelector(".msg.live .status")!.textContent, "bash · running — sleep 10");
+    // With no tool and no answer text there is nothing to say about the turn, so
+    // the live row goes away rather than leaving an empty bubble behind.
     h.sources[0]!.emit("tool", null);
-    assert.equal(tool.textContent, "");
+    assert.equal(log.querySelector(".msg.live"), null);
   } finally {
     h?.close();
   }

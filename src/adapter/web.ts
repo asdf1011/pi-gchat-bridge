@@ -25,8 +25,23 @@
 import fs from "node:fs";
 
 import { logger } from "../logger.js";
+import { renderMarkdown } from "./markdown.js";
 import type { ProjectedView } from "../session-host/projection.js";
 import type { SessionHost, WhenBusy } from "../session-host/api.js";
+
+/**
+ * The one-line summary a status row shows for a tool: the command, or the path.
+ *
+ * Same rule the Chat status line uses, kept here as plain text because the web
+ * pane is not Chat markdown. Truncated: a long command should not push the row
+ * sideways.
+ */
+function toolSummary(args: unknown): string {
+  const a = (args ?? {}) as Record<string, unknown>;
+  const command = typeof a.command === "string" ? a.command.trim().replace(/\s+/g, " ") : "";
+  const path = typeof a.path === "string" ? a.path.trim() : "";
+  return (command || path).slice(0, 90);
+}
 
 /** One connected client. Kept structural so tests need no HTTP server. */
 export interface SseClient {
@@ -77,12 +92,19 @@ export async function attachWebClient(
         lastText = projected.liveText;
         client.send("text", { text: projected.liveText, busy: projected.busy });
       }
-      // Tool status is a single line, so send it only when it changes.
+      // Tool status is a single line, so send it only when it changes. The
+      // `detail` is the same summarising the Chat status line does — a command
+      // or a path — so both surfaces say what is running, not just which tool.
       const tool = projected.tools.filter((t) => t.status !== "done").at(-1);
-      const line = tool ? `${tool.name}:${tool.status}` : "";
+      const line = tool ? `${tool.name}:${tool.status}:${toolSummary(tool.arguments)}` : "";
       if (line !== lastTool) {
         lastTool = line;
-        client.send("tool", tool ? { name: tool.name, status: tool.status, output: tool.output } : null);
+        client.send(
+          "tool",
+          tool
+            ? { name: tool.name, status: tool.status, output: tool.output, detail: toolSummary(tool.arguments) }
+            : null,
+        );
       }
     } catch (error) {
       // A rendering fault must not kill the client's stream: log it and keep the
@@ -131,9 +153,13 @@ export async function webSubmit(
   conversationId: number,
   text: string,
   whenBusy: WhenBusy = "steer",
-): Promise<{ ok: true; submissionId: number } | { ok: false; error: string }> {
+): Promise<{ ok: true; submissionId: number; html: string } | { ok: false; error: string }> {
   const result = await options.seam.submit(conversationId, { content: text, whenBusy });
-  return "error" in result ? { ok: false, error: result.error } : { ok: true, submissionId: result.submissionId };
+  return "error" in result
+    ? { ok: false, error: result.error }
+    : // Rendered here so the pane can show your message the moment it is sent,
+      // in the same markup the transcript will use when it comes back.
+      { ok: true, submissionId: result.submissionId, html: renderMarkdown(text) };
 }
 
 /**

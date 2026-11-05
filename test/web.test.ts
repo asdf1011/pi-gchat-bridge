@@ -148,8 +148,13 @@ test("a tool frame reports the newest unfinished call, and null clears it", asyn
   const c = client();
   await attachWebClient(options(fake.seam), 1, c);
 
-  fake.push(view("", [{ callId: "1", name: "bash", status: "running" }]));
-  assert.deepEqual(c.sent.at(-1), { event: "tool", data: { name: "bash", status: "running", output: undefined } });
+  fake.push(view("", [{ callId: "1", name: "bash", status: "running", arguments: { command: "sleep 10" } }]));
+  // `detail` is the summarising the Chat status line does: the pane shows what is
+  // running, not only which tool.
+  assert.deepEqual(c.sent.at(-1), {
+    event: "tool",
+    data: { name: "bash", status: "running", output: undefined, detail: "sleep 10" },
+  });
 
   fake.push(view("", [{ callId: "1", name: "bash", status: "done" }]));
   assert.deepEqual(c.sent.at(-1), { event: "tool", data: null });
