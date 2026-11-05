@@ -371,6 +371,92 @@ test("the send button keeps its label when the box is wide", async ({ page }) =>
   expect(fits.scrollWidth).toBeLessThanOrEqual(fits.width + 1);
 });
 
+test("the attach button uploads a file, and it goes with the message", async ({ page }) => {
+  const errors = watchErrors(page);
+  const posted: unknown[] = [];
+  await stubApi(page, { onPost: (body) => posted.push(body) });
+  await page.goto("/7/");
+
+  // A real PNG, so the browser's own File/FileReader path is what runs. A
+  // one-pixel image: the content does not matter, only that bytes survive the
+  // round trip from the picker to the request body.
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==",
+    "base64",
+  );
+  // `setInputFiles` is the only way to drive a real file input: it fires the
+  // same `change` event a picker does, without a picker.
+  await page.locator("#attach-input").setInputFiles({ name: "pixel.png", mimeType: "image/png", buffer: png });
+
+  // A thumbnail before sending, so the choice is visible.
+  await expect(page.locator("#attachments img")).toHaveCount(1);
+  await expect(page.locator("#attachments img")).toHaveAttribute("src", /^data:image\/png;base64,/);
+
+  await page.locator("#text").fill("what is this");
+  await page.locator("#send").evaluate((form) => (form as HTMLFormElement).requestSubmit());
+
+  await expect.poll(() => posted.length).toBe(1);
+  const body = posted[0] as { text: string; images: { data: string; mimeType: string }[] };
+  expect(body.text).toBe("what is this");
+  expect(body.images).toHaveLength(1);
+  expect(body.images[0]!.mimeType).toBe("image/png");
+  expect(body.images[0]!.data.length).toBeGreaterThan(0);
+
+  // And the strip is empty again, so the next message does not repeat it.
+  await expect(page.locator("#attachments img")).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test("dropping a file on the pane attaches it and does not navigate away", async ({ page }) => {
+  const errors = watchErrors(page);
+  await stubApi(page);
+  await page.goto("/7/");
+
+  // A `DataTransfer` built in the page carries the file to a real drop event.
+  // Dispatching it from `evaluate` is what makes this a genuine drag: the same
+  // handler the browser calls, and the navigation that must not happen.
+  await page.evaluate(async () => {
+    const png = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg=="), (c) => c.charCodeAt(0));
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([png], "dropped.png", { type: "image/png" }));
+    const pane = document.getElementById("pane")!;
+    for (const type of ["dragenter", "dragover", "drop"]) {
+      pane.dispatchEvent(new DragEvent(type, { dataTransfer: transfer, bubbles: true, cancelable: true }));
+    }
+  });
+
+  await expect(page.locator("#attachments img")).toHaveCount(1);
+  // Still on the conversation: an unhandled drop would have navigated to the file.
+  await expect(page).toHaveURL(/\/7\/$/);
+  await expect(page.locator("#pane")).not.toHaveClass(/dropping/);
+  expect(errors).toEqual([]);
+});
+
+test("a refused attachment says why, and the message can still be sent", async ({ page }) => {
+  const errors = watchErrors(page);
+  const posted: unknown[] = [];
+  await stubApi(page, { onPost: (body) => posted.push(body) });
+  await page.goto("/7/");
+
+  await page.locator("#attach-input").setInputFiles({
+    name: "invoice.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from("%PDF-1.4"),
+  });
+
+  // Named, so you know which file was refused — silence here reads as a bug.
+  await expect(page.locator("#attach-notice")).toBeVisible();
+  await expect(page.locator("#attach-notice")).toContainText("invoice.pdf");
+  await expect(page.locator("#attachments img")).toHaveCount(0);
+
+  // And it does not block the text: refusing a file must not refuse the message.
+  await page.locator("#text").fill("ignore the pdf");
+  await page.locator("#send").evaluate((form) => (form as HTMLFormElement).requestSubmit());
+  await expect.poll(() => posted.length).toBe(1);
+  expect((posted[0] as { images: unknown[] }).images).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
 test("Enter sends, Shift-Enter and Ctrl-Enter add a line instead", async ({ page }) => {
   const posted: unknown[] = [];
   await stubApi(page, { onPost: (body) => posted.push(body) });
@@ -511,6 +597,52 @@ test("mobile: the index fits the screen, and its rows are tappable", async ({ pa
   expect(layout.scrollWidth).toBeLessThanOrEqual(layout.viewport);
   expect(layout.rowHeight).toBeGreaterThanOrEqual(40); // the usual minimum tap target
   expect(layout.fabVisible).toBe(true);
+});
+
+test("mobile: the index is the page, so everything past the fold is reachable", async ({ page }) => {
+  // The regression this guards: the index was a 100dvh box with its own
+  // `overflow: auto`. Phones hide that scrollbar until you are already moving, so
+  // a 30-row list looked like it ended at the fold and the pager below it was
+  // never seen. The window scrolls the index instead of a box inside it.
+  const rows = Array.from({ length: 30 }, (_, index) => ({
+    conversationId: index + 1,
+    chatKey: `web:${index + 1}`,
+    model: "m",
+    name: `conversation ${index + 1}`,
+    createdAt: Date.now() - index * 60e3,
+    lastActivityAt: Date.now() - index * 60e3,
+  }));
+  await page.route("**/api/conversations*", (route) => {
+    const url = new URL(route.request().url());
+    const offset = Number(url.searchParams.get("offset") ?? 0);
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ items: offset === 0 ? rows : [], more: offset === 0, offset, limit: 30 }),
+    });
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/");
+
+  const layout = await page.evaluate(() => {
+    const doc = document.documentElement;
+    const index = document.getElementById("index")!;
+    return {
+      documentScrolls: doc.scrollHeight > doc.clientHeight,
+      // Nothing inside the index scrolls on its own: one scroller, the document.
+      innerScroller: index.scrollHeight > index.clientHeight + 1,
+      indexOverflow: getComputedStyle(index).overflowY,
+    };
+  });
+  expect(layout.documentScrolls, "the index must overflow the window, not a box").toBe(true);
+  expect(layout.innerScroller, "the index must not scroll inside itself").toBe(false);
+  expect(layout.indexOverflow).not.toBe("auto");
+
+  // Scrolling the window to the bottom really does reach the pager.
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  const pager = page.locator("#index-pager");
+  await expect(pager).toBeInViewport();
+  await expect(page.locator("#index-list li")).toHaveCount(30);
 });
 
 test("mobile: the composer is on screen and nothing floats over Send", async ({ page }) => {

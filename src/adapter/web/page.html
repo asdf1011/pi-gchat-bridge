@@ -26,6 +26,11 @@
          display: flex; flex-direction: column; height: 100dvh;
          /* Antialiased so the modern faces don't read as chunky on macOS. */
          -webkit-font-smoothing: antialiased; }
+  /* One exception to the fixed-height column: the index is a document, so the
+     page itself scrolls. Pinning it to 100dvh with an inner scroller is what hid
+     the rows past the fold on a phone, where the browser shows no scrollbar until
+     something is already moving. */
+  body.indexing { height: auto; min-height: 100dvh; }
   /* One page per conversation: no list beside it. The header carries the way back
      and the conversation's name, which is all the context the pane needs. */
   /* `min-width: 0` because a flex item's automatic minimum is its content: without
@@ -130,10 +135,18 @@
   /* Artifacts: a floating toggle and a drawer that is hidden until asked for.
      The pane is an iframe on the artifact origin — a different origin, so it is
      sandboxed there and cannot reach this page's DOM or cookies. */
-  /* The index: recent conversations, newest first, paged. */
-  #index { flex: 1; overflow: auto; padding: 1.5rem 1.25rem 6rem; }
-  #index h1 { font-size: 1.1rem; margin: 0 0 1rem; font-weight: 600; }
-  #index-list { list-style: none; margin: 0; padding: 0; max-width: 46rem; }
+  /* The index: recent conversations, newest first, paged.
+     It scrolls with the page, not inside a box of its own. A fixed-height
+     `overflow: auto` pane on a phone hides its scrollbar (mobile browsers draw
+     them only while scrolling), so the list and — crucially — the pager below it
+     looked like the end of the content. With the document scrolling, the last row
+     and the pager are simply the end of the page. */
+  #index { padding: 1.5rem 1.25rem 6rem; }
+  /* Wide enough for a title at any window: `max-width` alone left the rows' rules
+     stopping mid-screen on a desktop. */
+  #index > * { max-width: 46rem; margin-inline: auto; }
+  #index h1 { font-size: 1.1rem; margin: 0 auto 1rem; font-weight: 600; }
+  #index-list { list-style: none; margin: 0 auto; padding: 0; }
   #index-list li { padding: .6rem .75rem; border-bottom: 1px solid #8882; cursor: pointer;
     display: flex; gap: .75rem; align-items: baseline; }
   #index-list li:hover { background: #8881; }
@@ -142,19 +155,34 @@
      to ellipsise every title to two words. The time is in the row's title. */
   #index-list li .when { flex: none; font-size: .8em; opacity: .6; white-space: nowrap;
     font-variant-numeric: tabular-nums; }
-  #index-pager { display: flex; gap: .5rem; align-items: center; margin-top: 1rem;
-    max-width: 46rem; font-size: .85em; opacity: .85; }
+  #index-pager { display: flex; gap: .5rem; align-items: center; margin: 1rem auto 0;
+    font-size: .85em; opacity: .85; }
   #index-pager span { flex: 1; opacity: .7; }
   #index-pager button:disabled { opacity: .4; cursor: default; }
   #index-pager button:disabled:hover { filter: none; }
-  /* Pasted images waiting to be sent, above the composer. */
+  /* Attached images waiting to be sent, above the composer. Same strip whether
+     they came from the clipboard, the file picker or a drop: to the person they
+     are one thing — what this message carries. */
   #attachments { display: flex; gap: .5rem; padding: .5rem .75rem 0; flex-wrap: wrap; }
   #attachments[hidden] { display: none; }
   #attachments figure { margin: 0; position: relative; }
   #attachments img { height: 4rem; border-radius: .5rem; display: block; }
-  #attachments button { position: absolute; top: -.4rem; right: -.4rem; padding: 0;
+  #attachments figure > button { position: absolute; top: -.4rem; right: -.4rem; padding: 0;
     width: 1.25rem; height: 1.25rem; font-size: .7rem; line-height: 1; border-radius: 50%;
     border: 1px solid #8886; background: Canvas; cursor: pointer; }
+  /* Attach: the file picker's button, shaped like the send button beside it. */
+  #attach { padding: .6rem .8rem; }
+  /* Why an attachment did not make it — a file that is not an image, or one too
+     big to send. Above the composer, where the thumbnails would have appeared, so
+     the message is attached to the thing that was refused rather than to the
+     conversation. */
+  #attach-notice { padding: .35rem .75rem 0; font-size: .85em; opacity: .85;
+    color: color-mix(in srgb, CanvasText 75%, #d33); }
+  #attach-notice[hidden] { display: none; }
+  /* Drop target: the whole pane lights up, because dropping on a strip two
+     centimetres tall is a game, and people drag onto the conversation. */
+  #pane.dropping { outline: 2px dashed color-mix(in srgb, CanvasText 35%, transparent);
+    outline-offset: -4px; border-radius: .5rem; }
   #new-chat { position: fixed; right: 1rem; bottom: 1rem; z-index: 10;
     width: 2.75rem; height: 2.75rem; padding: 0; border-radius: 50%; font-size: 1.3rem;
     border: 1px solid #8886; background: var(--bubble-me); cursor: pointer; }
@@ -223,6 +251,7 @@
     textarea { min-height: 3rem; padding: .55rem .7rem; }
     button { padding: .55rem .85rem; }
     #attachments img { height: 3.2rem; }
+    #attach { padding: .55rem .7rem; }
     #artifacts { position: fixed; inset: 0; width: 100%; border-left: 0; }
     #artifacts-resize { display: none; }
     #new-chat { right: .75rem; bottom: .75rem; }
@@ -250,8 +279,15 @@
   <p id="log"></p>
   <div id="tool"></div>
     <div id="attachments" hidden></div>
+    <p id="attach-notice" hidden role="status" aria-live="polite"></p>
     <form id="send">
       <textarea id="text" placeholder="Message…" aria-label="Message this conversation"></textarea>
+      <!-- The file picker behind the attach button: hidden, but still focusable
+           via the label-free button that opens it, so the keyboard path is not
+           lost. `accept` filters the dialog; the type is checked again on the
+           way in, because a picker's filter is a hint, not a guarantee. -->
+      <input id="attach-input" type="file" accept="image/*" multiple hidden>
+      <button id="attach" type="button" title="Attach an image" aria-label="Attach an image">📎</button>
       <button>Send</button>
     </form>
   </div>
@@ -631,15 +667,59 @@ draftBox.addEventListener('input', () => {
   saveDraft();
 });
 
-// --- Pasted images ---
+// --- Attached images ---
 //
-// A screenshot on the clipboard is the most common thing anyone attaches to a
-// message, so paste is the way in: no file picker, no upload button. The bytes
-// stay in this page until send, as data URLs, and go up with the message.
+// Three ways in, one place to land: paste a screenshot, pick a file, or drop one
+// on the pane. A screenshot on the clipboard is still the common case, so paste
+// stays first-class, but "attach this picture from my phone" is the same request
+// wearing a different hat — and a phone has no clipboard-to-paste for a photo
+// that was never on it.
+//
+// The bytes stay in this page until send, as data URLs, and go up with the
+// message. Nothing is uploaded on arrival: a message is one payload, and a file
+// that sits on the server waiting for a message nobody sends is a temp file whose
+// lifetime nobody owns.
 
-/** Pasted images waiting to be sent: `{dataUrl, mimeType, data}`. */
+/** Attached images waiting to be sent: `{dataUrl, mimeType, data}`. */
 let pendingImages = [];
 const attachmentsBox = document.getElementById('attachments');
+const attachInput = document.getElementById('attach-input');
+const attachNotice = document.getElementById('attach-notice');
+const pane = document.getElementById('pane');
+
+/**
+ * The same limits the route enforces, so a file is refused here with a sentence
+ * instead of failing the whole message at the server with a status code.
+ *
+ * They are repeated rather than fetched because the page must be able to answer
+ * before it sends anything — a round trip to learn "that photo is too big" is a
+ * worse way to find out. If they drift, the server still wins; this only decides
+ * what is worth trying.
+ */
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_IMAGES = 10;
+
+/**
+ * Say why something was refused, in the place the thumbnails would have appeared.
+ *
+ * Silently ignoring a dropped file is the failure that makes people think the UI
+ * is broken: the file is dragged, nothing happens, and there is nothing to read.
+ */
+let noticeTimer;
+function attachNotice_(text) {
+  attachNotice.textContent = text;
+  attachNotice.hidden = !text;
+  clearTimeout(noticeTimer);
+  // Transient, but not instant: it has to be readable, and it should not sit
+  // there for the rest of the conversation claiming a file was refused.
+  if (text) noticeTimer = setTimeout(() => { attachNotice.hidden = true; attachNotice.textContent = ''; }, 6000);
+}
+
+/** `1.4 MB`, so a refusal names a size a person can compare with their file. */
+function formatBytes(bytes) {
+  if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  return Math.max(1, Math.round(bytes / 1024)) + ' KB';
+}
 
 function renderAttachments() {
   attachmentsBox.innerHTML = '';
@@ -648,7 +728,8 @@ function renderAttachments() {
     const figure = document.createElement('figure');
     const img = document.createElement('img');
     img.src = image.dataUrl;
-    img.alt = image.mimeType || 'pasted image';
+    img.alt = image.name || image.mimeType || 'attached image';
+    img.title = image.name || image.mimeType || '';
     const remove = document.createElement('button');
     remove.type = 'button';
     remove.textContent = '✕';
@@ -663,6 +744,62 @@ function renderAttachments() {
   fitBox();
 }
 
+/**
+ * Take files from any of the three ways in: keep the ones that are images within
+ * the limits, and say what happened to the rest.
+ *
+ * One function rather than three copies, because the rules — which types, how
+ * big, how many — are the part that must agree between paste, picker and drop.
+ */
+async function addImages(files) {
+  const list = Array.from(files || []);
+  if (list.length === 0) return;
+  const refused = [];
+  const accepted = [];
+  for (const file of list) {
+    if (!file || !String(file.type || '').startsWith('image/')) {
+      refused.push('“' + (file && file.name ? file.name : 'that file') + '” is not an image');
+    } else if (file.size > MAX_IMAGE_BYTES) {
+      refused.push('“' + (file.name || 'that image') + '” is ' + formatBytes(file.size) +
+        ', over the ' + formatBytes(MAX_IMAGE_BYTES) + ' limit');
+    } else if (pendingImages.length + accepted.length >= MAX_IMAGES) {
+      // Needed only for a drop of a whole folder: the route's body cap would
+      // otherwise refuse the send itself, with no way to tell which file did it.
+      refused.push('only ' + MAX_IMAGES + ' images fit in one message');
+    } else {
+      accepted.push(file);
+    }
+  }
+  await Promise.all(accepted.map((file) => new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = String(reader.result || '');
+      const comma = dataUrl.indexOf(',');
+      if (comma < 0) return resolve();
+      pendingImages.push({
+        dataUrl: dataUrl,
+        data: dataUrl.slice(comma + 1),
+        mimeType: file.type,
+        name: file.name || '',
+      });
+      renderAttachments();
+      resolve();
+    };
+    // A file that cannot be read is refused like any other: an unreadable image
+    // would otherwise vanish between the picker and the strip.
+    reader.onerror = () => {
+      refused.push('“' + (file.name || 'that image') + '” could not be read');
+      resolve();
+    };
+    reader.readAsDataURL(file);
+  })));
+  // Deduplicated and joined: dropping five text files should not say the same
+  // thing five times, and the first reason is the one to act on.
+  if (refused.length) attachNotice_([...new Set(refused)].join('; '));
+  else attachNotice_('');
+}
+
+// Paste: clipboard files only, so an ordinary text paste is untouched.
 draftBox.addEventListener('paste', (event) => {
   const items = event.clipboardData ? Array.from(event.clipboardData.items) : [];
   const files = items
@@ -671,17 +808,54 @@ draftBox.addEventListener('paste', (event) => {
     .filter((file) => file);
   if (files.length === 0) return; // ordinary text paste: leave it alone
   event.preventDefault();
-  for (const file of files) {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = String(reader.result || '');
-      const comma = dataUrl.indexOf(',');
-      if (comma < 0) return;
-      pendingImages.push({ dataUrl: dataUrl, data: dataUrl.slice(comma + 1), mimeType: file.type });
-      renderAttachments();
-    };
-    reader.readAsDataURL(file);
-  }
+  addImages(files);
+});
+
+// Picker: the attach button opens it, and the input is cleared afterwards so
+// picking the same file twice in a row still fires `change`.
+const attachButton = document.getElementById('attach');
+attachButton.addEventListener('click', () => attachInput.click());
+attachInput.addEventListener('change', () => {
+  addImages(attachInput.files);
+  attachInput.value = '';
+});
+
+// Drop: onto the pane, which includes the composer and the conversation above it.
+// Counted rather than toggled, because dragging over a child fires `dragleave` on
+// the parent: an unmatched leave would clear the highlight mid-drag and leave it
+// stuck off after the drop.
+let dragDepth = 0;
+function carriesFiles(event) {
+  const types = event.dataTransfer ? Array.from(event.dataTransfer.types || []) : [];
+  return types.indexOf('Files') >= 0;
+}
+pane.addEventListener('dragenter', (event) => {
+  if (!carriesFiles(event)) return;
+  event.preventDefault();
+  dragDepth += 1;
+  pane.classList.add('dropping');
+});
+pane.addEventListener('dragover', (event) => {
+  if (!carriesFiles(event)) return;
+  // Without this the browser navigates to the file and the conversation is gone.
+  event.preventDefault();
+  event.dataTransfer.dropEffect = 'copy';
+});
+pane.addEventListener('dragleave', () => {
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (dragDepth === 0) pane.classList.remove('dropping');
+});
+pane.addEventListener('drop', (event) => {
+  dragDepth = 0;
+  pane.classList.remove('dropping');
+  if (!event.dataTransfer) return;
+  // Only a file drop is ours: dropping selected text into the box is the
+  // browser's own behaviour and must keep working.
+  const files = Array.from(event.dataTransfer.files || []);
+  if (files.length === 0) return;
+  event.preventDefault();
+  addImages(files);
+  textBox.focus();
 });
 
 // Enter sends, because this is a chat box and that is what a chat box does.
@@ -1028,6 +1202,9 @@ document.getElementById('new-chat').onclick = async () => {
 
 const openId = conversationIdFromPath();
 if (openId === undefined) {
+  // The index is a document: the window scrolls it, so the rows past the fold
+  // are reachable with the scrollbar the browser draws for the page.
+  document.body.classList.add('indexing');
   document.getElementById('index').hidden = false;
   document.getElementById('app').hidden = true;
   document.getElementById('new-chat').hidden = false;

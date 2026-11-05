@@ -13,6 +13,7 @@ import type { AddressInfo } from "node:net";
 import test from "node:test";
 
 import { apiPath, handleWebRequest, webPath } from "../src/adapter/web-routes.js";
+import { MAX_WEB_IMAGES } from "../src/adapter/web.js";
 import type { NamedConversation, SessionHost } from "../src/session-host/api.js";
 import type { ProjectedView } from "../src/session-host/projection.js";
 
@@ -192,7 +193,7 @@ test("history arrives rendered, and the rendering cannot carry a script", async 
   }
 });
 
-test("a pasted image reaches the host as a content part", async () => {
+test("an attached image reaches the host as a content part", async () => {
   const served = await serve(fakeSeam());
   try {
     submitted.length = 0;
@@ -206,13 +207,61 @@ test("a pasted image reaches the host as a content part", async () => {
     assert.equal(response.status, 202);
 
     // Text first, then the image, as Chat sends it: the transcript and the model
-    // both see the same shape.
+    // both see the same shape. Nothing here records *how* it was attached — the
+    // clipboard and the file picker arrive identically.
     assert.deepEqual(submitted[0], [
       { type: "text", text: "look" },
       { type: "image", data: png, mimeType: "image/png" },
     ]);
     // And the Chat thread's notice says an image came with it.
-    assert.equal(announced[0], "someone (webui): look [1 image]");
+    assert.equal(announced[0], "someone (webui): look [1 image attached]");
+  } finally {
+    await served.close();
+  }
+});
+
+test("a message may carry several images, and the notice counts them", async () => {
+  const served = await serve(fakeSeam());
+  try {
+    submitted.length = 0;
+    announced.length = 0;
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString("base64");
+    const response = await fetch(`${served.base}/web/api/c/1/message`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: "two shots",
+        images: [
+          { data: png, mimeType: "image/png" },
+          { data: png, mimeType: "image/png" },
+        ],
+      }),
+    });
+    assert.equal(response.status, 202);
+    assert.equal((submitted[0] as unknown[]).length, 3);
+    assert.equal(announced[0], "someone (webui): two shots [2 images attached]");
+  } finally {
+    await served.close();
+  }
+});
+
+test("more images than one message holds is refused, and says so", async () => {
+  const served = await serve(fakeSeam());
+  try {
+    submitted.length = 0;
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString("base64");
+    const response = await fetch(`${served.base}/web/api/c/1/message`, {
+      method: "POST",
+      body: JSON.stringify({
+        text: "a whole folder",
+        images: Array.from({ length: MAX_WEB_IMAGES + 1 }, () => ({ data: png, mimeType: "image/png" })),
+      }),
+    });
+    // 400 with a sentence rather than a 413 from the body reader: the limit is
+    // about how many pictures a message holds, and that is actionable.
+    assert.equal(response.status, 400);
+    assert.match(((await response.json()) as { error: string }).error, /at most 10 images/);
+    assert.equal(submitted.length, 0, "nothing may reach the host");
   } finally {
     await served.close();
   }

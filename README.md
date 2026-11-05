@@ -215,7 +215,25 @@ step) at `/web` — or under whatever prefix a reverse proxy gives it.
 - **`GET /web/api/conversations`** — the index, newest first
 - **`GET /web/api/c/:id/events`** — `text/event-stream`: whole snapshots plus
   the current tool status
-- **`POST /web/api/c/:id/message`** — submit a message (`whenBusy: "steer"`)
+- **`POST /web/api/c/:id/message`** — submit a message (`whenBusy: "steer"`),
+  with optional inline images
+
+**Images.** Three ways in, one place to land: paste a screenshot, press 📎 to
+pick files, or drop them on the pane. They become thumbnails above the composer
+(each removable) and ride with the message as content parts — the shape Chat
+sends, so the model and the transcript agree.
+
+- Nothing is uploaded until you send, so there is no orphaned temp file to
+expire; the whole message is one payload.
+- Refused before sending, with a reason naming the file: anything that is not
+  `image/*`, anything over 8 MB after decoding, or more than 10 images in one
+  message. The route enforces the same limits, so a direct POST cannot bypass
+them.
+- The 24 MB body cap is the real ceiling for a message full of images; the
+  per-image and per-message limits exist so that case is a sentence rather than
+a bare `413`.
+- A phone has no "paste" for a photo that was never on its clipboard, which is
+  the case the picker and drop exist for.
 
 **Why this is in-process, not a separate app.** Pi Durable's `viewState()` and
 `subscribe()` are in-memory fan-out: any number of clients can attach to a

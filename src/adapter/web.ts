@@ -162,7 +162,11 @@ export async function webIndex(options: Pick<WebOptions, "seam">): Promise<
  * the two frontends feel like one conversation — a browser message can redirect
  * a Chat-initiated turn mid-flight, which is the interaction that was asked for.
  */
-/** One pasted image: base64 as the browser read it, plus its type. */
+/**
+ * One image attached to a web message: base64 as the browser read it, plus its
+ * type. Whether it arrived by paste, file picker or drop is the browser's
+ * business — by the time it is here it is just bytes to send.
+ */
 export interface PastedImage {
   data: string;
   mimeType: string;
@@ -170,6 +174,17 @@ export interface PastedImage {
 
 /** Largest single image accepted from the web, in bytes after base64 decoding. */
 export const MAX_WEB_IMAGE_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Most images one message may carry.
+ *
+ * Exists to keep the body cap meaningful: ten images at 8 MB is already ~107 MB
+ * of base64, more than the route's 24 MB body limit allows, so the realistic
+ * ceiling is smaller than this. The cap is still worth stating, because a folder
+ * dropped on the pane should be refused with a sentence about how many images a
+ * message holds rather than a bare 413 from the body reader.
+ */
+export const MAX_WEB_IMAGES = 10;
 
 export async function webSubmit(
   options: WebOptions,

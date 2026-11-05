@@ -17,6 +17,7 @@ import type http from "node:http";
 import {
   attachWebClient,
   MAX_WEB_IMAGE_BYTES,
+  MAX_WEB_IMAGES,
   webPage,
   webPageVersion,
   webSubmit,
@@ -321,8 +322,9 @@ export async function handleWebRequest(
       res.end(JSON.stringify({ ok: false, error: "unauthorized" }));
       return true;
     }
-    // Room for a couple of pasted images: base64 inflates by a third, and the
-    // cap below is per image.
+    // Room for several images: base64 inflates by a third, and the cap below is
+    // per image. The page caps the count before it sends; this is the backstop
+    // for anything posting here directly.
     const body = await readBody(req, 24_000_000);
     if (body === null) {
       res.writeHead(413, { "Content-Type": "application/json" });
@@ -338,7 +340,8 @@ export async function handleWebRequest(
         ? parsed.images.flatMap((entry) => {
             const image = entry as { data?: unknown; mimeType?: unknown };
             if (typeof image.data !== "string" || typeof image.mimeType !== "string") return [];
-            // A pasted file is untrusted input: refuse anything that is not an
+            // An attached file is untrusted input, whether it came from the
+            // clipboard or the file picker: refuse anything that is not an
             // image, and anything too big to send to a model.
             if (!image.mimeType.startsWith("image/")) return [];
             if (Buffer.byteLength(image.data, "base64") > MAX_WEB_IMAGE_BYTES) return [];
@@ -348,6 +351,13 @@ export async function handleWebRequest(
       if (Array.isArray(parsed.images) && images.length !== parsed.images.length) {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: "unsupported or oversized image" }));
+        return true;
+      }
+      // Its own message, because it is the one refusal a person can act on
+      // without knowing anything about bytes: send fewer pictures.
+      if (images.length > MAX_WEB_IMAGES) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: `at most ${MAX_WEB_IMAGES} images per message` }));
         return true;
       }
     } catch {
@@ -362,8 +372,9 @@ export async function handleWebRequest(
       // logged and ignored — a missing notice must never fail the submission.
       const speaker = (who.email ?? "someone").split("@")[0];
       // Truncated: a long paste would be a Chat API error, and the notice is a
-      // signpost to the conversation, not a copy of it.
-      const attachment = images.length === 0 ? "" : ` [${images.length} image${images.length === 1 ? "" : "s"}]`;
+      // signpost to the conversation, not a copy of it. "attached", not
+      // "pasted": the image may have come from a file picker or a drop.
+      const attachment = images.length === 0 ? "" : ` [${images.length} image${images.length === 1 ? "" : "s"} attached]`;
       const notice = (text.length > 1200 ? `${text.slice(0, 1200)}…` : text) + attachment;
       void seam
         .announce(Number(send[1]), `${speaker} (webui): ${notice}`)

@@ -540,6 +540,164 @@ test("a pasted image rides along with the message and shows straight away", asyn
   }
 });
 
+test("a file picked with the attach button waits in the strip and is sent", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    const doc = h.dom.window.document;
+    const win = h.dom.window;
+
+    // The attach button is a visible handle on a hidden file input: jsdom cannot
+    // open a picker, so the test sets the files and fires `change`, which is what
+    // the browser does after a choice.
+    const input = doc.getElementById("attach-input") as HTMLInputElement;
+    assert.ok(input, "the page must have a file input");
+    assert.equal(input.multiple, true, "several photos at once is the normal case");
+    assert.match(input.getAttribute("accept") ?? "", /image/);
+
+    const jpg = new win.File([new win.Uint8Array([0xff, 0xd8, 0xff])], "beach.jpg", { type: "image/jpeg" });
+    const png = new win.File([new win.Uint8Array([0x89, 0x50, 0x4e, 0x47])], "chart.png", { type: "image/png" });
+    Object.defineProperty(input, "files", { value: [jpg, png], configurable: true });
+    input.dispatchEvent(new win.Event("change"));
+    await h.settle();
+
+    // Both in the strip, named so you can tell which is which.
+    const thumbs = [...doc.querySelectorAll("#attachments img")] as HTMLImageElement[];
+    assert.equal(thumbs.length, 2);
+    assert.match(thumbs[0]!.getAttribute("src") ?? "", /^data:image\/jpeg;base64,/);
+    assert.equal(thumbs[0]!.getAttribute("alt"), "beach.jpg");
+
+    // The input is cleared, so picking the same file again still fires `change`.
+    assert.equal(input.value, "");
+
+    doc.getElementById("send")!.dispatchEvent(new win.Event("submit", { cancelable: true }));
+    await h.settle();
+    const post = h.requests.find((request) => request.method === "POST");
+    const body = JSON.parse(post!.body!) as { images: { mimeType: string }[] };
+    assert.deepEqual(body.images.map((image) => image.mimeType), ["image/jpeg", "image/png"]);
+  } finally {
+    h?.close();
+  }
+});
+
+test("a file dropped on the pane is attached, and the highlight goes away", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    const doc = h.dom.window.document;
+    const win = h.dom.window;
+    const pane = doc.getElementById("pane")!;
+
+    const png = new win.File([new win.Uint8Array([0x89, 0x50, 0x4e, 0x47])], "dropped.png", { type: "image/png" });
+    const dataTransfer = { types: ["Files"], files: [png], dropEffect: "none" };
+
+    const dragenter = new win.Event("dragenter", { cancelable: true }) as unknown as { dataTransfer: unknown };
+    dragenter.dataTransfer = dataTransfer;
+    pane.dispatchEvent(dragenter as unknown as Event);
+    assert.ok(pane.classList.contains("dropping"), "the pane shows it is a drop target");
+
+    // `dragover` must be cancelled or the browser navigates to the file and the
+    // conversation is lost — the one bug a drop handler can cause.
+    const dragover = new win.Event("dragover", { cancelable: true }) as unknown as { dataTransfer: unknown };
+    dragover.dataTransfer = dataTransfer;
+    const notCancelled = pane.dispatchEvent(dragover as unknown as Event);
+    assert.equal(notCancelled, false, "dragover must be prevented");
+    assert.equal(dataTransfer.dropEffect, "copy");
+
+    const drop = new win.Event("drop", { cancelable: true }) as unknown as { dataTransfer: unknown };
+    drop.dataTransfer = dataTransfer;
+    pane.dispatchEvent(drop as unknown as Event);
+    await h.settle();
+
+    assert.equal(pane.classList.contains("dropping"), false, "the highlight must clear");
+    const thumbs = doc.querySelectorAll("#attachments img");
+    assert.equal(thumbs.length, 1);
+    assert.equal(doc.getElementById("attach-notice")!.hidden, true, "nothing to complain about");
+  } finally {
+    h?.close();
+  }
+});
+
+test("a dropped file that is not an image says why instead of vanishing", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    const doc = h.dom.window.document;
+    const win = h.dom.window;
+
+    const pdf = new win.File([new win.Uint8Array([0x25, 0x50])], "invoice.pdf", { type: "application/pdf" });
+    const drop = new win.Event("drop", { cancelable: true }) as unknown as { dataTransfer: unknown };
+    drop.dataTransfer = { types: ["Files"], files: [pdf] };
+    doc.getElementById("pane")!.dispatchEvent(drop as unknown as Event);
+    await h.settle();
+
+    const notice = doc.getElementById("attach-notice")!;
+    assert.equal(notice.hidden, false);
+    assert.match(notice.textContent ?? "", /invoice\.pdf.*is not an image/);
+    assert.equal(doc.querySelectorAll("#attachments img").length, 0);
+  } finally {
+    h?.close();
+  }
+});
+
+test("an image over the size limit is refused here, naming its size", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    const doc = h.dom.window.document;
+    const win = h.dom.window;
+
+    const huge = new win.File([new win.Uint8Array([0x89])], "raw.png", { type: "image/png" });
+    // jsdom computes `size` from the bytes, so the limit is exercised by lying
+    // about it rather than allocating 9 MB per test run.
+    Object.defineProperty(huge, "size", { value: 9 * 1024 * 1024 });
+    const input = doc.getElementById("attach-input") as HTMLInputElement;
+    Object.defineProperty(input, "files", { value: [huge], configurable: true });
+    input.dispatchEvent(new win.Event("change"));
+    await h.settle();
+
+    // Refused before sending, so a message is never lost to a file the server
+    // would have rejected anyway.
+    assert.equal(doc.querySelectorAll("#attachments img").length, 0);
+    assert.match(doc.getElementById("attach-notice")!.textContent ?? "", /raw\.png.*9\.0 MB.*8\.0 MB/);
+  } finally {
+    h?.close();
+  }
+});
+
+test("several images in one message all go, and one can be taken back off", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    const doc = h.dom.window.document;
+    const win = h.dom.window;
+
+    const first = new win.File([new win.Uint8Array([1])], "a.png", { type: "image/png" });
+    const second = new win.File([new win.Uint8Array([2])], "b.png", { type: "image/png" });
+    const paste = new win.Event("paste", { cancelable: true }) as unknown as { clipboardData: unknown };
+    paste.clipboardData = {
+      items: [
+        { kind: "file", type: "image/png", getAsFile: () => first },
+        { kind: "file", type: "image/png", getAsFile: () => second },
+      ],
+    };
+    doc.getElementById("text")!.dispatchEvent(paste as unknown as Event);
+    await h.settle();
+    assert.equal(doc.querySelectorAll("#attachments img").length, 2);
+
+    // One can be taken back off, and only that one.
+    (doc.querySelector("#attachments figure button") as HTMLButtonElement).click();
+    assert.equal(doc.querySelectorAll("#attachments img").length, 1);
+    assert.equal(
+      doc.querySelector("#attachments img")!.getAttribute("alt"),
+      "b.png",
+      "the one that was not removed stays",
+    );
+  } finally {
+    h?.close();
+  }
+});
+
 test("typing saves a draft, so a reload does not lose it", async () => {
   let h: Harness | undefined;
   try {
