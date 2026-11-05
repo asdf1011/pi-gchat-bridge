@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="pi">
+  <title>pi</title>
+  <!--
+    A cartoon slice of cherry pie: a wedge of golden crust, a lattice strip over
+    cherry-red filling, and two cherries.
+
+    Drawn as one 64x64 document with no external references, so the same bytes
+    serve as the favicon, the source for the touch icon, and the README's logo.
+    Two constraints shaped it:
+
+    * It is a wedge, not a circle. At 16px a round icon is a dot; a wedge is
+      still "a piece of something", which is the whole idea.
+    * The silhouette is the icon. The crust is filled and outlined rather than
+      drawn as a hairline, because a stroke that reads at 128px disappears in a
+      tab bar. That is also why the plate was dropped: a pale ellipse under the
+      tip turned into a grey smudge at real size, and the outline alone already
+      sits the slice on the page.
+  -->
+  <defs>
+    <!-- Filling: deep cherry red, warm towards the base like pastry underneath. -->
+    <linearGradient id="filling" x1="0" y1="0" x2="0.4" y2="1">
+      <stop offset="0" stop-color="#ea5566"/>
+      <stop offset="1" stop-color="#a51f34"/>
+    </linearGradient>
+    <!-- Crust: baked gold, lit along the top edge. -->
+    <linearGradient id="crust" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fbcd72"/>
+      <stop offset="1" stop-color="#d18d2c"/>
+    </linearGradient>
+  </defs>
+
+  <!-- The wedge: apex at the bottom, crust along the outer arc. Everything else
+       is clipped to this path, so no decoration can spill past the outline. -->
+  <path d="M32 52 L8 24 A30 30 0 0 1 56 24 Z" fill="url(#filling)"/>
+
+  <clipPath id="clip">
+    <path d="M32 52 L8 24 A30 30 0 0 1 56 24 Z"/>
+  </clipPath>
+
+  <!-- Lattice: two strips, one long and one short, wide enough to survive 16px. -->
+  <g clip-path="url(#clip)" stroke="#eeb14b" stroke-width="4" stroke-linecap="round">
+    <line x1="17" y1="19" x2="45" y2="49"/>
+    <line x1="32" y1="16" x2="32" y2="40"/>
+  </g>
+
+  <!-- Two cherries, sitting high in the wedge where the icon is widest, with a
+       highlight each so they read as fruit rather than as lattice holes. -->
+  <circle cx="23" cy="31" r="5.4" fill="#7d1128"/>
+  <circle cx="23" cy="31" r="5.4" fill="none" stroke="#3f0412" stroke-width="1.3"/>
+  <circle cx="21.2" cy="29.2" r="1.7" fill="#ff97a4" opacity="0.85"/>
+  <circle cx="40.5" cy="33" r="4.6" fill="#7d1128"/>
+  <circle cx="40.5" cy="33" r="4.6" fill="none" stroke="#3f0412" stroke-width="1.2"/>
+  <circle cx="39.1" cy="31.6" r="1.4" fill="#ff97a4" opacity="0.85"/>
+
+  <!-- Crimped crust over the outer arc, then the outline of the whole slice. -->
+  <path d="M8 24 A30 30 0 0 1 56 24" fill="none" stroke="url(#crust)" stroke-width="8" stroke-linecap="round"/>
+  <path d="M8 24 A30 30 0 0 1 56 24" fill="none" stroke="#b06f20" stroke-width="1.6"
+        stroke-dasharray="2.5 5.5" stroke-linecap="round" opacity="0.75"/>
+  <path d="M32 52 L8 24 A30 30 0 0 1 56 24 Z" fill="none" stroke="#8a5a1e"
+        stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/>
+</svg>

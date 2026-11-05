@@ -18,6 +18,7 @@ import {
   attachWebClient,
   MAX_WEB_IMAGE_BYTES,
   MAX_WEB_IMAGES,
+  WEB_ICON,
   webPage,
   webPageVersion,
   webSubmit,
@@ -123,6 +124,28 @@ export async function handleWebRequest(
   // One document, two modes, chosen by the URL: the mount root lists recent
   // conversations, `/<id>/` opens one. `/web/` is kept because it is what the
   // address bar and old bookmarks hold.
+  //
+  // The favicon is matched by suffix like the API below, for the same reason: the
+  // page may be mounted at `/web/` or behind a proxy at `/pi/web/`, and a browser
+  // asks for whichever path the `<link rel="icon">` resolved to from `<base>`.
+  if (
+    (req.method === "GET" || req.method === "HEAD") &&
+    (path.endsWith("/favicon.svg") || path.endsWith("/icon.svg"))
+  ) {
+    res.writeHead(200, {
+      "Content-Type": "image/svg+xml; charset=utf-8",
+      // A day: the icon is a build artifact, so it changes rarely, but it is not
+      // immutable either — a day of the previous icon after a deploy beats an hour
+      // of 404s, and a hard reload always refetches it.
+      "Cache-Control": "public, max-age=86400",
+      // SVG is only rendered as a document when navigated to directly, and this one
+      // carries no script, so no CSP is needed. It does get its own content type:
+      // served as text/html it would be a place to reflect a query string into.
+    });
+    res.end(req.method === "HEAD" ? undefined : WEB_ICON);
+    return true;
+  }
+
   const isPage =
     path === "/" || path === "" || path === "/web" || path === "/web/" || /^\/\d+\/?$/.test(path);
   if ((req.method === "GET" || req.method === "HEAD") && isPage) {

@@ -105,6 +105,46 @@ test("the root and a conversation URL both serve the page", async () => {
   }
 });
 
+test("the favicon is served wherever the page is mounted", async () => {
+  const served = await serve(fakeSeam());
+  try {
+    // The page's <link href="favicon.svg"> resolves against <base>, so behind a
+    // prefix the browser asks for "/pi/web/favicon.svg" — the same bytes have to
+    // come back or the tab shows a blank page icon.
+    for (const path of ["/favicon.svg", "/web/favicon.svg", "/pi/web/favicon.svg", "/icon.svg"]) {
+      const response = await fetch(`${served.base}${path}`);
+      assert.equal(response.status, 200, path);
+      // An explicit charset, so a proxy or browser cannot guess at it.
+      assert.match(response.headers.get("content-type") ?? "", /image\/svg\+xml; charset=utf-8/, path);
+      const body = await response.text();
+      assert.match(body, /^<svg[\s>]/, path);
+      // Inline, self-contained SVG: no external fetch, no script.
+      assert.doesNotMatch(body, /<script|href="http|xlink:href="(?!#)/i, path);
+    }
+    // HEAD is what some crawlers and preview services use; same headers, no body.
+    const head = await fetch(`${served.base}/favicon.svg`, { method: "HEAD" });
+    assert.equal(head.status, 200);
+    assert.equal(await head.text(), "");
+  } finally {
+    await served.close();
+  }
+});
+
+test("the page links its icon relative to the mount", async () => {
+  const served = await serve(fakeSeam());
+  try {
+    const page = await (await fetch(`${served.base}/web/`)).text();
+    // Relative, not "/favicon.svg": a leading slash would point at the proxy's
+    // root and 404 there. And after <base>, because a base href only rebinds the
+    // links that follow it.
+    assert.match(page, /<link rel="icon" type="image\/svg\+xml" href="favicon\.svg">/);
+    assert.doesNotMatch(page, /href="\/favicon\.svg"/);
+    assert.ok(page.indexOf("<base href=\"\">") < page.indexOf("rel=\"icon\""));
+  } finally {
+    await served.close();
+  }
+});
+
 test("the API answers at the mount root as well as under /web", async () => {
   const served = await serve(fakeSeam());
   try {

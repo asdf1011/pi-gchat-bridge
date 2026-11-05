@@ -232,25 +232,46 @@ export async function webSubmit(
  * repository, and therefore the page, is still checked out one directory up. Same
  * file either way, so there is no copy to drift.
  */
-const PAGE_CANDIDATES = [
-  new URL("./web/page.html", import.meta.url),
-  new URL("../../src/adapter/web/page.html", import.meta.url),
-];
+/**
+ * Where a static asset beside the page lives, for both layouts.
+ *
+ * Same two-candidate trick as the page itself: from `src/` (tsx) the asset is
+ * beside this module, from `dist/` the repository is one directory up. Named as
+ * a function rather than a table because there are now two assets and hard-coding
+ * a second array would invite them to drift apart.
+ */
+function assetCandidates(name: string): URL[] {
+  return [
+    new URL(`./web/${name}`, import.meta.url),
+    new URL(`../../src/adapter/web/${name}`, import.meta.url),
+  ];
+}
 
-function readPage(): string {
+function readAsset(name: string): string {
   const failures: string[] = [];
-  for (const candidate of PAGE_CANDIDATES) {
+  for (const candidate of assetCandidates(name)) {
     try {
       return fs.readFileSync(candidate, "utf8");
     } catch (error) {
       failures.push(`${candidate.pathname}: ${(error as Error).message}`);
     }
   }
-  throw new Error(`web page not found — tried ${failures.join(", ")}`);
+  throw new Error(`web asset ${name} not found — tried ${failures.join(", ")}`);
+}
+
+function readPage(): string {
+  return readAsset("page.html");
 }
 
 /** The page as of process start. */
 export const WEB_PAGE = readPage();
+
+/**
+ * The favicon, read once at startup like the page.
+ *
+ * Kept a string rather than bytes: it is UTF-8 SVG and served with an explicit
+ * charset, so the browser never has to sniff. Left out of the version hash on
+ * purpose — a new icon is not a reason to reload every open pane.
 
 /**
  * The page for one request.
@@ -273,6 +294,8 @@ export function webPage(): string {
  * build stamp, so it is right in both modes: fixed for the life of the process
  * normally, and fresh per read under `BRIDGE_WEB_DEV=1`.
  */
+export const WEB_ICON = readAsset("icon.svg");
+
 export function webPageVersion(): string {
   return createHash("sha256").update(webPage()).digest("hex").slice(0, 12);
 }

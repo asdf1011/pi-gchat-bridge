@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>pi bridge</title>
+<meta name="theme-color" content="#a51f34">
 <!--
   Resolve everything against this document's own URL, not the origin root. The
   page may be served at /web/ directly or behind a reverse proxy at /pi/, and a
@@ -11,6 +12,16 @@
   With <base> and relative URLs the same build works at both, with no config.
 -->
 <base href="">
+<!--
+  The tab icon: a slice of cherry pie. After <base>, because a <base href> only
+  rebinds the links that follow it — the icon href has to be mount-relative like
+  every other URL here, or a page behind /pi/ would ask the proxy for
+  /favicon.svg and get its 404 instead of ours. `type=` because Safari ignores an
+  SVG icon without it; the apple-touch-icon is the same file, which iOS
+  rasterises on its own, so there is no PNG to keep in step with the SVG.
+-->
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="apple-touch-icon" href="favicon.svg">
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
