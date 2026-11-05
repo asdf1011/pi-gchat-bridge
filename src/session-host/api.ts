@@ -25,6 +25,39 @@
 import type { ProjectedView } from "./projection.js";
 import type { ArtifactFile } from "../durable/artifacts.js";
 
+/** A model as a picker lists it. Plain data, so it can cross the seam. */
+export interface ModelInfo {
+  provider: string;
+  id: string;
+  label: string;
+  /** Levels this model supports, `["off"]` for a non-reasoning model. */
+  thinkingLevels?: string[];
+}
+
+/** Token and cost totals, summed over every model one conversation has used. */
+export interface UsageTotals {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  total: number;
+  cost: number;
+}
+
+/** What a status card needs about one conversation. Bounded by construction. */
+export interface ConversationState {
+  conversationId: number;
+  /** `"provider/modelId"`. */
+  model: string;
+  provider: string;
+  modelId: string;
+  thinkingLevel?: string;
+  supportedLevels?: string[];
+  usage?: UsageTotals;
+  /** Entries in the active transcript. A count, not the entries. */
+  entries: number;
+}
+
 /** One conversation, as an adapter names and displays it. */
 export interface NamedConversation {
   conversationId: number;
@@ -156,4 +189,44 @@ export interface SessionHost {
     request: SubmitRequest,
     options?: { signal?: AbortSignal },
   ): Promise<SubmitResult>;
+
+  // --- Settings and naming -------------------------------------------------
+  //
+  // Binding-affecting operations are keyed by *name*, not by conversation id:
+  // the binding record is the adapter's name → conversation mapping, and a model
+  // change has to update it in the same commit as the conversation's agent or a
+  // card and the running turn disagree.
+
+  /** Everything a `/status` card needs. `undefined` when the conversation is gone. */
+  state(conversationId: number, options?: { signal?: AbortSignal }): Promise<ConversationState | undefined>;
+
+  /** Models a picker may offer, with their supported thinking levels. */
+  models(options?: { signal?: AbortSignal }): Promise<readonly ModelInfo[]>;
+
+  /**
+   * Change the model (and thinking level) a named conversation runs with.
+   *
+   * One commit: the conversation's agent and the binding record change together,
+   * so the card, the next request and `/status` never disagree.
+   */
+  setModel(
+    name: string,
+    change: { provider: string; modelId: string; thinkingLevel?: string },
+    options?: { signal?: AbortSignal },
+  ): Promise<{ model: string; thinkingLevel?: string }>;
+
+  /** Start `name` on a fresh conversation, leaving the old transcript in storage. */
+  create(name: string, agent: AgentConfig, options?: { signal?: AbortSignal }): Promise<NamedConversation>;
+
+  /** Point `name` at an existing conversation, keeping the previous label. */
+  bind(name: string, conversationId: number, options?: { signal?: AbortSignal }): Promise<NamedConversation | undefined>;
+
+  /** Forget a name's binding. The transcript stays. */
+  unbind(name: string, options?: { signal?: AbortSignal }): Promise<boolean>;
+
+  /** Set a conversation's display label. Adapter-facing text only. */
+  label(name: string, label: string, options?: { signal?: AbortSignal }): Promise<boolean>;
+
+  /** Store-wide token and cost totals. */
+  usage(options?: { signal?: AbortSignal }): Promise<{ models: Record<string, unknown>; tools: Record<string, unknown> }>;
 }

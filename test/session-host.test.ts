@@ -244,3 +244,65 @@ test("submit() reads image parts from disk instead of carrying bytes", async () 
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("the settings operations delegate, and bind/label/create map back to plain names", async () => {
+  const calls: string[] = [];
+  const host = {
+    conversationState: async (id: number) => {
+      calls.push(`state:${id}`);
+      return { conversationId: id, model: "p/m", provider: "p", modelId: "m", entries: 3 };
+    },
+    listModels: async () => {
+      calls.push("models");
+      return [{ provider: "p", id: "m", label: "M", thinkingLevels: ["off"] }];
+    },
+    setModel: async (name: string, change: { model?: string }) => {
+      calls.push(`setModel:${name}`);
+      return { model: "p/m2" };
+    },
+    createNamed: async (name: string) => {
+      calls.push(`create:${name}`);
+      return { conversationId: 9, model: "p/m", createdAt: 5 };
+    },
+    bind: async (name: string, id: number) => {
+      calls.push(`bind:${name}:${id}`);
+      return { conversationId: id, model: "p/m", name: "kept", createdAt: 6 };
+    },
+    unbind: async (name: string) => {
+      calls.push(`unbind:${name}`);
+      return true;
+    },
+    setLabel: async (name: string, label: string) => {
+      calls.push(`label:${name}:${label}`);
+      return true;
+    },
+    usage: async () => {
+      calls.push("usage");
+      return { models: {}, tools: {} };
+    },
+  } as unknown as BridgeHost;
+
+  const seam = inProcessSessionHost({ host, roots: [] });
+
+  assert.equal((await seam.state(1))?.entries, 3);
+  assert.equal((await seam.models())[0].label, "M");
+  assert.deepEqual(await seam.setModel("threads/a", { provider: "p", modelId: "m2" }), { model: "p/m2" });
+  assert.equal((await seam.create("threads/new", { model: { provider: "p", modelId: "m" } })).conversationId, 9);
+  const bound = await seam.bind("threads/a", 4);
+  assert.equal(bound?.conversationId, 4);
+  assert.equal(bound?.label, "kept");
+  assert.equal(await seam.unbind("threads/a"), true);
+  assert.equal(await seam.label("threads/a", "name"), true);
+  assert.deepEqual(await seam.usage(), { models: {}, tools: {} });
+
+  assert.deepEqual(calls, [
+    "state:1",
+    "models",
+    "setModel:threads/a",
+    "create:threads/new",
+    "bind:threads/a:4",
+    "unbind:threads/a",
+    "label:threads/a:name",
+    "usage",
+  ]);
+});

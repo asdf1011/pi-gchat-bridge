@@ -21,6 +21,7 @@ import {
   createRegistry,
   Harness,
   type AgentChange,
+  type AgentState,
   type Conversation,
   type ConversationId,
   type ModelRef,
@@ -31,9 +32,11 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Context } from "@earendil-works/chord";
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai/models";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 import { logger } from "../logger.js";
+import type { ConversationState, ModelInfo, UsageTotals } from "../session-host/api.js";
 import { BindingsDoc, type BindingsValue, type ConversationBinding } from "./bindings-doc.js";
 import { ChatFormat } from "./extensions/chat-format.js";
 import { createCodingToolsWithDelivery } from "./extensions/coding-tools.js";
@@ -257,6 +260,158 @@ export class BridgeHost {
     }, this.context);
   }
 
+  // --- Host-side operations the seam exposes --------------------------------
+  //
+  // These live here, next to the storage, rather than in the seam's in-process
+  // adapter: each is a commit or a model-runtime query, and splitting the
+  // transaction (agent change here, binding there) is exactly the bug the
+  // single-commit ops below exist to prevent.
+
+  /** Models a picker may offer, with the thinking levels each supports. */
+  async listModels(): Promise<ModelInfo[]> {
+    const available = await this.modelRuntime.getAllAvailable();
+    return available
+      .filter(
+        (model) =>
+          model.type === undefined ||
+          model.type === "chat" ||
+          (model as { output?: string[] }).output?.includes("text"),
+      )
+      .map((model) => {
+        const levels = thinkingLevelsOf(this.modelRuntime, model.provider, model.id);
+        return {
+          provider: model.provider,
+          id: model.id,
+          label: model.name ?? model.id,
+          ...(levels === undefined ? {} : { thinkingLevels: levels }),
+        };
+      });
+  }
+
+  /** What a status card needs about one conversation. */
+  async conversationState(conversationId: number): Promise<ConversationState | undefined> {
+    const conversation = await this.harness.conversation(
+      conversationId as ConversationId,
+      this.context,
+    );
+    if (!conversation) return undefined;
+
+    const agent = await conversation.agent(this.context);
+    const view = await conversation.viewState(this.context);
+    const value = view.value as unknown as { entries?: readonly unknown[]; docs?: Record<string, unknown> };
+    view.dispose();
+
+    const model = agent.model;
+    if (!model) return undefined;
+    const usage = totalUsage(value.docs?.["pi.usage"]);
+    return {
+      conversationId,
+      model: `${model.provider}/${model.modelId}`,
+      provider: model.provider,
+      modelId: model.modelId,
+      ...(agent.thinkingLevel ? { thinkingLevel: String(agent.thinkingLevel) } : {}),
+      supportedLevels: thinkingLevelsOf(this.modelRuntime, model.provider, model.modelId),
+      ...(usage === undefined ? {} : { usage }),
+      entries: value.entries?.length ?? 0,
+    };
+  }
+
+  /**
+   * Change a named conversation's model. One commit: agent and binding together.
+   */
+  async setModel(
+    chatKey: string,
+    change: { provider: string; modelId: string; thinkingLevel?: string },
+  ): Promise<{ model: string; thinkingLevel?: string }> {
+    const binding = await this.bindingFor(chatKey);
+    if (!binding) throw new Error(`no conversation for ${chatKey}`);
+    const model = `${change.provider}/${change.modelId}`;
+
+    await this.harness.commit(async (tx) => {
+      await configure(tx, binding.conversationId as ConversationId, {
+        model: { provider: change.provider, modelId: change.modelId },
+        ...(change.thinkingLevel === undefined
+          ? {}
+          : { thinkingLevel: change.thinkingLevel as AgentState["thinkingLevel"] }),
+      });
+      const doc = await tx.doc(BindingsDoc);
+      const current = doc.byChatKey[chatKey];
+      if (current) {
+        doc.byChatKey[chatKey] = {
+          ...current,
+          model,
+          ...(change.thinkingLevel === undefined ? {} : { thinking: change.thinkingLevel }),
+        };
+      }
+    }, this.context);
+
+    return {
+      model,
+      ...(change.thinkingLevel === undefined ? {} : { thinkingLevel: change.thinkingLevel }),
+    };
+  }
+
+  /** Start a name on a fresh conversation, leaving the old transcript alone. */
+  async createNamed(
+    chatKey: string,
+    agent: { model: ModelRef; thinkingLevel?: AgentState["thinkingLevel"]; cwd?: string },
+  ): Promise<ConversationBinding> {
+    const bound = await this.create(chatKey, agent);
+    return bound.binding;
+  }
+
+  /**
+   * Point a name at an existing conversation.
+   *
+   * The previous label is kept (it described the thread, not the transcript);
+   * model and thinking level come from the target's own agent, so a card and
+   * `/status` describe what will actually run.
+   */
+  async bind(chatKey: string, conversationId: number): Promise<ConversationBinding | undefined> {
+    const conversation = await this.harness.conversation(
+      conversationId as ConversationId,
+      this.context,
+    );
+    if (!conversation) return undefined;
+    const agent = await conversation.agent(this.context);
+    const target = agent.model;
+    if (!target) return undefined;
+    const level = agent.thinkingLevel;
+
+    return this.harness.commit(async (tx) => {
+      const doc = await tx.doc(BindingsDoc);
+      const previous = doc.byChatKey[chatKey];
+      const binding: ConversationBinding = {
+        conversationId,
+        model: `${target.provider}/${target.modelId}`,
+        ...(level ? { thinking: String(level) } : {}),
+        createdAt: Date.now(),
+        ...(previous?.name ? { name: previous.name } : {}),
+      };
+      doc.byChatKey[chatKey] = binding;
+      return binding;
+    }, this.context);
+  }
+
+  /** Set a conversation's display label. Adapter-facing text only. */
+  async setLabel(chatKey: string, name: string): Promise<boolean> {
+    return this.harness.commit(async (tx) => {
+      const doc = await tx.doc(BindingsDoc);
+      const current = doc.byChatKey[chatKey];
+      if (!current) return false;
+      doc.byChatKey[chatKey] = { ...current, name };
+      return true;
+    }, this.context);
+  }
+
+  /** Store-wide token and cost totals. */
+  async usage(): Promise<{ models: Record<string, unknown>; tools: Record<string, unknown> }> {
+    return (await this.harness.usage(this.context)) as {
+      models: Record<string, unknown>;
+      tools: Record<string, unknown>;
+    };
+  }
+
   async close(): Promise<void> {
     await this.harness.close(this.context);
     this.lock.release();
@@ -271,4 +426,46 @@ export class BridgeHost {
   describeStorage(dbPath: string): string {
     return path.resolve(dbPath);
   }
+}
+
+/** The thinking levels a model supports, using pi's own rule. */
+function thinkingLevelsOf(
+  models: ModelRuntime,
+  provider: string,
+  modelId: string,
+): string[] | undefined {
+  const model = models.getModel(provider, modelId);
+  if (!model) return undefined;
+  // A non-reasoning model is "off" only; getSupportedThinkingLevels already
+  // applies the model's thinkingLevelMap, so this matches what the TUI offers.
+  return model.reasoning ? getSupportedThinkingLevels(model) : ["off"];
+}
+
+/** The counters one `pi.usage.models` bucket may carry (`totalTokens` is the billed sum). */
+interface UsageCounters {
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  totalTokens?: number;
+  cost?: { total?: number };
+}
+
+/** Sum `docs["pi.usage"]` into the totals a status card shows. */
+function totalUsage(usageDoc: unknown): UsageTotals | undefined {
+  const models = (usageDoc as { models?: Record<string, UsageCounters> } | undefined)?.models;
+  if (!models) return undefined;
+  const totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0 };
+  for (const usage of Object.values(models)) {
+    totals.input += usage.input ?? 0;
+    totals.output += usage.output ?? 0;
+    // Cache tokens are billed (cheaply) and counted in totalTokens, so they are
+    // summed too: dropping them made `/status` show a cache column of 0 while
+    // the ledger held real cache reads.
+    totals.cacheRead += usage.cacheRead ?? 0;
+    totals.cacheWrite += usage.cacheWrite ?? 0;
+    totals.total += usage.totalTokens ?? 0;
+    totals.cost += usage.cost?.total ?? 0;
+  }
+  return totals.total > 0 ? totals : undefined;
 }

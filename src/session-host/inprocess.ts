@@ -28,6 +28,8 @@ import type { BridgeHost } from "../durable/host.js";
 import { projectView, type ProjectedView, type ViewLike } from "./projection.js";
 import type {
   AgentConfig,
+  ConversationState,
+  ModelInfo,
   MessageContent,
   NamedConversation,
   HostInfo,
@@ -111,7 +113,7 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
         model: agent.model,
         ...(agent.thinkingLevel === undefined
           ? {}
-          : { thinkingLevel: agent.thinkingLevel as AgentChange["thinkingLevel"] }),
+          : { thinkingLevel: agent.thinkingLevel as NonNullable<AgentChange["thinkingLevel"]> }),
         ...(agent.cwd === undefined ? {} : { cwd: agent.cwd }),
       });
       return named(name, bound.binding);
@@ -165,6 +167,49 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
       } finally {
         opened.dispose();
       }
+    },
+
+    async state(conversationId: number): Promise<ConversationState | undefined> {
+      return host.conversationState(conversationId);
+    },
+
+    async models(): Promise<readonly ModelInfo[]> {
+      return host.listModels();
+    },
+
+    async setModel(
+      name: string,
+      change: { provider: string; modelId: string; thinkingLevel?: string },
+    ): Promise<{ model: string; thinkingLevel?: string }> {
+      return host.setModel(name, change);
+    },
+
+    async create(name: string, agent: AgentConfig): Promise<NamedConversation> {
+      const binding = await host.createNamed(name, {
+        model: agent.model,
+        ...(agent.thinkingLevel === undefined
+          ? {}
+          : { thinkingLevel: agent.thinkingLevel as NonNullable<AgentChange["thinkingLevel"]> }),
+        ...(agent.cwd === undefined ? {} : { cwd: agent.cwd }),
+      });
+      return named(name, binding);
+    },
+
+    async bind(name: string, conversationId: number): Promise<NamedConversation | undefined> {
+      const binding = await host.bind(name, conversationId);
+      return binding === undefined ? undefined : named(name, binding);
+    },
+
+    async unbind(name: string): Promise<boolean> {
+      return host.unbind(name);
+    },
+
+    async label(name: string, label: string): Promise<boolean> {
+      return host.setLabel(name, label);
+    },
+
+    async usage(): Promise<{ models: Record<string, unknown>; tools: Record<string, unknown> }> {
+      return host.usage();
     },
 
     async submit(conversationId: number, request: SubmitRequest): Promise<SubmitResult> {
