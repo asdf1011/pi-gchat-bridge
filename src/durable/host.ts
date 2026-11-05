@@ -190,6 +190,49 @@ export class BridgeHost {
     return (await this.harness.snapshot(BindingsDoc, this.context)) ?? { byChatKey: {} };
   }
 
+  /**
+   * Conversations ordered by last use, newest first, optionally paged.
+   *
+   * Sorting is here rather than in an adapter because "recently used" is a fact
+   * about the store: the binding carries `updatedAt` (written on every
+   * submission) and falls back to `createdAt` for threads that predate it.
+   */
+  async recentConversations(
+    options: { limit?: number; offset?: number } = {},
+  ): Promise<(ConversationBinding & { chatKey: string })[]> {
+    const all = await this.bindings();
+    const entries = Object.entries(all.byChatKey).map(([chatKey, binding]) => ({ ...binding, chatKey }));
+    entries.sort(
+      (a, b) =>
+        (b.updatedAt ?? b.createdAt) - (a.updatedAt ?? a.createdAt) || b.createdAt - a.createdAt,
+    );
+    const offset = Math.max(0, options.offset ?? 0);
+    const limit = options.limit === undefined ? entries.length : Math.max(0, options.limit);
+    return entries.slice(offset, offset + limit);
+  }
+
+  /**
+   * Record that a conversation was used just now.
+   *
+   * Called on every submission, from either surface. One small commit per
+   * message, which is the price of a recent-conversations list that means
+   * something; without it the list can only be ordered by when each thread was
+   * created, which is not the same thing at all.
+   */
+  async touch(conversationId: number): Promise<void> {
+    const existing = await this.harness.snapshot(BindingsDoc, this.context);
+    const key = Object.entries(existing?.byChatKey ?? {}).find(
+      ([, binding]) => binding.conversationId === conversationId,
+    )?.[0];
+    if (!key) return; // a conversation nobody has named (a validation thread)
+    await this.harness.commit(async (tx) => {
+      const doc = await tx.doc(BindingsDoc);
+      const current = doc.byChatKey[key];
+      if (!current) return;
+      doc.byChatKey[key] = { ...current, updatedAt: Date.now() };
+    }, this.context);
+  }
+
   /** The binding for a Chat conversation key, if it has one. */
   async bindingFor(chatKey: string): Promise<ConversationBinding | undefined> {
     return (await this.bindings()).byChatKey[chatKey];

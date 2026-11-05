@@ -33,6 +33,13 @@ export type ConversationBinding = {
   /** Epoch ms, so a future `/sessions` can sort by recency without opening each conversation. */
   createdAt: number;
   /**
+   * Last time something was said here.
+   *
+   * Absent on bindings written before this existed, which is why every reader
+   * falls back to `createdAt`: an old thread should sort by its age, not by 1970.
+   */
+  updatedAt?: number;
+  /**
    * Display name set with `/name`. Chat-side only: pi-durable conversations have
    * no name of their own, and the model never sees this. Optional, so adding it
    * did not need a document version bump.

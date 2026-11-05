@@ -72,23 +72,22 @@ async function serve(seam: SessionHost, artifactsBaseUrl?: string): Promise<Serv
   };
 }
 
-test("the root redirects to the app", async () => {
+test("the root and a conversation URL both serve the page", async () => {
   const served = await serve(fakeSeam());
   try {
-    const response = await fetch(`${served.base}/`, { redirect: "manual" });
-    assert.equal(response.status, 302);
-    assert.equal(response.headers.get("location"), "/web/");
+    for (const path of ["/", "/web/", "/7/", "/7"]) {
+      const response = await fetch(`${served.base}${path}`, { redirect: "manual" });
+      assert.equal(response.status, 200, path);
+      assert.match(response.headers.get("content-type") ?? "", /text\/html/, path);
+      // One document, two modes: the script reads the id out of the URL.
+      assert.match(await response.text(), /id="index"/, path);
+    }
 
-    // A proxy's mount prefix is stripped for *routes* but a bare "/pi/" is not a
-    // route: it falls through to the caller's 404. Recorded rather than asserted
-    // away, because the tunnel never sends it — cloudflared forwards "/" — and
-    // inventing a redirect for it would hide a misconfigured proxy.
-    const prefixed = await fetch(`${served.base}/pi/`, { redirect: "manual" });
-    assert.equal(prefixed.status, 404);
-
-    // The helper the routes use agrees with the production proxy shape.
+    // A mount prefix is still stripped for API routes, and a bare prefixed root
+    // is not a page: cloudflared forwards "/", and inventing a route for "/pi/"
+    // would hide a proxy that is not stripping what it should.
+    assert.equal((await fetch(`${served.base}/pi/`, { redirect: "manual" })).status, 404);
     assert.equal(webPath("/pi/web/api/conversations"), "/web/api/conversations");
-    assert.equal(webPath("/web/api/conversations"), "/web/api/conversations");
   } finally {
     await served.close();
   }
@@ -202,8 +201,13 @@ test("the conversation list and a submit still answer as before", async () => {
   });
   const served = await serve(seam);
   try {
-    const rows = (await (await fetch(`${served.base}/web/api/conversations`)).json()) as { chatKey: string }[];
-    assert.deepEqual(rows.map((row) => row.chatKey), ["threads/A"]);
+    // The list is paged now: `{items, more, offset, limit}`.
+    const page = (await (await fetch(`${served.base}/web/api/conversations`)).json()) as {
+      items: { chatKey: string }[];
+      more: boolean;
+    };
+    assert.deepEqual(page.items.map((row) => row.chatKey), ["threads/A"]);
+    assert.equal(page.more, false);
 
     announced.length = 0;
     const sent = await fetch(`${served.base}/web/api/c/1/message`, {

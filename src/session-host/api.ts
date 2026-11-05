@@ -65,6 +65,14 @@ export interface NamedConversation {
   name: string;
   /** Human label, when one has been set. */
   label?: string;
+  /**
+   * Last time something was said in this conversation, epoch ms.
+   *
+   * `createdAt` orders a list by age; this orders it by *use*, which is what a
+   * recent-conversations list means. Maintained by the host on every submission,
+   * and equal to `createdAt` until the conversation is used.
+   */
+  lastActivityAt?: number;
   /** `"provider/modelId"`. */
   model: string;
   thinking?: string;
@@ -174,8 +182,13 @@ export interface HostInfo {
 export interface SessionHost {
   info(): HostInfo;
 
-  /** Every conversation the host knows about. */
-  list(options?: { signal?: AbortSignal }): Promise<NamedConversation[]>;
+  /**
+   * Conversations, most recently used first.
+   *
+   * `limit`/`offset` exist because the web index pages through them; a caller
+   * that omits both gets everything, which is what the Chat commands want.
+   */
+  list(options?: { limit?: number; offset?: number; signal?: AbortSignal }): Promise<NamedConversation[]>;
 
   /** One conversation by its adapter-chosen name, if it exists. */
   resolve(name: string, options?: { signal?: AbortSignal }): Promise<NamedConversation | undefined>;

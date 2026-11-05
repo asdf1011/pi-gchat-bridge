@@ -73,7 +73,12 @@ export function serveSessionHost(seam: SessionHost): Host {
 
   host.serve(SessionContract, (_input, _principal, self) => ({
     variant: "default" as const,
-    list: () => seam.list(),
+    list: ({ limit, offset }: { limit?: number; offset?: number }) =>
+      seam.list({
+        ...(limit === undefined ? {} : { limit }),
+        ...(offset === undefined ? {} : { offset }),
+      }),
+    create: ({ name, agent }: { name: string; agent: AgentConfig }) => seam.create(name, agent),
     resolve: async ({ name }) => (await seam.resolve(name)) ?? null,
     getOrCreate: async ({ name, agent }) => seam.getOrCreate(name, agent),
     has: async ({ conversation }) => (await seam.snapshot(conversation)) !== undefined,
@@ -158,9 +163,17 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
       throw notImplemented("info");
     },
 
-    list: async () => {
+    list: async (options?: { limit?: number; offset?: number }) => {
       const ref = await session();
-      return host.root((ctx) => ref.list({}, ctx));
+      return host.root((ctx) =>
+        ref.list(
+          {
+            ...(options?.limit === undefined ? {} : { limit: options.limit }),
+            ...(options?.offset === undefined ? {} : { offset: options.offset }),
+          },
+          ctx,
+        ),
+      );
     },
 
     resolve: async (name: string) => {

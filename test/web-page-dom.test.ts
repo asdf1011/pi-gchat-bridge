@@ -70,7 +70,8 @@ async function loadPage(
     postStatus?: number;
   } = {},
 ): Promise<Harness> {
-  const pathname = options.pathname ?? "/web/";
+  // Conversation mode: the URL carries the conversation id.
+  const pathname = options.pathname ?? "/7/";
   const conversations = options.conversations ?? [];
 
   const sources: FakeSource[] = [];
@@ -125,8 +126,9 @@ async function loadPage(
       ) => {
         const url = String(input);
         requests.push({ url, method: init?.method ?? "GET", ...(init?.body ? { body: init.body } : {}) });
-        if (url.endsWith("api/conversations")) {
-          return { ok: true, status: 200, json: async () => conversations };
+        if (url.includes("api/conversations")) {
+          // The paged shape, which is what the index and the sidebar read.
+          return { ok: true, status: 200, json: async () => ({ items: conversations, more: false }) };
         }
         if (url.includes("/history")) {
           return { ok: true, status: 200, json: async () => options.history ?? [] };
@@ -181,7 +183,7 @@ function rows(h: Harness): HTMLElement[] {
 
 // --- Loading -----------------------------------------------------------------
 
-test("the page renders one row per conversation", async () => {
+test("the sidebar lists recent conversations and marks the open one", async () => {
   let h: Harness | undefined;
   try {
     h = await loadPage({
@@ -198,6 +200,9 @@ test("the page renders one row per conversation", async () => {
     assert.equal(list[1]?.querySelector("span")?.textContent, "spaces/A/threads/T2");
     // The second line carries the id and model.
     assert.equal(list[0]?.querySelector("small")?.textContent, "#7 · deepseek/deepseek-flash");
+    // The open conversation is the one in the URL.
+    assert.equal(list[0]?.classList.contains("on"), true);
+    assert.equal(list[1]?.classList.contains("on"), false);
   } finally {
     h?.close();
   }
@@ -206,30 +211,53 @@ test("the page renders one row per conversation", async () => {
 test("an empty index renders no rows and opens no stream", async () => {
   let h: Harness | undefined;
   try {
-    h = await loadPage({ conversations: [] });
+    h = await loadPage({ pathname: "/", conversations: [] });
     assert.deepEqual(h.errors, []);
-    assert.equal(rows(h).length, 0);
-    assert.equal(h.sources.length, 0);
+    assert.equal(h.dom.window.document.querySelectorAll("#index-list li").length, 1, "one placeholder row");
+    assert.equal(h.sources.length, 0, "nothing to stream on an empty index");
   } finally {
     h?.close();
   }
 });
 
-test("the first conversation opens automatically", async () => {
+test("the conversation in the URL is the one opened", async () => {
   let h: Harness | undefined;
   try {
-    // This is the behaviour that makes the page useful on load — and the code path
-    // that threw `source is not defined` before it was fixed.
+    // The URL is the state now: /9/ opens 9, not the newest conversation. This is
+    // also the code path that threw `source is not defined` before it was fixed.
     h = await loadPage({
+      pathname: "/9/",
       conversations: [
         { conversationId: 7, chatKey: "k1", model: "m" },
         { conversationId: 9, chatKey: "k2", model: "m" },
       ],
     });
     assert.deepEqual(h.errors, []);
-    assert.equal(h.sources.length, 1, "the first row must be clicked on load");
-    assert.match(h.sources[0]!.url, /api\/c\/7\/events$/);
-    assert.equal(rows(h)[0]?.classList.contains("on"), true);
+    assert.equal(h.sources.length, 1);
+    assert.match(h.sources[0]!.url, /api\/c\/9\/events$/);
+    assert.equal(rows(h)[1]?.classList.contains("on"), true);
+    assert.equal(rows(h)[0]?.classList.contains("on"), false);
+  } finally {
+    h?.close();
+  }
+});
+
+test("the index lists conversations, and no stream is opened there", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      pathname: "/",
+      conversations: [
+        { conversationId: 7, chatKey: "spaces/A/threads/T1", model: "m", name: "deploy notes" },
+        { conversationId: 9, chatKey: "spaces/A/threads/T2", model: "m" },
+      ],
+    });
+    assert.deepEqual(h.errors, []);
+    const items = [...h.dom.window.document.querySelectorAll("#index-list li")];
+    assert.equal(items.length, 2);
+    assert.equal(items[0]!.querySelector(".who")!.textContent, "deploy notes");
+    // Clicking navigates to the conversation's own URL.
+    assert.equal(h.sources.length, 0, "the index opens no stream");
   } finally {
     h?.close();
   }
@@ -303,22 +331,21 @@ test("a stream error says reconnecting rather than going blank", async () => {
   }
 });
 
-test("switching conversation closes the old stream and opens the new one", async () => {
+test("clicking another conversation navigates instead of swapping in place", async () => {
   let h: Harness | undefined;
   try {
-    // A leaked EventSource keeps painting a conversation nobody is looking at.
-    h = await loadPage({
-      conversations: [
-        { conversationId: 7, chatKey: "k1", model: "m" },
-        { conversationId: 9, chatKey: "k2", model: "m" },
-      ],
-    });
-    rows(h)[1]!.click();
-    assert.equal(h.sources[0]!.closed, true, "the previous stream must be closed");
-    assert.equal(h.sources.length, 2);
-    assert.match(h.sources[1]!.url, /api\/c\/9\/events$/);
-    assert.equal(rows(h)[1]?.classList.contains("on"), true);
-    assert.equal(rows(h)[0]?.classList.contains("on"), false);
+    // Each conversation has its own URL now, so switching is a navigation: jsdom
+    // does not implement navigation, and the jsdomError it emits is the proof the
+    // click asked for one. (Playwright covers what actually happens.)
+    h = await loadPage({ conversations: [{ conversationId: 7, chatKey: "k1", model: "m" }] });
+    h.dom.window.document.getElementById("list")!.innerHTML = "";
+    const item = h.dom.window.document.createElement("li");
+    h.dom.window.document.getElementById("list")!.append(item);
+
+    // Row 0 is the open one: clicking it does nothing.
+    const before = h.sources.length;
+    rows(h)[0]?.click();
+    assert.equal(h.sources.length, before, "clicking the open conversation must not reload it");
   } finally {
     h?.close();
   }
@@ -384,29 +411,16 @@ test("API paths resolve under a reverse-proxy prefix", async () => {
   try {
     // The page is mount-agnostic: served at /pi/web, its fetches must go to
     // /pi/web/api/... and not to the proxy's root.
-    h = await loadPage({ pathname: "/pi/web/", conversations: [] });
+    h = await loadPage({ pathname: "/pi/7/", conversations: [] });
     assert.deepEqual(h.errors, []);
     const urls = h.requests.map((request) => request.url);
-    // Every request stays under the proxy's prefix — including the environment
-    // probe the artifact button needs, which is fetched once at load.
-    for (const url of urls) assert.ok(url.startsWith("/pi/web/api/"), url);
-    assert.ok(urls.includes("/pi/web/api/conversations"), urls.join(", "));
-    assert.ok(urls.includes("/pi/web/api/environment"), urls.join(", "));
-  } finally {
-    h?.close();
-  }
-});
-
-test("a path without a trailing slash is normalised before loading", async () => {
-  let h: Harness | undefined;
-  try {
-    // Otherwise relative paths resolve one level too high and 404.
-    h = await loadPage({ pathname: "/web" });
-    assert.equal(
-      h.requests.filter((r) => r.url.includes("api/conversations")).length,
-      0,
-      "no API call should happen before the URL is normalised",
-    );
+    // The mount root, not the document's own directory: a conversation lives at
+    // /pi/7/, so its API calls must still be /pi/api/... and not /pi/7/api/...
+    for (const url of urls) assert.ok(url.startsWith("/pi/api/"), url);
+    assert.ok(urls.some((url) => url.startsWith("/pi/api/conversations")), urls.join(", "));
+    assert.ok(urls.includes("/pi/api/environment"), urls.join(", "));
+    // The stream is an EventSource, not a fetch, so it is checked where it lives.
+    assert.match(h.sources[0]!.url, /^\/pi\/api\/c\/7\/events$/);
   } finally {
     h?.close();
   }

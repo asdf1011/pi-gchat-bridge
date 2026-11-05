@@ -98,7 +98,22 @@
   /* Artifacts: a floating toggle and a drawer that is hidden until asked for.
      The pane is an iframe on the artifact origin — a different origin, so it is
      sandboxed there and cannot reach this page's DOM or cookies. */
-  #artifacts-toggle { position: fixed; right: 1rem; bottom: 1rem; z-index: 10;
+  /* The index: recent conversations, newest first, paged. */
+  #index { flex: 1; overflow: auto; padding: 1.5rem 1.25rem 6rem; }
+  #index h1 { font-size: 1.1rem; margin: 0 0 1rem; font-weight: 600; }
+  #index-list { list-style: none; margin: 0; padding: 0; max-width: 46rem; }
+  #index-list li { padding: .6rem .75rem; border-bottom: 1px solid #8882; cursor: pointer;
+    display: flex; gap: .75rem; align-items: baseline; }
+  #index-list li:hover { background: #8881; }
+  #index-list li .who { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #index-list li .when { flex: none; font-size: .8em; opacity: .6; }
+  #index-pager { display: flex; gap: .5rem; align-items: center; margin-top: 1rem;
+    max-width: 46rem; font-size: .85em; opacity: .85; }
+  #index-pager span { flex: 1; opacity: .7; }
+  #new-chat { position: fixed; right: 1rem; bottom: 1rem; z-index: 10;
+    width: 2.75rem; height: 2.75rem; padding: 0; border-radius: 50%; font-size: 1.3rem;
+    border: 1px solid #8886; background: var(--bubble-me); cursor: pointer; }
+  #artifacts-toggle { position: fixed; right: 1rem; bottom: 4.15rem; z-index: 10;
     width: 2.75rem; height: 2.75rem; padding: 0; border-radius: 50%;
     border: 1px solid #8886; background: #8883; font-size: 1.1rem; cursor: pointer; }
   #artifacts-toggle[hidden] { display: none; }
@@ -119,6 +134,15 @@
 </style>
 </head>
 <body>
+<section id="index" hidden>
+  <h1>Conversations</h1>
+  <ul id="index-list"></ul>
+  <nav id="index-pager" hidden>
+    <button id="index-newer" type="button">Newer</button>
+    <span id="index-range"></span>
+    <button id="index-older" type="button">Older</button>
+  </nav>
+</section>
 <ul id="list"></ul>
 <div id="pane">
   <p id="log"></p>
@@ -128,6 +152,7 @@
     <button>Send</button>
   </form>
 </div>
+<button id="new-chat" title="Start a new conversation" aria-label="New chat">＋</button>
 <button id="artifacts-toggle" title="Files this conversation wrote" hidden aria-label="Artifacts">🗂</button>
 <aside id="artifacts" hidden>
   <header>
@@ -156,9 +181,30 @@
  * to /pi/api/... which is wrong -- hence the explicit base of the directory the
  * page was served *from*, normalised to end in '/'.
  */
+/**
+ * The mount root: "/" here, "/pi/" behind a proxy that keeps its prefix.
+ *
+ * A conversation page lives at `/<id>/`, so the document's own directory is one
+ * level too deep for API paths — `rel()` has to resolve against the mount, not
+ * against where this document happens to sit.
+ */
+function mountRoot() {
+  const path = location.pathname;
+  const conversation = /^(.*?)(?:\d+)\/?$/.exec(path);
+  if (conversation) return conversation[1];
+  const web = /^(.*?)\/web\/?$/.exec(path);
+  if (web) return web[1];
+  return path.endsWith('/') ? path : path + '/';
+}
+
 function rel(path) {
-  const here = location.pathname.replace(/[^/]*$/, '');
-  return here + path;
+  return mountRoot() + path;
+}
+
+/** The conversation id this page is showing, from the URL. */
+function conversationIdFromPath() {
+  const match = /(\d+)\/?$/.exec(location.pathname);
+  return match ? Number(match[1]) : undefined;
 }
 
 // State for the single open conversation. Declared here because the functions
@@ -412,8 +458,17 @@ function open(id) {
   });
 }
 
-async function load() {
-  const rows = await (await fetch(rel('api/conversations'))).json();
+/**
+ * The sidebar, in conversation mode: enough context to switch threads without
+ * going back to the index. Clicking one navigates, because the URL is the state.
+ */
+async function loadSidebar() {
+  let rows = [];
+  try {
+    rows = (await (await fetch(rel('api/conversations?limit=30'))).json()).items || [];
+  } catch {
+    rows = [];
+  }
   const list = document.getElementById('list');
   list.innerHTML = '';
   for (const row of rows) {
@@ -421,14 +476,13 @@ async function load() {
     li.innerHTML = '<span></span><small></small>';
     li.firstChild.textContent = row.name || row.chatKey;
     li.lastChild.textContent = '#' + row.conversationId + ' · ' + row.model;
+    if (row.conversationId === current) li.classList.add('on');
     li.onclick = () => {
-      [...list.children].forEach((c) => c.classList.remove('on'));
-      li.classList.add('on');
-      open(row.conversationId);
+      if (row.conversationId === current) return;
+      location.href = mountRoot() + row.conversationId + '/';
     };
     list.append(li);
   }
-  if (rows.length && !current) list.firstChild.click();
 }
 
 // Grow the box to fit what has been typed, so the whole message is visible
@@ -583,13 +637,76 @@ void (async () => {
   }
 })();
 
-// A page served at ".../web" (no trailing slash) resolves relative paths one
-// level too high. Normalise once, preserving any query string.
-if (!location.pathname.endsWith('/')) {
-  location.replace(location.pathname + '/' + location.search);
+// --- The index: recent conversations, paged, plus a new chat. ---
+
+const PAGE_SIZE = 30;
+let indexOffset = 0;
+
+async function loadIndex(offset) {
+  indexOffset = Math.max(0, offset || 0);
+  let page = { items: [], more: false };
+  try {
+    page = await (await fetch(rel('api/conversations?limit=' + PAGE_SIZE + '&offset=' + indexOffset))).json();
+  } catch {
+    page = { items: [], more: false };
+  }
+  const list = document.getElementById('index-list');
+  list.innerHTML = '';
+  if (!Array.isArray(page.items) || page.items.length === 0) {
+    const li = document.createElement('li');
+    li.textContent = indexOffset === 0 ? 'No conversations yet — start one with ＋.' : 'Nothing older.';
+    li.style.cursor = 'default';
+    list.append(li);
+  }
+  for (const row of page.items || []) {
+    const li = document.createElement('li');
+    li.innerHTML = '<span class="who"></span><span class="when"></span>';
+    li.firstChild.textContent = row.name || row.chatKey;
+    li.lastChild.textContent = formatWhen(row.lastActivityAt || row.createdAt);
+    li.title = '#' + row.conversationId + ' · ' + row.model;
+    li.onclick = () => {
+      location.href = mountRoot() + row.conversationId + '/';
+    };
+    list.append(li);
+  }
+
+  const pager = document.getElementById('index-pager');
+  const count = (page.items || []).length;
+  pager.hidden = !(indexOffset > 0 || page.more);
+  document.getElementById('index-newer').disabled = indexOffset === 0;
+  document.getElementById('index-older').disabled = !page.more;
+  document.getElementById('index-range').textContent =
+    count === 0 ? '' : `${indexOffset + 1}–${indexOffset + count}`;
+}
+
+document.getElementById('index-newer').onclick = () => void loadIndex(indexOffset - PAGE_SIZE);
+document.getElementById('index-older').onclick = () => void loadIndex(indexOffset + PAGE_SIZE);
+
+document.getElementById('new-chat').onclick = async () => {
+  try {
+    const response = await fetch(rel('api/conversations'), { method: 'POST' });
+    const created = await response.json();
+    if (created && created.conversationId) location.href = mountRoot() + created.conversationId + '/';
+  } catch {
+    // Nothing sensible to say in the index; the click simply did not work.
+  }
+};
+
+// --- Boot ---
+
+const openId = conversationIdFromPath();
+if (openId === undefined) {
+  document.getElementById('index').hidden = false;
+  document.getElementById('list').hidden = true;
+  document.getElementById('pane').hidden = true;
+  document.getElementById('artifacts-toggle').hidden = true;
+  void loadIndex(0);
 } else {
-  load();
-  setInterval(load, 30000);
+  document.getElementById('index').hidden = true;
+  current = openId;
+  void loadSidebar();
+  open(openId);
+  setInterval(loadSidebar, 30000);
 }
 </script>
 </body>

@@ -39,6 +39,7 @@ export const NamedConversationSchema = Type.Object({
   model: Type.String(),
   thinking: Type.Optional(Type.String()),
   createdAt: Type.Number(),
+  lastActivityAt: Type.Optional(Type.Number()),
 });
 
 export const AgentConfigSchema = Type.Object({
@@ -113,7 +114,15 @@ export const SessionContract = remote("pi-bridge.session", {
   variants: {
     default: {
       methods: {
-        list: method(Type.Object({}), Type.Array(NamedConversationSchema)),
+        list: method(
+          Type.Object({ limit: Type.Optional(Type.Number()), offset: Type.Optional(Type.Number()) }),
+          Type.Array(NamedConversationSchema),
+        ),
+        /** Start a conversation nobody has named yet — the web index's "new chat". */
+        create: method(
+          Type.Object({ name: Type.String(), agent: AgentConfigSchema }),
+          NamedConversationSchema,
+        ),
         resolve: method(
           Type.Object({ name: Type.String() }),
           Type.Union([NamedConversationSchema, Type.Null()]),

@@ -35,7 +35,7 @@ test("the page script parses as JavaScript", () => {
 });
 
 test("identifiers the script assigns are declared", () => {
-  const script = scriptOf(WEB_PAGE);
+  const script = stripStrings(scriptOf(WEB_PAGE));
   // Bare assignments at statement position: `name = ...` not preceded by `.` or
   // a declaration keyword. This is the shape that caused the ReferenceError.
   const declared = new Set<string>();
@@ -63,6 +63,21 @@ test("identifiers the script assigns are declared", () => {
   const undeclared = [...assigned].filter((name) => !declared.has(name) && !globals.has(name));
   assert.deepEqual(undeclared, [], `undeclared identifiers assigned in the page script: ${undeclared.join(", ")}`);
 });
+
+/**
+ * Drop string and template literals before scanning.
+ *
+ * Without this the scan reads inside them: `'?limit=' + n` looks like an
+ * assignment to `limit`, and `<span class="who">` like one to `class`. The guard
+ * is meant to catch a real undeclared variable (`source`, which blanked the pane),
+ * so it has to look at code, not at text.
+ */
+function stripStrings(source: string): string {
+  return source
+    .replace(/`(?:\\.|[^`\\])*`/g, "``")
+    .replace(/'(?:\\.|[^'\\\n])*'/g, "''")
+    .replace(/"(?:\\.|[^"\\\n])*"/g, '""');
+}
 
 test("the page declares the state its handlers use", () => {
   // Named explicitly: these four were all missing, and each is load-bearing.

@@ -90,6 +90,7 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
     thinking?: string;
     name?: string;
     createdAt: number;
+    updatedAt?: number;
   }): NamedConversation => ({
     conversationId: binding.conversationId,
     name,
@@ -97,6 +98,7 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
     model: binding.model,
     ...(binding.thinking === undefined ? {} : { thinking: binding.thinking }),
     createdAt: binding.createdAt,
+    lastActivityAt: binding.updatedAt ?? binding.createdAt,
   });
 
   return {
@@ -104,11 +106,14 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
       return { dbPath: host.dbPath, cwd: host.cwdPath, startedAt: Date.now() };
     },
 
-    async list(): Promise<NamedConversation[]> {
-      const all = await host.bindings();
-      return Object.entries(all.byChatKey)
-        .map(([name, binding]) => named(name, binding))
-        .sort((a, b) => b.createdAt - a.createdAt);
+    async list(options?: { limit?: number; offset?: number }): Promise<NamedConversation[]> {
+      // Ordered and paged by the host: "recently used" is a fact about the store,
+      // and an adapter cannot see `updatedAt` without reading every binding.
+      const rows = await host.recentConversations({
+        ...(options?.limit === undefined ? {} : { limit: options.limit }),
+        ...(options?.offset === undefined ? {} : { offset: options.offset }),
+      });
+      return rows.map((binding) => named(binding.chatKey, binding));
     },
 
     async resolve(name: string): Promise<NamedConversation | undefined> {
@@ -284,6 +289,8 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
         },
         host.context,
       );
+      // Remember that the conversation was used, for the recent list.
+      await host.touch(conversationId).catch(() => {});
       return { submissionId: submission.id as unknown as number };
     },
   };

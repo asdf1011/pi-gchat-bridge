@@ -11,12 +11,37 @@
  * session host, and an adapter process should never be able to answer a health
  * probe on its behalf.
  */
+import { randomUUID } from "node:crypto";
 import type http from "node:http";
 
-import { attachWebClient, webIndex, webPage, webPageVersion, webSubmit } from "./web.js";
+import { attachWebClient, webPage, webPageVersion, webSubmit } from "./web.js";
 import { renderMarkdown } from "./markdown.js";
 import type { SessionHost } from "../session-host/api.js";
 import { logger } from "../logger.js";
+
+/** Keep a number inside a range, without trusting the query string. */
+function clamp(value: number, low: number, high: number): number {
+  return Math.min(high, Math.max(low, value));
+}
+
+/** The shape the page renders for one conversation. */
+function toJson(conversation: {
+  conversationId: number;
+  name: string;
+  label?: string;
+  model: string;
+  createdAt: number;
+  lastActivityAt?: number;
+}): Record<string, unknown> {
+  return {
+    conversationId: conversation.conversationId,
+    chatKey: conversation.name,
+    model: conversation.model,
+    ...(conversation.label === undefined ? {} : { name: conversation.label }),
+    createdAt: conversation.createdAt,
+    lastActivityAt: conversation.lastActivityAt ?? conversation.createdAt,
+  };
+}
 
 /** Who the reverse proxy said is asking. */
 export interface Identity {
@@ -63,25 +88,17 @@ export async function handleWebRequest(
   const log = options.log ?? logger;
   const handleOptions = { seam, model, ...(token ? { token } : {}) };
 
-  // A proxy that mounts us at /pi/ and strips the prefix asks for "/". Redirect
-  // to the app rather than serving it here: the page resolves every URL relative
-  // to its own directory, so serving it at "/" made it request
-  // "/api/conversations" — a 404 — and the conversation list came up empty on
-  // exactly the URL a bookmark would use.
-  if (
-    (req.method === "GET" || req.method === "HEAD") &&
-    (url.pathname === "/" || url.pathname === "")
-  ) {
-    const base = url.pathname.endsWith("/") ? url.pathname : `${url.pathname}/`;
-    res.writeHead(302, { Location: `${base}web/`, "Cache-Control": "no-store" });
-    res.end();
-    return true;
-  }
-
   const path = webPath(url.pathname);
 
-  if (req.method === "GET" && (path === "/web" || path === "/web/")) {
-    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+  // --- Pages ---
+  //
+  // One document, two modes, chosen by the URL: the mount root lists recent
+  // conversations, `/<id>/` opens one. `/web/` is kept because it is what the
+  // address bar and old bookmarks hold.
+  const isPage =
+    path === "/" || path === "" || path === "/web" || path === "/web/" || /^\/\d+\/?$/.test(path);
+  if ((req.method === "GET" || req.method === "HEAD") && isPage) {
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
     res.end(webPage());
     return true;
   }
@@ -149,8 +166,30 @@ export async function handleWebRequest(
   }
 
   if (req.method === "GET" && path === "/web/api/conversations") {
+    const limit = clamp(Number(url.searchParams.get("limit") ?? 30) || 30, 1, 100);
+    const offset = Math.max(0, Number(url.searchParams.get("offset") ?? 0) || 0);
+    // One extra row tells the client whether another page exists without a
+    // second count query.
+    const rows = await seam.list({ limit: limit + 1, offset });
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(await webIndex(handleOptions)));
+    res.end(
+      JSON.stringify({
+        items: rows.slice(0, limit).map(toJson),
+        more: rows.length > limit,
+        offset,
+        limit,
+      }),
+    );
+    return true;
+  }
+
+  // "New chat": a conversation nobody has named yet, created from the default
+  // model. The client navigates to /<id>/ afterwards.
+  if (req.method === "POST" && path === "/web/api/conversations") {
+    const name = `web:${randomUUID()}`;
+    const created = await seam.create(name, { model });
+    res.writeHead(201, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(toJson(created)));
     return true;
   }
 

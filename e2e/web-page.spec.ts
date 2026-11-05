@@ -50,9 +50,20 @@ async function stubApi(
 ): Promise<void> {
   const conversations = options.conversations ?? CONVERSATIONS;
 
-  await page.route("**/api/conversations", (route) =>
-    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(conversations) }),
-  );
+  await page.route("**/api/conversations*", (route) => {
+    if (route.request().method() === "POST") {
+      return route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify({ conversationId: 99, chatKey: "web:new", model: "m", createdAt: Date.now() }),
+      });
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ items: conversations, more: false, offset: 0, limit: 30 }),
+    });
+  });
 
   await page.route("**/api/c/*/events", async (route) => {
     // A real event stream, held open. `route.fulfill` with a body ends the
@@ -75,6 +86,17 @@ async function stubApi(
   // History is a real endpoint the page calls on every open, and the fixture
   // conversations are not in the database, so an unstubbed call 404s. That
   // 404 was the console error failing the "no console errors" assertions.
+  // The page asks for this once at load: the artifact drawer's base URL and the
+  // page version it compares on reconnect. Unstubbed, it 404s and every
+  // zero-console-errors assertion fails on a request nobody was testing.
+  await page.route("**/api/environment", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ artifactsBaseUrl: "", pageVersion: "test" }),
+    }),
+  );
+
   await page.route("**/api/c/*/history", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(options.history ?? []) }),
   );
@@ -88,7 +110,7 @@ async function stubApi(
 test("the page loads and lists conversations with no console errors", async ({ page }) => {
   const errors = watchErrors(page);
   await stubApi(page);
-  await page.goto("/web/");
+  await page.goto("/7/");
 
   await expect(page.locator("#list li")).toHaveCount(2);
   await expect(page.locator("#list li").first()).toContainText("deploy notes");
@@ -99,25 +121,26 @@ test("the page loads and lists conversations with no console errors", async ({ p
   expect(errors, `console errors: ${errors.join(" | ")}`).toEqual([]);
 });
 
-test("the first conversation is selected and streamed on load", async ({ page }) => {
+test("the conversation in the URL is opened and streamed", async ({ page }) => {
   const errors = watchErrors(page);
   const requests: string[] = [];
   page.on("request", (req) => requests.push(req.url()));
   await stubApi(page, {
     frames: [{ event: "text", data: { text: "streamed at load", busy: true } }],
   });
-  await page.goto("/web/");
+  // /9/ is the *second* conversation in the fixture: the URL decides, not order.
+  await page.goto("/9/");
 
-  await expect(page.locator("#list li").first()).toHaveClass(/on/);
+  await expect(page.locator("#list li").nth(1)).toHaveClass(/on/);
   await expect(page.locator("#log .bubble")).toHaveText("streamed at load");
-  expect(requests.some((u) => /\/api\/c\/7\/events$/.test(u))).toBe(true);
+  expect(requests.some((u) => /\/api\/c\/9\/events$/.test(u))).toBe(true);
   expect(errors).toEqual([]);
 });
 
 test("an SSE text frame paints the answer pane", async ({ page }) => {
   const errors = watchErrors(page);
   await stubApi(page, { frames: [{ event: "text", data: { text: "the model said this", busy: true } }] });
-  await page.goto("/web/");
+  await page.goto("/7/");
   await expect(page.locator("#log .bubble")).toHaveText("the model said this");
   expect(errors).toEqual([]);
 });
@@ -139,7 +162,7 @@ test("an SSE text frame paints the answer pane", async ({ page }) => {
 test("tool frames arrive, and a closed stream reads as reconnecting", async ({ page }) => {
   const errors = watchErrors(page);
   await stubApi(page, { frames: [{ event: "tool", data: { name: "bash", status: "running" } }] });
-  await page.goto("/web/");
+  await page.goto("/7/");
   // The stream ends, so the page reports it instead of showing a stale tool line
   // or a blank pane. Either of those would misrepresent the connection state.
   await expect(page.locator("#tool")).toHaveText("reconnecting…");
@@ -153,7 +176,7 @@ test("switching conversation points the stream at the new id", async ({ page }) 
     if (req.url().includes("/events")) eventUrls.push(req.url());
   });
   await stubApi(page);
-  await page.goto("/web/");
+  await page.goto("/7/");
   await expect(page.locator("#list li")).toHaveCount(2);
 
   await page.locator("#list li").nth(1).click();
@@ -167,7 +190,7 @@ test("sending a message posts the trimmed text and clears the box", async ({ pag
   const errors = watchErrors(page);
   const posted: unknown[] = [];
   await stubApi(page, { onPost: (body) => posted.push(body) });
-  await page.goto("/web/");
+  await page.goto("/7/");
   await expect(page.locator("#list li")).toHaveCount(2);
 
   await page.locator("#text").fill("  hello from the browser  ");
@@ -185,7 +208,7 @@ test("layout: the answer pane is visible and the controls are reachable", async 
   // stylesheet looks like.
   await stubApi(page);
   await page.setViewportSize({ width: 1280, height: 800 });
-  await page.goto("/web/");
+  await page.goto("/7/");
 
   const log = page.locator("#log");
   await expect(log).toBeVisible();
@@ -206,7 +229,7 @@ test("layout: the text box grows with the message instead of scrolling its own t
   // writing a minute ago — are invisible while you type.
   await stubApi(page);
   await page.setViewportSize({ width: 1280, height: 800 });
-  await page.goto("/web/");
+  await page.goto("/7/");
 
   const box = page.locator("#text");
   const shortBox = (await box.boundingBox())!;
@@ -252,7 +275,7 @@ test("layout: a grown composer pushes the conversation up instead of overflowing
   // system bar, where 40vh of composer is most of the pane.
   const viewportHeight = 480;
   await page.setViewportSize({ width: 1280, height: viewportHeight });
-  await page.goto("/web/");
+  await page.goto("/7/");
 
   const log = page.locator("#log");
   const form = page.locator("form");
@@ -286,7 +309,7 @@ test("layout: growing the composer keeps the newest message whole", async ({ pag
     })),
   });
   await page.setViewportSize({ width: 1280, height: 700 });
-  await page.goto("/web/");
+  await page.goto("/7/");
   await expect(page.locator("#log .bubble").last()).toBeVisible();
 
   await page.locator("#text").fill(Array.from({ length: 10 }, (_, i) => `line ${i + 1}`).join("\n"));
@@ -317,7 +340,7 @@ test("the running tool's line is inside the reply bubble, not floating under it"
     frames: [{ event: "tool", data: { name: "bash", status: "running", line: "Running: npm run build" } }],
   });
   await page.setViewportSize({ width: 900, height: 600 });
-  await page.goto("/web/");
+  await page.goto("/7/");
 
   const geometry = await page.evaluate(() => {
     const live = document.querySelector("#log .msg.live");
@@ -344,7 +367,7 @@ test("the running tool's line is inside the reply bubble, not floating under it"
 test("the send button keeps its label when the box is wide", async ({ page }) => {
   await stubApi(page);
   await page.setViewportSize({ width: 1600, height: 700 });
-  await page.goto("/web/");
+  await page.goto("/7/");
 
   const fits = await page.evaluate(() => {
     const button = document.querySelector("#send button")!;
@@ -358,7 +381,7 @@ test("the send button keeps its label when the box is wide", async ({ page }) =>
 test("Enter sends, Shift-Enter and Ctrl-Enter add a line instead", async ({ page }) => {
   const posted: unknown[] = [];
   await stubApi(page, { onPost: (body) => posted.push(body) });
-  await page.goto("/web/");
+  await page.goto("/7/");
 
   const box = page.locator("#text");
 
@@ -380,10 +403,38 @@ test("Enter sends, Shift-Enter and Ctrl-Enter add a line instead", async ({ page
   expect(await box.inputValue()).toBe("");
 });
 
-test("a path without a trailing slash is normalised to one", async ({ page }) => {
-  // Without this the page's relative API paths resolve one level too high and
-  // every call 404s.
+test("the index lists recent conversations, pages, and starts a new chat", async ({ page }) => {
+  const errors = watchErrors(page);
+  await stubApi(page, {
+    conversations: [
+      // `lastActivityAt` is what the index sorts and labels by; without it the
+      // rows are undated, which is a fixture bug and not a page one.
+      { conversationId: 7, chatKey: "spaces/A/threads/T1", model: "deepseek/deepseek-flash", name: "deploy notes", createdAt: Date.now() - 7200e3, lastActivityAt: Date.now() - 60e3 },
+      { conversationId: 9, chatKey: "spaces/A/threads/T2", model: "llama-local/lfm3", createdAt: Date.now() - 86400e3, lastActivityAt: Date.now() - 86400e3 },
+    ] as never,
+  });
+  await page.goto("/");
+
+  const items = page.locator("#index-list li");
+  await expect(items).toHaveCount(2);
+  await expect(items.first()).toContainText("deploy notes");
+  // The newest-used conversation is first, and the row shows when.
+  await expect(items.first().locator(".when")).not.toBeEmpty();
+
+  // No stream on the index: nothing is open until you pick something.
+  expect(await page.evaluate(() => performance.getEntriesByType("resource").filter((e) => e.name.includes("/events")).length)).toBe(0);
+
+  // Clicking a row navigates to that conversation's own URL.
+  await items.nth(1).click();
+  await expect.poll(() => new URL(page.url()).pathname).toBe("/9/");
+  await expect(page.locator("#log")).toBeVisible();
+
+  expect(errors).toEqual([]);
+});
+
+test("the new chat button creates a conversation and opens it", async ({ page }) => {
   await stubApi(page);
-  await page.goto("/web");
-  await expect.poll(() => new URL(page.url()).pathname).toBe("/web/");
+  await page.goto("/");
+  await page.locator("#new-chat").click();
+  await expect.poll(() => new URL(page.url()).pathname).toBe("/99/");
 });

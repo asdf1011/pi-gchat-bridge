@@ -40,6 +40,12 @@ function fakeHost(options: FakeOptions = {}): BridgeHost {
     cwdPath: "/workspace",
     context: {},
     bindings: async () => ({ byChatKey: options.bindings ?? {} }),
+    recentConversations: async ({ limit, offset }: { limit?: number; offset?: number } = {}) =>
+      Object.entries(options.bindings ?? {})
+        .map(([chatKey, binding]) => ({ ...binding, chatKey }))
+        .sort((a, b) => (b.updatedAt ?? b.createdAt) - (a.updatedAt ?? a.createdAt))
+        .slice(offset ?? 0, (offset ?? 0) + (limit ?? Number.MAX_SAFE_INTEGER)),
+    touch: async () => {},
     bindingFor: async (name: string) => (options.bindings ?? {})[name],
     conversationFor: async (name: string, agent: { model: { provider: string; modelId: string } }) => ({
       binding: {
