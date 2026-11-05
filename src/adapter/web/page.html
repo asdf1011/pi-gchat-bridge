@@ -14,11 +14,23 @@
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
-  body { margin: 0; font: 15px/1.5 ui-sans-serif, system-ui, sans-serif;
-         display: flex; flex-direction: column; height: 100dvh; }
+  /* One place for the type stack. `system-ui` alone resolves to whatever the
+     distro ships on Linux/Android (DejaVu, Liberation, Nimbus), which reads as
+     dated; naming the modern UI faces first means a machine that has Segoe,
+     SF, Roboto or Inter gets it, and only a bare box falls through. */
+  :root { --sans: system-ui, -apple-system, "Segoe UI Variable Text", "Segoe UI",
+    Inter, Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", "Cascadia Code",
+    "JetBrains Mono", Menlo, Consolas, monospace; }
+  body { margin: 0; font: 15px/1.5 var(--sans);
+         display: flex; flex-direction: column; height: 100dvh;
+         /* Antialiased so the modern faces don't read as chunky on macOS. */
+         -webkit-font-smoothing: antialiased; }
   /* One page per conversation: no list beside it. The header carries the way back
      and the conversation's name, which is all the context the pane needs. */
-  #app { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  /* `min-width: 0` because a flex item's automatic minimum is its content: without
+     it the conversation refuses to narrow and pushes the drawer off the edge. */
+  #app { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
   #app[hidden] { display: none; }
   /* Header, log and composer share one column so the title sits over the
      conversation rather than off at the edge of a wide window. */
@@ -69,7 +81,7 @@
      arrives. Chat shows the same thing inside the message it is editing, and so
      does this — inside the bubble, in the bubble's colours, so the reply and what
      it is doing read as one object. */
-  #log .bubble .status { font: .82em ui-monospace, SFMono-Regular, monospace;
+  #log .bubble .status { font: .82em var(--mono);
     opacity: .75; white-space: pre-wrap; word-break: break-word; }
   #log .bubble .status + * { margin-top: .5rem; }
   #log .images { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .5rem; }
@@ -84,7 +96,7 @@
   #log .body p, #log .body ul, #log .body ol { margin: .5rem 0; }
   #log .body h1, #log .body h2, #log .body h3, #log .body h4 { margin: .9rem 0 .4rem; line-height: 1.25; }
   #log .body h1 { font-size: 1.25em; } #log .body h2 { font-size: 1.15em; } #log .body h3 { font-size: 1.05em; }
-  #log .body code { font-family: ui-monospace, SFMono-Regular, monospace; font-size: .9em;
+  #log .body code { font-family: var(--mono); font-size: .9em;
     background: #8881; padding: .1em .3em; border-radius: 3px; }
   #log .body pre { background: #8881; padding: .6rem .75rem; border-radius: 6px; overflow-x: auto; margin: .6rem 0; }
   #log .body pre code { background: none; padding: 0; }
@@ -95,7 +107,7 @@
   #log .body th { background: #8882; }
   #log .body hr { border: 0; border-top: 1px solid #8886; margin: 1rem 0; }
   #log .body a { color: inherit; }
-  #tool { padding: .25rem 1rem; font: 12px ui-monospace, monospace; opacity: .7; min-height: 1.6em; }
+  #tool { padding: .25rem 1rem; font: 12px var(--mono); opacity: .7; min-height: 1.6em; }
   /* The button sits on the baseline of the box, not stretched to its full
      height, so a grown textarea does not drag it into a tall slab. */
   form { display: flex; gap: .5rem; border-top: 1px solid #8884; align-items: flex-end;
@@ -147,10 +159,22 @@
     width: 2.75rem; height: 2.75rem; padding: 0; border-radius: 50%; font-size: 1.3rem;
     border: 1px solid #8886; background: var(--bubble-me); cursor: pointer; }
   #artifacts-toggle[hidden] { display: none; }
-  #artifacts { position: fixed; top: 0; right: 0; bottom: 0; width: min(38rem, 92vw);
-    z-index: 9; display: flex; flex-direction: column; background: Canvas;
-    border-left: 1px solid #8886; box-shadow: -4px 0 16px #0002; }
+  /* The drawer is a column of the layout, not an overlay: opening it narrows the
+     conversation instead of burying it. As an overlay the pane stayed centred on
+     the *window*, so on anything less than very wide the middle of every answer
+     sat under the panel while empty space remained to the left of it. */
+  #workspace { flex: 1; display: flex; min-width: 0; min-height: 0; }
+  #artifacts { flex: none; display: flex; flex-direction: column; background: Canvas;
+    width: var(--artifacts-width, min(38rem, 45%)); border-left: 1px solid #8886;
+    position: relative; }
   #artifacts[hidden] { display: none; }
+  /* Drag the left edge to resize. Wide enough to hit with a thumb, invisible
+     until you are over it. */
+  #artifacts-resize { position: absolute; top: 0; bottom: 0; left: -4px; width: 9px;
+    cursor: col-resize; touch-action: none; z-index: 1; }
+  #artifacts-resize:hover, #artifacts.resizing #artifacts-resize { background: #8885; }
+  /* Mid-drag, the whole page is the handle: no text selecting under the pointer. */
+  body.resizing { cursor: col-resize; user-select: none; }
   #artifacts header { display: flex; align-items: center; gap: .5rem; padding: .5rem .75rem;
     border-bottom: 1px solid #8884; font-size: .9em; }
   #artifacts header strong { flex: 1; font-weight: 600; }
@@ -194,7 +218,8 @@
     textarea { min-height: 3rem; padding: .55rem .7rem; }
     button { padding: .55rem .85rem; }
     #attachments img { height: 3.2rem; }
-    #artifacts { width: 100vw; border-left: 0; }
+    #artifacts { position: fixed; inset: 0; width: 100%; border-left: 0; }
+    #artifacts-resize { display: none; }
     #new-chat { right: .75rem; bottom: .75rem; }
   }
 </style>
@@ -209,6 +234,7 @@
     <button id="index-older" type="button">Older</button>
   </nav>
 </section>
+<div id="workspace">
 <div id="app" hidden>
   <header id="conv-header">
     <a id="back" href="./" title="All conversations" aria-label="All conversations">←</a>
@@ -227,6 +253,7 @@
 </div>
 <button id="new-chat" title="Start a new conversation" aria-label="New chat">＋</button>
 <aside id="artifacts" hidden>
+  <div id="artifacts-resize" role="separator" aria-orientation="vertical" title="Drag to resize"></div>
   <header>
     <button id="artifacts-back" type="button" title="Back to the list" aria-label="Back to the list" hidden>←</button>
     <strong id="artifacts-title">Artifacts</strong>
@@ -243,6 +270,7 @@
     </div>
   </div>
 </aside>
+</div>
 <script>
 /**
  * A URL relative to wherever this page was served from.
@@ -863,6 +891,54 @@ function setArtifactsOpen(open) {
     if (history.state && history.state.artifact) history.replaceState({}, '', location.pathname);
   }
 }
+
+/* How wide the drawer is: a choice, remembered, in pixels. `min(38rem, 45%)` is
+   the starting point until you drag it — a percentage so a narrow window gets a
+   proportional slice rather than a panel wider than the conversation. */
+const ARTIFACTS_WIDTH_KEY = 'pi-artifacts-width';
+const ARTIFACTS_MIN_W = 16 * 16;
+const CONVERSATION_MIN_W = 15 * 16;
+const artifactsResize = document.getElementById('artifacts-resize');
+const workspace = document.getElementById('workspace');
+
+try {
+  const saved = Number(localStorage.getItem(ARTIFACTS_WIDTH_KEY));
+  if (saved > 0) artifactsPanel.style.width = saved + 'px';
+} catch {
+  // Private mode: the default width is fine.
+}
+
+artifactsResize.addEventListener('pointerdown', (event) => {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  artifactsResize.setPointerCapture(event.pointerId);
+  artifactsPanel.classList.add('resizing');
+  document.body.classList.add('resizing');
+  const startX = event.clientX;
+  const startWidth = artifactsPanel.getBoundingClientRect().width;
+  // Leave the conversation something to live in: on a small window a panel that
+  // can eat the whole width is the overlay problem again, by hand.
+  const widest = Math.max(ARTIFACTS_MIN_W, workspace.clientWidth - CONVERSATION_MIN_W);
+  const move = (moveEvent) => {
+    const width = Math.min(widest, Math.max(ARTIFACTS_MIN_W, startWidth - (moveEvent.clientX - startX)));
+    artifactsPanel.style.width = width + 'px';
+  };
+  const end = () => {
+    artifactsPanel.classList.remove('resizing');
+    document.body.classList.remove('resizing');
+    artifactsResize.removeEventListener('pointermove', move);
+    artifactsResize.removeEventListener('pointerup', end);
+    artifactsResize.removeEventListener('pointercancel', end);
+    try {
+      localStorage.setItem(ARTIFACTS_WIDTH_KEY, String(Math.round(artifactsPanel.getBoundingClientRect().width)));
+    } catch {
+      // The width is a convenience; not worth failing over.
+    }
+  };
+  artifactsResize.addEventListener('pointermove', move);
+  artifactsResize.addEventListener('pointerup', end);
+  artifactsResize.addEventListener('pointercancel', end);
+});
 
 artifactsButton.onclick = () => setArtifactsOpen(!artifactsOpen);
 document.getElementById('artifacts-close').onclick = () => setArtifactsOpen(false);

@@ -626,3 +626,77 @@ test("artifacts: the browser's back gesture returns to the list", async ({ page 
   expect(await page.evaluate(() => document.getElementById("artifacts")!.classList.contains("showing-doc"))).toBe(false);
   await expect(page.locator("#artifact-list li").first()).toBeVisible();
 });
+
+test("artifacts: the drawer narrows the conversation instead of covering it", async ({ page }) => {
+  await stubApi(page);
+  await page.route("**/api/environment", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ artifactsBaseUrl: "https://artifacts.example", pageVersion: "t" }),
+    }),
+  );
+  await page.route("**/api/c/*/artifacts", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
+  );
+
+  // Narrow enough that an overlay would swallow the middle of the conversation —
+  // which is what it used to do, while leaving empty space to the left of it.
+  await page.setViewportSize({ width: 900, height: 700 });
+  await page.goto("/7/");
+  await page.locator("#artifacts-toggle").click();
+
+  const side = await page.evaluate(() => {
+    const box = (id: string) => document.getElementById(id)!.getBoundingClientRect();
+    return { log: box("log").toJSON(), drawer: box("artifacts").toJSON() };
+  });
+  // Side by side, not on top: the log ends where the drawer begins.
+  expect(Math.round(side.log.right)).toBeLessThanOrEqual(Math.round(side.drawer.left) + 1);
+  expect(side.log.width).toBeGreaterThan(200);
+  expect(side.drawer.width).toBeGreaterThan(200);
+});
+
+test("artifacts: dragging the left edge resizes the drawer, and it is remembered", async ({ page }) => {
+  await stubApi(page);
+  await page.route("**/api/environment", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ artifactsBaseUrl: "https://artifacts.example", pageVersion: "t" }),
+    }),
+  );
+  await page.route("**/api/c/*/artifacts", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
+  );
+
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await page.goto("/7/");
+  await page.locator("#artifacts-toggle").click();
+  const before = (await page.locator("#artifacts").boundingBox())!.width;
+
+  const handle = (await page.locator("#artifacts-resize").boundingBox())!;
+  await page.mouse.move(handle.x + handle.width / 2, handle.y + 200);
+  await page.mouse.down();
+  await page.mouse.move(handle.x + handle.width / 2 - 120, handle.y + 200, { steps: 6 });
+  await page.mouse.up();
+
+  const after = (await page.locator("#artifacts").boundingBox())!.width;
+  expect(Math.round(after)).toBeGreaterThan(Math.round(before) + 100);
+  // The conversation kept room to live in.
+  const log = (await page.locator("#log").boundingBox())!;
+  expect(log.width).toBeGreaterThan(200);
+
+  await page.reload();
+  await page.locator("#artifacts-toggle").click();
+  const remembered = (await page.locator("#artifacts").boundingBox())!.width;
+  expect(Math.round(remembered)).toBeGreaterThan(Math.round(before) + 100);
+
+  // And the drag stops before the drawer eats the conversation.
+  const handle2 = (await page.locator("#artifacts-resize").boundingBox())!;
+  await page.mouse.move(handle2.x + handle2.width / 2, handle2.y + 200);
+  await page.mouse.down();
+  await page.mouse.move(5, handle2.y + 200, { steps: 6 });
+  await page.mouse.up();
+  const widest = (await page.locator("#log").boundingBox())!;
+  expect(widest.width).toBeGreaterThanOrEqual(200);
+});

@@ -285,13 +285,19 @@ export function markdownDocument(title: string, body: string): string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(title)}</title>
 <style>
-  :root { color-scheme: light dark; }
+  :root { color-scheme: light dark;
+    /* Same stack as the web page's --sans; repeated because this document is
+       served standalone and cannot inherit the app's custom properties. */
+    --sans: system-ui, -apple-system, "Segoe UI Variable Text", "Segoe UI",
+      Inter, Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", "Cascadia Code",
+      "JetBrains Mono", Menlo, Consolas, monospace; }
   body { margin: 0 auto; padding: 2rem 1.25rem 4rem; max-width: 46rem;
-         font: 16px/1.6 ui-sans-serif, system-ui, sans-serif; }
+         font: 16px/1.6 var(--sans); -webkit-font-smoothing: antialiased; }
   h1, h2, h3, h4 { line-height: 1.25; margin: 2rem 0 .75rem; }
   h1 { font-size: 1.6rem; } h2 { font-size: 1.3rem; } h3 { font-size: 1.1rem; }
   p, li { margin: .5rem 0; }
-  code { font-family: ui-monospace, SFMono-Regular, monospace; font-size: .9em;
+  code { font-family: var(--mono); font-size: .9em;
          background: #8881; padding: .1em .3em; border-radius: 3px; }
   pre { background: #8881; padding: .75rem 1rem; border-radius: 6px; overflow: auto; }
   pre code { background: none; padding: 0; }
