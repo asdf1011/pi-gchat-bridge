@@ -48,6 +48,18 @@ case "$ENGINE" in
     ;;
 esac
 
+# Guard against the failure that actually happened: `node` invoked with a shell
+# script as its argument (`ERR_UNKNOWN_FILE_EXTENSION: Unknown file extension
+# ".sh"`), which crash-loops the container without saying why. Failing once, with
+# the reason, is better than looping.
+case "$ENTRYPOINT" in
+  *.js) ;;
+  *)
+    echo "$(date '+%F %T') [start] ERROR: ENTRYPOINT is not a .js file: '$ENTRYPOINT'" >&2
+    exit 1
+    ;;
+esac
+
 # The durable engine logs beside its own database so the two engines' logs never
 # interleave; the SDK host keeps its historical default.
 if [ "$ENGINE" = "durable" ]; then
@@ -94,6 +106,11 @@ if [ -f "$SUPERVISOR_LOCK" ]; then
   OTHER="$(cat "$SUPERVISOR_LOCK" 2>/dev/null || true)"
   if [ -n "$OTHER" ] && [ "$OTHER" != "$$" ] && kill -0 "$OTHER" 2>/dev/null; then
     echo "$(date '+%F %T') [start] another supervisor is already running (pid $OTHER) — exiting" >&2
+    # Also to the log file: this line is the difference between "the container is
+    # in a restart loop" and "a second supervisor is holding the lock", and the
+    # container's own stdout is not where anyone looks.
+    LOG_FILE="${BRIDGE_LOG_FILE:-$PROJECT_DIR/bridge-durable.log}"
+    echo "$(date '+%F %T') [start] refused to start: supervisor lock held by pid $OTHER (lock: $SUPERVISOR_LOCK)" >> "$LOG_FILE"
     exit 0
   fi
 fi
