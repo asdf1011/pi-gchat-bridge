@@ -61,6 +61,8 @@ async function loadPage(
   options: {
     pathname?: string;
     conversations?: { conversationId: number; chatKey: string; model: string; name?: string }[];
+    /** Messages the fake host returns for one conversation's history. */
+    history?: { role: string; text: string; at?: number; html: string }[];
     postStatus?: number;
   } = {},
 ): Promise<Harness> {
@@ -116,6 +118,12 @@ async function loadPage(
         requests.push({ url, method: init?.method ?? "GET", ...(init?.body ? { body: init.body } : {}) });
         if (url.endsWith("api/conversations")) {
           return { ok: true, status: 200, json: async () => conversations };
+        }
+        if (url.includes("/history")) {
+          return { ok: true, status: 200, json: async () => options.history ?? [] };
+        }
+        if (url.endsWith("api/environment")) {
+          return { ok: true, status: 200, json: async () => ({ artifactsBaseUrl: "" }) };
         }
         if (url.includes("/message")) {
           return { ok: true, status: options.postStatus ?? 202, json: async () => ({ ok: true }) };
@@ -224,9 +232,12 @@ test("a text frame paints the answer pane", async () => {
     h.sources[0]!.emit("text", { text: "hello from the model", busy: true });
     // The pane labels each block, so assert on the live message's body: history
     // and the answer share #log, and the label is presentation.
+    // The pane is chat-shaped now: an avatar, a name line, and the bubble.
     const live = log.querySelector(".msg.live")!;
-    assert.equal(live.lastChild!.textContent, "hello from the model");
-    assert.equal(live.querySelector(".who")!.textContent, "pi");
+    assert.equal(live.querySelector(".bubble")!.textContent, "hello from the model");
+    assert.equal(live.querySelector(".meta .name")!.textContent, "pi");
+    assert.ok(live.querySelector(".avatar"), "pi has an avatar; you do not");
+    assert.equal(live.classList.contains("me"), false);
   } finally {
     h?.close();
   }
@@ -241,7 +252,7 @@ test("a later text frame replaces the earlier one, not appends", async () => {
     h.sources[0]!.emit("text", { text: "first" });
     h.sources[0]!.emit("text", { text: "second" });
     assert.equal(log.querySelectorAll(".msg.live").length, 1, "one live block, not two");
-    assert.equal(log.querySelector(".msg.live")!.lastChild!.textContent, "second");
+    assert.equal(log.querySelector(".msg.live .bubble")!.textContent, "second");
   } finally {
     h?.close();
   }
@@ -377,6 +388,41 @@ test("a path without a trailing slash is normalised before loading", async () =>
       0,
       "no API call should happen before the URL is normalised",
     );
+  } finally {
+    h?.close();
+  }
+});
+
+test("history renders as chat rows: you on the right, pi on the left, with times", async () => {
+  let h: Harness | undefined;
+  try {
+    // The fake serves history for the conversation the page opens.
+    h = await loadPage({
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+      history: [
+        { role: "user", text: "hi", at: Date.now(), html: "<p>hi</p>" },
+        { role: "assistant", text: "hello", at: Date.now(), html: "<p>hello</p>" },
+      ],
+    });
+
+    const log = h.dom.window.document.getElementById("log")!;
+    const rows = [...log.querySelectorAll(".msg")] as HTMLElement[];
+    const chat = rows.filter((row) => !row.classList.contains("live"));
+    assert.equal(chat.length, 2);
+
+    assert.equal(chat[0].classList.contains("me"), true, "your message is the 'me' row");
+    assert.equal(chat[0].querySelector(".avatar"), null, "no avatar for you");
+    assert.equal(chat[0].querySelector(".bubble")!.textContent, "hi");
+
+    assert.equal(chat[1].classList.contains("pi"), true, "pi's message is the 'pi' row");
+    assert.ok(chat[1].querySelector(".avatar"), "pi has an avatar");
+    assert.equal(chat[1].querySelector(".meta .name")!.textContent, "pi");
+    assert.equal(chat[1].querySelector(".bubble")!.textContent, "hello");
+
+    // Timestamps: a time for today, and the full one on hover.
+    const when = chat[1].querySelector("time.at") as HTMLTimeElement;
+    assert.ok(when.textContent && when.textContent.length > 0, "a message from today shows a clock time");
+    assert.ok(when.title.includes(":"), "hover keeps the full timestamp");
   } finally {
     h?.close();
   }

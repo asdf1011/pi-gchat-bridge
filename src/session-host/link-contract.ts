@@ -67,6 +67,7 @@ export const SubmitResultSchema = Type.Object({
 export const TranscriptMessageSchema = Type.Object({
   role: Type.Union([Type.Literal("user"), Type.Literal("assistant")]),
   text: Type.String(),
+  at: Type.Optional(Type.Number()),
 });
 
 export const ArtifactSchema = Type.Object({

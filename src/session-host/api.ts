@@ -109,10 +109,12 @@ export interface SubmitRequest {
 
 export type SubmitResult = { submissionId: number } | { error: string };
 
-/** One message as a viewer shows it: who said it, and what. */
+/** One message as a viewer shows it: who said it, what, and when. */
 export interface TranscriptMessage {
   role: "user" | "assistant";
   text: string;
+  /** Epoch ms the message was created, when the host knows it. */
+  at?: number;
 }
 
 /**

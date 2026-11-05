@@ -569,7 +569,12 @@ export class BridgeHost {
         if (message.role !== "user" && message.role !== "assistant") continue;
         const text = textOf(message);
         if (!text) continue;
-        messages.push({ role: message.role, text: text.slice(0, TRANSCRIPT_MESSAGE_CHARS) });
+        const at = (message as { timestamp?: unknown }).timestamp;
+        messages.push({
+          role: message.role,
+          text: text.slice(0, TRANSCRIPT_MESSAGE_CHARS),
+          ...(typeof at === "number" && Number.isFinite(at) ? { at } : {}),
+        });
       }
     }
     return messages.slice(-limit);

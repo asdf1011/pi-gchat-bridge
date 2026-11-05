@@ -21,11 +21,30 @@
   #list small { display: block; opacity: .6; font-size: .78em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #pane { flex: 1; display: flex; flex-direction: column; min-width: 0; }
   #log { flex: 1; overflow: auto; padding: 1rem; word-break: break-word; margin: 0; }
-  #log .msg { margin: 0 0 1.1rem; }
-  #log .who { display: block; font-size: .72em; text-transform: uppercase; letter-spacing: .04em; opacity: .55; }
-  #log .live { opacity: .95; }
+  /* Chat-shaped rows: the agent on the left with an avatar and a name, you on
+     the right with just a time. Bubbles cap their width so long answers stay
+     readable, and the colours follow the system scheme. */
+  :root { --bubble-pi: #f1f2f4; --bubble-me: #d6e4fd; --bubble-code: Canvas; }
+  @media (prefers-color-scheme: dark) { :root { --bubble-pi: #2a2b2e; --bubble-me: #24405f; } }
+  #log .msg { display: flex; gap: .55rem; margin: 0 0 .9rem; align-items: flex-start; }
+  #log .msg.me { flex-direction: row-reverse; }
+  #log .avatar { flex: none; width: 1.9rem; height: 1.9rem; border-radius: 50%;
+    background: var(--bubble-pi); display: grid; place-items: center; font-size: .95rem; }
+  #log .msg.me .avatar { display: none; }
+  #log .msg > .col { display: flex; flex-direction: column; min-width: 0; max-width: min(46rem, 86%); }
+  #log .msg.me > .col { align-items: flex-end; }
+  #log .meta { display: flex; gap: .4rem; align-items: baseline; margin: 0 0 .15rem .15rem;
+    font-size: .78em; opacity: .65; }
+  #log .meta .name { font-weight: 600; }
+  #log .msg.me .meta { margin: 0 .15rem .15rem 0; }
+  #log .bubble { border-radius: 1rem; padding: .55rem .85rem; overflow-x: auto; }
+  #log .msg.pi .bubble { background: var(--bubble-pi); border-top-left-radius: .3rem; }
+  #log .msg.me .bubble { background: var(--bubble-me); border-top-right-radius: .3rem; }
+  #log .live .bubble { outline: 1px dashed #8884; }
   /* Rendered markdown. The HTML comes from the server's escape-first renderer,
      so every tag here is ours; these rules only make it readable in a pane. */
+  /* Code and quotes sit on the page colour, like Chat's own code blocks. */
+  #log .bubble pre { background: var(--bubble-code); }
   #log .body > :first-child { margin-top: 0; }
   #log .body > :last-child { margin-bottom: 0; }
   #log .body p, #log .body ul, #log .body ol { margin: .5rem 0; }
@@ -134,34 +153,73 @@ function escapeText(text) {
   return holder.innerHTML;
 }
 
+/**
+ * A time as a chat shows one: the clock for today, "yesterday 3:13pm" before
+ * that, and a date once it is older than that. The full timestamp is in the
+ * element's title, so nothing is lost by being brief.
+ */
+function formatWhen(ms) {
+  const at = new Date(ms);
+  if (Number.isNaN(at.getTime())) return '';
+  const now = new Date();
+  const time = at.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const sameDay = at.toDateString() === now.toDateString();
+  if (sameDay) return time;
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (at.toDateString() === yesterday.toDateString()) return 'yesterday ' + time;
+  const sameYear = at.getFullYear() === now.getFullYear();
+  const date = at.toLocaleDateString([], sameYear ? { month: 'short', day: 'numeric' } : { year: 'numeric', month: 'short', day: 'numeric' });
+  return date + ' ' + time;
+}
+
+/** One chat row: avatar and name for pi, just a time for you. */
+function messageRow(role, html, at, live) {
+  const me = role === 'user';
+  const block = document.createElement('div');
+  block.className = 'msg ' + (me ? 'me' : 'pi') + (live ? ' live' : '');
+
+  if (!me) {
+    const avatar = document.createElement('div');
+    avatar.className = 'avatar';
+    avatar.textContent = 'π';
+    block.append(avatar);
+  }
+
+  const col = document.createElement('div');
+  col.className = 'col';
+
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  if (!me) {
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = 'pi';
+    meta.append(name);
+  }
+  const when = document.createElement('time');
+  when.className = 'at';
+  when.textContent = at ? formatWhen(at) : '';
+  if (at) when.title = new Date(at).toLocaleString();
+  meta.append(when);
+
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble body';
+  // Server-rendered markdown: the renderer escapes source before emitting any
+  // tag, so this HTML is ours and cannot carry a script.
+  bubble.innerHTML = html;
+
+  col.append(meta, bubble);
+  block.append(col);
+  return block;
+}
+
 function paint() {
   log.innerHTML = '';
   for (const message of history) {
-    const block = document.createElement('div');
-    block.className = 'msg';
-    const who = document.createElement('span');
-    who.className = 'who';
-    who.textContent = message.role === 'user' ? 'you' : 'pi';
-    const body = document.createElement('div');
-    body.className = 'body';
-    // Server-rendered markdown: the renderer escapes source before emitting any
-    // tag, so this HTML is ours and cannot carry a script.
-    body.innerHTML = message.html || '';
-    block.append(who, body);
-    log.append(block);
+    log.append(messageRow(message.role, message.html || escapeText(message.text || ''), message.at, false));
   }
-  if (liveText) {
-    const block = document.createElement('div');
-    block.className = 'msg live';
-    const who = document.createElement('span');
-    who.className = 'who';
-    who.textContent = 'pi';
-    const body = document.createElement('div');
-    body.className = 'body';
-    body.innerHTML = liveHtml || escapeText(liveText);
-    block.append(who, body);
-    log.append(block);
-  }
+  if (liveText) log.append(messageRow('assistant', liveHtml || escapeText(liveText), undefined, true));
   log.scrollTop = log.scrollHeight;
 }
 
