@@ -22,6 +22,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 import { BridgeHost } from "../src/durable/host.js";
+import { inProcessSessionHost } from "../src/session-host/inprocess.js";
 import { DurableRouter } from "../src/adapter/router.js";
 import { runDurableCommand } from "../src/adapter/commands.js";
 import { REMOVE_SECRET_ACTION, SECRET_ACTION, SET_SECRET_ACTION } from "../src/constants.js";
@@ -85,9 +86,11 @@ async function setup() {
     },
   } as never;
 
+  const seam = inProcessSessionHost({ host, roots: [] });
+
   const router = new DurableRouter(host, { model: { provider: "deepseek", modelId: "flash" } });
   const state = { setTopicCard() {} } as never;
-  return { host, router, client, state, secrets, sent, cards, dir };
+  return { host, seam, router, client, state, secrets, sent, cards, dir };
 }
 
 /** A `/secret ...` typed as a message. */
@@ -116,7 +119,7 @@ function valueSubmission(name: string, value: string): IncomingMessage {
 async function run(ctx: Awaited<ReturnType<typeof setup>>, incoming: IncomingMessage) {
   return runDurableCommand({
     client: ctx.client,
-    host: ctx.host,
+    seam: ctx.seam,
     router: ctx.router,
     state: ctx.state,
     secrets: ctx.secrets,
@@ -186,7 +189,7 @@ test("without a store the command reports it rather than pretending", async () =
   const ctx = await setup();
   const handled = await runDurableCommand({
     client: ctx.client,
-    host: ctx.host,
+    seam: ctx.seam,
     router: ctx.router,
     state: ctx.state,
     // no `secrets`

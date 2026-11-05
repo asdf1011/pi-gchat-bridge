@@ -26,6 +26,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 import { BridgeHost } from "../src/durable/host.js";
+import { inProcessSessionHost } from "../src/session-host/inprocess.js";
 import { DurableRouter } from "../src/adapter/router.js";
 import { runDurableCommand } from "../src/adapter/commands.js";
 import { SECRET_ACTION, SET_SECRET_ACTION } from "../src/constants.js";
@@ -85,8 +86,9 @@ async function setup(secretUsers?: string[]) {
     },
   } as never;
 
+  const seam = inProcessSessionHost({ host, roots: [] });
   const router = new DurableRouter(host, { model: { provider: "deepseek", modelId: "flash" } });
-  return { host, router, client, secrets, sent, cards, secretUsers };
+  return { host, seam, router, client, secrets, sent, cards, secretUsers };
 }
 
 async function run(
@@ -96,7 +98,7 @@ async function run(
 ) {
   return runDurableCommand({
     client: ctx.client,
-    host: ctx.host,
+    seam: ctx.seam,
     router: ctx.router,
     state: {} as never,
     secrets: ctx.secrets,

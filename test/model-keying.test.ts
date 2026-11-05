@@ -28,6 +28,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 import { BridgeHost } from "../src/durable/host.js";
+import { inProcessSessionHost } from "../src/session-host/inprocess.js";
 import { DurableRouter } from "../src/adapter/router.js";
 import { runDurableCommand } from "../src/adapter/commands.js";
 import { conversationStatus, startConversation } from "../src/adapter/queries.js";
@@ -64,6 +65,7 @@ async function setup() {
     // cwdPath is a getter over this field, so only the field is assigned.
     cwd: "/tmp",
   });
+  const seam = inProcessSessionHost({ host, roots: [] });
   const router = new DurableRouter(host, { model: { provider: "deepseek", modelId: "flash" } });
   const sent: string[] = [];
   const cards: unknown[] = [];
@@ -85,7 +87,7 @@ async function setup() {
       topicCards.push({ key, messageName: value.messageName });
     },
   } as never;
-  return { host, router, client, state, sent, cards, topicCards };
+  return { host, seam, router, client, state, sent, cards, topicCards };
 }
 
 /** A `/model` typed as a message. */
@@ -133,7 +135,7 @@ async function run(ctx: Awaited<ReturnType<typeof setup>>, incoming: IncomingMes
     incoming.action?.parameters?.find((p) => p.key === "session")?.value ?? chatKey;
   return runDurableCommand({
     client: ctx.client,
-    host: ctx.host,
+    seam: ctx.seam,
     router: ctx.router,
     state: ctx.state,
     incoming,
@@ -150,11 +152,11 @@ const boundConversation = async (host: BridgeHost, key: string) => (await host.b
 
 test("switching in an existing thread switches it and creates nothing", async () => {
   const ctx = await setup();
-  const before = await startConversation(ctx.host, THREAD_A, { model: { provider: "deepseek", modelId: "flash" } });
+  const before = await startConversation(ctx.seam, THREAD_A, { model: { provider: "deepseek", modelId: "flash" } });
 
   await run(ctx, modelPick({ actionKey: THREAD_A, eventThread: THREAD_A, picked: "llama-local|small" }), THREAD_A);
 
-  const status = await conversationStatus(ctx.host, THREAD_A);
+  const status = await conversationStatus(ctx.seam, THREAD_A);
   assert.equal(status.conversationId, before.conversationId, "no new conversation");
   assert.equal(status.model, "llama-local/small");
 });
@@ -168,7 +170,7 @@ test("a pick in a thread with no conversation starts it there, with or without a
     assert.ok(bound, `bound to ${THREAD_A} (eventThread=${eventThread ?? "absent"})`);
     assert.equal(await boundConversation(ctx.host, SPACE), undefined, "must not fall back to the space");
     // The next message in that thread must find the conversation the pick started.
-    const status = await conversationStatus(ctx.host, THREAD_A);
+    const status = await conversationStatus(ctx.seam, THREAD_A);
     assert.equal(status.model, "deepseek/flash");
   }
 });
@@ -185,13 +187,13 @@ test("a pick at top level (no thread) binds to the space", async () => {
 
 test("switching one thread leaves its siblings alone", async () => {
   const ctx = await setup();
-  const a = await startConversation(ctx.host, THREAD_A, { model: { provider: "deepseek", modelId: "flash" } });
-  const b = await startConversation(ctx.host, THREAD_B, { model: { provider: "deepseek", modelId: "flash" } });
+  const a = await startConversation(ctx.seam, THREAD_A, { model: { provider: "deepseek", modelId: "flash" } });
+  const b = await startConversation(ctx.seam, THREAD_B, { model: { provider: "deepseek", modelId: "flash" } });
 
   await run(ctx, modelPick({ actionKey: THREAD_A, eventThread: THREAD_A, picked: "llama-local|small" }), THREAD_A);
 
-  const afterA = await conversationStatus(ctx.host, THREAD_A);
-  const afterB = await conversationStatus(ctx.host, THREAD_B);
+  const afterA = await conversationStatus(ctx.seam, THREAD_A);
+  const afterB = await conversationStatus(ctx.seam, THREAD_B);
   assert.equal(afterA.model, "llama-local/small");
   assert.equal(afterB.model, "deepseek/flash", "thread B keeps its model");
   assert.equal(afterB.conversationId, b.conversationId);
@@ -217,12 +219,12 @@ test("re-rendering the card for a new model never creates a conversation", async
 
 test("a stale pick on an existing conversation still switches, not creates", async () => {
   const ctx = await setup();
-  const existing = await startConversation(ctx.host, THREAD_A, { model: { provider: "deepseek", modelId: "flash" } });
+  const existing = await startConversation(ctx.seam, THREAD_A, { model: { provider: "deepseek", modelId: "flash" } });
   // Clicked twice, as a user does when the first click seems not to take.
   await run(ctx, modelPick({ actionKey: THREAD_A, eventThread: THREAD_A, picked: "llama-local|small" }), THREAD_A);
   await run(ctx, modelPick({ actionKey: THREAD_A, eventThread: THREAD_A, picked: "deepseek|flash" }), THREAD_A);
 
-  const status = await conversationStatus(ctx.host, THREAD_A);
+  const status = await conversationStatus(ctx.seam, THREAD_A);
   assert.equal(status.conversationId, existing.conversationId);
   assert.equal(status.model, "deepseek/flash");
 });

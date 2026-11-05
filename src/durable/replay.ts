@@ -25,6 +25,7 @@ import { AssistantEntry } from "@earendil-works/pi-durable";
 
 import { projectView, type ViewLike } from "../session-host/projection.js";
 import { defaultSettings } from "../adapter/commands.js";
+import { inProcessSessionHost } from "../session-host/inprocess.js";
 import { BridgeHost } from "./host.js";
 
 interface Sample {
@@ -127,7 +128,7 @@ async function main(): Promise<void> {
   const host = await BridgeHost.open({ dbPath: path.join(dir, "replay.sqlite"), cwd: process.cwd() });
   const model = process.env.REPLAY_MODEL_PROVIDER && process.env.REPLAY_MODEL_ID
     ? { provider: process.env.REPLAY_MODEL_PROVIDER, modelId: process.env.REPLAY_MODEL_ID }
-    : defaultModel(host);
+    : await defaultModel(host);
 
   try {
     for (const [index, sample] of samples.entries()) {
@@ -175,12 +176,13 @@ async function main(): Promise<void> {
  * not, so every replay ran on a Bedrock model and failed instantly. Reusing
  * `defaultSettings` means there is one resolver to be wrong in one place.
  */
-function defaultModel(host: BridgeHost): { provider: string; modelId: string } {
-  const defaults = defaultSettings(host, process.cwd());
+async function defaultModel(host: BridgeHost): Promise<{ provider: string; modelId: string }> {
+  const seam = inProcessSessionHost({ host, roots: [] });
+  const defaults = await defaultSettings(seam);
   if (defaults.provider && defaults.modelId) {
     return { provider: defaults.provider, modelId: defaults.modelId };
   }
-  const fallback = host.modelRuntime.getModels()[0];
+  const [fallback] = await seam.models();
   if (!fallback) throw new Error("no models available");
   return { provider: fallback.provider, modelId: fallback.id };
 }

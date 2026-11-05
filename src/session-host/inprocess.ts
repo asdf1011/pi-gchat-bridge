@@ -208,6 +208,14 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
       return host.setLabel(name, label);
     },
 
+    async compact(conversationId: number, instructions?: string): Promise<void> {
+      return host.compact(conversationId, instructions);
+    },
+
+    async abort(conversationId: number): Promise<boolean> {
+      return host.abort(conversationId);
+    },
+
     async usage(): Promise<{ models: Record<string, unknown>; tools: Record<string, unknown> }> {
       return host.usage();
     },

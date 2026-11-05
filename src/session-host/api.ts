@@ -227,6 +227,12 @@ export interface SessionHost {
   /** Set a conversation's display label. Adapter-facing text only. */
   label(name: string, label: string, options?: { signal?: AbortSignal }): Promise<boolean>;
 
+  /** Compact the conversation's context now. Instructions are free text. */
+  compact(conversationId: number, instructions?: string, options?: { signal?: AbortSignal }): Promise<void>;
+
+  /** Stop whatever the conversation is doing. True when something was stopped. */
+  abort(conversationId: number, options?: { signal?: AbortSignal }): Promise<boolean>;
+
   /** Store-wide token and cost totals. */
   usage(options?: { signal?: AbortSignal }): Promise<{ models: Record<string, unknown>; tools: Record<string, unknown> }>;
 }

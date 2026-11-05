@@ -52,7 +52,7 @@ import { logger } from "../logger.js";
 import type { HandleResult } from "../receiver.js";
 import type { StateStore } from "../state.js";
 import type { IncomingMessage } from "../types.js";
-import type { BridgeHost } from "../durable/host.js";
+import type { SessionHost } from "../session-host/api.js";
 import type { ConversationSettingsResult, DefaultSettings, DefaultSettingsResult, SessionInfo } from "../agent-sessions.js";
 import {
   applyModelPick,
@@ -68,7 +68,8 @@ import {
 
 export interface DurableCommandContext {
   client: ChatClient;
-  host: BridgeHost;
+  /** The conversation host. Adapters see this, never the harness behind it. */
+  seam: SessionHost;
   router: DurableRouter;
   /** Remembered `/model` card for the background topic titler. */
   state: StateStore;
@@ -92,27 +93,31 @@ export interface DurableCommandContext {
 }
 
 /** The global default model/thinking, from pi's settings.json (shared with the TUI and cron). */
-export function defaultSettings(host: BridgeHost, cwd: string): DefaultSettings {
+export async function defaultSettings(seam: SessionHost): Promise<DefaultSettings> {
+  const { cwd } = seam.info();
   const settings = SettingsManager.create(cwd, getAgentDir(), { projectTrusted: false });
   const provider = settings.getDefaultProvider();
   const modelId = settings.getDefaultModel();
   const thinkingLevel = settings.getDefaultThinkingLevel();
-  const model = provider && modelId ? host.modelRuntime.getModel(provider, modelId) : undefined;
+  const models = provider && modelId ? await listModels(seam) : [];
+  const model = models.find((entry) => entry.provider === provider && entry.id === modelId);
   return {
     provider,
     modelId,
-    modelLabel: modelId ? `${model?.name ?? modelId}${provider ? ` (${provider})` : ""}` : undefined,
+    modelLabel: modelId ? `${model?.label ?? modelId}${provider ? ` (${provider})` : ""}` : undefined,
     thinkingLevel,
   };
 }
 
 /** Change the defaults. Affects only conversations created afterwards. */
-export function applyDefaultSettings(
-  host: BridgeHost,
-  cwd: string,
+export async function applyDefaultSettings(
+  seam: SessionHost,
   request: { provider: string; modelId: string; thinkingLevel?: string },
-): DefaultSettingsResult {
-  const model = host.modelRuntime.getModel(request.provider, request.modelId);
+): Promise<DefaultSettingsResult> {
+  const cwd = seam.info().cwd;
+  const model = (await listModels(seam)).find(
+    (entry) => entry.provider === request.provider && entry.id === request.modelId,
+  );
   if (!model) return { ok: false, modelLabel: request.modelId, error: `Unknown model ${request.provider}/${request.modelId}` };
   try {
     const settings = SettingsManager.create(cwd, getAgentDir(), { projectTrusted: false });
@@ -122,7 +127,7 @@ export function applyDefaultSettings(
     if (requested) settings.setDefaultThinkingLevel(requested as never);
     return {
       ok: true,
-      modelLabel: `${model.name ?? model.id}${request.provider ? ` (${request.provider})` : ""}`,
+      modelLabel: `${model.label}${request.provider ? ` (${request.provider})` : ""}`,
       thinkingLevel: settings.getDefaultThinkingLevel(),
     };
   } catch (error) {
@@ -141,12 +146,12 @@ const SLASH_COMMANDS: SlashCommand[] = [
   {
     pattern: /^\/new\b/,
     interrupt: true,
-    run: async ({ client, host, router, chatKey, spaceName, threadName, display }) => {
+    run: async ({ client, seam, router, chatKey, spaceName, threadName, display }) => {
       await router.interrupt(chatKey);
-      const current = await conversationStatus(host, chatKey);
-      const defaults = defaultSettings(host, host.cwdPath);
+      const current = await conversationStatus(seam, chatKey);
+      const defaults = await defaultSettings(seam);
       if (!current.isNew && current.provider && current.modelId) {
-        await startConversation(host, chatKey, {
+        await startConversation(seam, chatKey, {
           model: { provider: current.provider, modelId: current.modelId },
           ...(current.thinkingLevel ? { thinkingLevel: current.thinkingLevel as never } : {}),
         });
@@ -177,17 +182,16 @@ const SLASH_COMMANDS: SlashCommand[] = [
   {
     pattern: /^\/compact\b/,
     interrupt: false,
-    run: async ({ client, host, chatKey, spaceName, threadName, display, text }) => {
+    run: async ({ client, seam, chatKey, spaceName, threadName, display, text }) => {
       // Read-only first: compacting must not be the thing that creates a thread's
       // conversation (same rule as /abort and /status).
-      const binding = await host.bindingFor(chatKey);
+      const binding = await seam.resolve(chatKey);
       if (!binding) {
         await client.sendMessage(spaceName, "Nothing to compact yet — send a message first.", threadName);
         return "ok";
       }
-      const bound = await host.conversationFor(chatKey, { model: defaultModelRef(host) });
       const instructions = text.trim().replace(/^\/compact\s*/, "").trim();
-      await bound.conversation.compact(instructions || undefined, host.context);
+      await seam.compact(binding.conversationId, instructions || undefined);
       await client.sendMessage(
         spaceName,
         "Compacting the older part of this conversation in the background — the answer stays available meanwhile.",
@@ -200,13 +204,13 @@ const SLASH_COMMANDS: SlashCommand[] = [
   {
     pattern: /^\/model\b/,
     interrupt: true,
-    run: async ({ client, host, chatKey, spaceName, threadName, display }) => {
-      const models = await listModels(host);
+    run: async ({ client, seam, chatKey, spaceName, threadName, display }) => {
+      const models = await listModels(seam);
       if (models.length === 0) {
         await client.sendMessage(spaceName, "No models configured.", threadName);
         return "ok";
       }
-      const status = await conversationStatus(host, chatKey);
+      const status = await conversationStatus(seam, chatKey);
       await client.createCardMessage(
         spaceName,
         modelPickerCard(models, chatKey, status.model, {
@@ -225,16 +229,16 @@ const SLASH_COMMANDS: SlashCommand[] = [
   {
     pattern: /^\/(settings|defaultmodel)\b/,
     interrupt: true,
-    run: async ({ client, host, spaceName, display }) => {
-      const models = await listModels(host);
+    run: async ({ client, seam, spaceName, display }) => {
+      const models = await listModels(seam);
       if (models.length === 0) {
         await client.sendMessage(spaceName, "No models configured.");
         return "ok";
       }
-      const defaults = defaultSettings(host, host.cwdPath);
+      const defaults = await defaultSettings(seam);
       const supportedLevels =
         defaults.provider && defaults.modelId
-          ? supportedThinkingLevels(host.modelRuntime, defaults.provider, defaults.modelId)
+          ? supportedThinkingLevels(await listModels(seam), defaults.provider, defaults.modelId)
           : undefined;
       await client.createCardMessage(spaceName, settingsCard(models, defaults, { supportedLevels }), "Settings for new conversations.");
       logger.info(`[chat] ${display}: posted settings card (${models.length} models)`);
@@ -246,12 +250,12 @@ const SLASH_COMMANDS: SlashCommand[] = [
     // Read-only, and the one command whose answer is unambiguous about which
     // bridge replied: the SDK host has no such command, so a reply that says
     // "engine=durable" cannot have come from it.
-    run: async ({ client, host, chatKey, spaceName, threadName, display }) => {
-      const binding = await host.bindingFor(chatKey);
-      const status = binding ? await conversationStatus(host, chatKey) : undefined;
+    run: async ({ client, seam, chatKey, spaceName, threadName, display }) => {
+      const binding = await seam.resolve(chatKey);
+      const status = binding ? await conversationStatus(seam, chatKey) : undefined;
       const lines = [
         "**engine=durable**",
-        `db: \`${escapeHtml(host.dbPath)}\``,
+        `db: \`${escapeHtml(seam.info().dbPath)}\``,
         `subscription: \`${escapeHtml(process.env.PUBSUB_SUBSCRIPTION ?? "(unset)")}\``,
         `spaces: \`${escapeHtml(process.env.ALLOWED_SPACES || "(all)")}\``,
         `this thread: ${binding ? `conversation ${status?.conversationId} · ${escapeHtml(status?.model ?? "?")}` : "no conversation yet"}`,
@@ -263,9 +267,9 @@ const SLASH_COMMANDS: SlashCommand[] = [
   },
   {
     pattern: /^\/status\b/,
-    run: async ({ client, host, chatKey, spaceName, threadName, display }) => {
-      const status = await conversationStatus(host, chatKey);
-      const defaults = defaultSettings(host, host.cwdPath);
+    run: async ({ client, seam, chatKey, spaceName, threadName, display }) => {
+      const status = await conversationStatus(seam, chatKey);
+      const defaults = await defaultSettings(seam);
       await client.createCardMessage(
         spaceName,
         statusCard({
@@ -295,13 +299,13 @@ const SLASH_COMMANDS: SlashCommand[] = [
   {
     pattern: /^\/session\b/,
     interrupt: true,
-    run: async ({ client, host, chatKey, spaceName, threadName, display }) => {
-      const status = await conversationStatus(host, chatKey);
+    run: async ({ client, seam, chatKey, spaceName, threadName, display }) => {
+      const status = await conversationStatus(seam, chatKey);
       if (status.isNew) {
         await client.sendMessage(spaceName, "No conversation for this thread yet — send a message first.", threadName);
         return "ok";
       }
-      const binding = await host.bindingFor(chatKey);
+      const binding = await seam.resolve(chatKey);
       const lines = [
         `**Conversation ${status.conversationId}**${binding?.name ? ` — ${escapeHtml(binding.name)}` : ""}`,
         `Model: **${escapeHtml(status.model ?? "?")}**${status.thinkingLevel ? ` · thinking ${escapeHtml(status.thinkingLevel)}` : ""}`,
@@ -318,9 +322,9 @@ const SLASH_COMMANDS: SlashCommand[] = [
   {
     pattern: /^\/name\b/,
     interrupt: true,
-    run: async ({ client, host, chatKey, spaceName, threadName, display, text }) => {
+    run: async ({ client, seam, chatKey, spaceName, threadName, display, text }) => {
       const arg = text.trim().replace(/^\/name\s*/, "").trim();
-      const binding = await host.bindingFor(chatKey);
+      const binding = await seam.resolve(chatKey);
       if (!arg) {
         await client.sendMessage(
           spaceName,
@@ -335,7 +339,7 @@ const SLASH_COMMANDS: SlashCommand[] = [
         await client.sendMessage(spaceName, "No conversation for this thread yet — send a message first.", threadName);
         return "ok";
       }
-      await renameConversation(host, chatKey, arg);
+      await renameConversation(seam, chatKey, arg);
       await client.sendMessage(spaceName, `Conversation named: **${escapeHtml(arg)}**`, threadName);
       logger.info(`[chat] ${display}: named conversation -> ${arg}`);
       return "ok";
@@ -347,7 +351,7 @@ const SLASH_COMMANDS: SlashCommand[] = [
     // the whole point of the card is that the value stays out of the model's way.
     interrupt: true,
     run: async (ctx) => {
-      const { client, host, chatKey, spaceName, threadName, display, text } = ctx;
+      const { client, seam, chatKey, spaceName, threadName, display, text } = ctx;
       const secrets = ctx.secrets;
       if (!isAllowed(display, ctx.secretUsers ?? [])) {
         // Deliberately vague: an unauthorised user should not learn whether
@@ -394,7 +398,7 @@ const SLASH_COMMANDS: SlashCommand[] = [
         const fileFlag = rest.findIndex((arg) => arg === "--file" || arg === "--path");
         if (fileFlag !== -1) {
           const filePath = rest[fileFlag + 1] ?? "";
-          const scope = await host.bindingFor(chatKey);
+          const scope = await seam.resolve(chatKey);
           try {
             secrets.setFile(name, filePath, display, scope ? [String(scope.conversationId)] : undefined);
             await client.sendMessage(
@@ -481,17 +485,17 @@ const SLASH_COMMANDS: SlashCommand[] = [
   {
     pattern: /^\/(resume|sessions|list)\b/,
     interrupt: true,
-    run: async ({ client, host, chatKey, spaceName, threadName, display }) => {
-      const bound = await listConversations(host);
+    run: async ({ client, seam, chatKey, spaceName, threadName, display }) => {
+      const bound = await listConversations(seam);
       if (bound.length === 0) {
         await client.sendMessage(spaceName, "No conversations yet.", threadName);
         return "ok";
       }
-      const sessions: SessionInfo[] = bound.map(({ chatKey: key, binding }) => ({
-        label: binding.name ?? `${path.basename(key)} · ${binding.model}`,
+      const sessions: SessionInfo[] = bound.map((conversation) => ({
+        label: conversation.label ?? `${path.basename(conversation.name)} · ${conversation.model}`,
         // The picker's value is the conversation id; RESUME_ACTION binds to it.
-        file: String(binding.conversationId),
-        mtimeMs: binding.createdAt,
+        file: String(conversation.conversationId),
+        mtimeMs: conversation.createdAt,
       }));
       await client.createCardMessage(spaceName, pickerCard(sessions, chatKey), "Choose a conversation to resume.", threadName);
       logger.info(`[chat] ${display}: posted conversation picker (${sessions.length})`);
@@ -501,16 +505,16 @@ const SLASH_COMMANDS: SlashCommand[] = [
 ];
 
 /** The default model as a ModelRef, for commands that may need to create a conversation. */
-function defaultModelRef(host: BridgeHost): { provider: string; modelId: string } {
-  const defaults = defaultSettings(host, host.cwdPath);
+async function defaultModelRef(seam: SessionHost): Promise<{ provider: string; modelId: string }> {
+  const defaults = await defaultSettings(seam);
   if (defaults.provider && defaults.modelId) return { provider: defaults.provider, modelId: defaults.modelId };
-  const [first] = host.modelRuntime.getModels();
+  const [first] = await listModels(seam);
   if (!first) throw new Error("no model configured");
   return { provider: first.provider, modelId: first.id };
 }
 
 export async function runDurableCommand(ctx: DurableCommandContext): Promise<HandleResult | null> {
-  const { client, host, router, state, incoming, chatKey, actionKey, spaceName, threadName, display, text } = ctx;
+  const { client, seam, router, state, incoming, chatKey, actionKey, spaceName, threadName, display, text } = ctx;
 
   /**
    * Is this user allowed to touch the secret store?
@@ -545,22 +549,22 @@ export async function runDurableCommand(ctx: DurableCommandContext): Promise<Han
         return "ok";
       }
       const [provider = "", modelId = ""] = picked.split("|");
-      const supportedLevels = supportedThinkingLevels(host.modelRuntime, provider, modelId);
-      const models = await listModels(host);
+      const supportedLevels = supportedThinkingLevels(await listModels(seam), provider, modelId);
+      const models = await listModels(seam);
       const label = models.find((m) => m.provider === provider && m.id === modelId)?.label ?? modelId;
 
       if (mode === "settings") {
         await client
           .updateMessageCards(
             incoming.message.name,
-            settingsCard(models, defaultSettings(host, host.cwdPath), { currentValue: picked, supportedLevels }),
+            settingsCard(models, await defaultSettings(seam), { currentValue: picked, supportedLevels }),
             `Defaults — ${label}: thinking levels ${supportedLevels?.join(", ") ?? "(unknown)"}`,
           )
           .catch((err) => logger.error("[chat] card update failed:", (err as Error).message));
         return "ok";
       }
 
-      const status = await conversationStatus(host, chatKey);
+      const status = await conversationStatus(seam, chatKey);
       await client
         .updateMessageCards(
           incoming.message.name,
@@ -589,10 +593,10 @@ export async function runDurableCommand(ctx: DurableCommandContext): Promise<Han
       // A card posted as a new top-level message owns the thread the user's next
       // message will land in, so a pick that starts a conversation must bind
       // there — not to the thread /model was typed in.
-      const status = await conversationStatus(host, chatKey);
+      const status = await conversationStatus(seam, chatKey);
       const targetKey = !status.isNew ? actionKey : chatKey !== spaceName ? chatKey : actionKey;
 
-      const result = await applyModelPick(host, targetKey, {
+      const result = await applyModelPick(seam, targetKey, {
         provider: provider ?? "",
         modelId: modelId ?? "",
         thinkingLevel,
@@ -631,7 +635,7 @@ export async function runDurableCommand(ctx: DurableCommandContext): Promise<Han
         return "ok";
       }
       const [provider, modelId] = picked.split("|");
-      const result = applyDefaultSettings(host, host.cwdPath, {
+      const result = await applyDefaultSettings(seam, {
         provider: provider ?? "",
         modelId: modelId ?? "",
         thinkingLevel: formValue(incoming, "default_thinking_picker"),
@@ -655,7 +659,7 @@ export async function runDurableCommand(ctx: DurableCommandContext): Promise<Han
         return "ok";
       }
       const conversationId = Number(picked);
-      const bound = Number.isFinite(conversationId) && (await rebind(host, actionKey, conversationId));
+      const bound = Number.isFinite(conversationId) && (await rebind(seam, actionKey, conversationId));
       await client
         .updateMessageCards(
           incoming.message.name,
@@ -766,7 +770,7 @@ export async function runDurableCommand(ctx: DurableCommandContext): Promise<Han
       try {
         // Scope to this conversation, not every conversation on the bridge. The
         // id is what a bash `prepare` hook can see; the chatKey is not.
-        const binding = await host.bindingFor(chatKey);
+        const binding = await seam.resolve(chatKey);
         secrets.set(name, value, display, binding ? [String(binding.conversationId)] : undefined);
         await client
           .updateMessageCards(
@@ -797,21 +801,17 @@ export async function runDurableCommand(ctx: DurableCommandContext): Promise<Han
   const trimmed = text.trim();
   for (const command of SLASH_COMMANDS) {
     if (!command.pattern.test(trimmed)) continue;
-    if (command.interrupt && router && (await isBusy(host, chatKey))) await router.interrupt(chatKey);
+    if (command.interrupt && router && (await isBusy(seam, chatKey))) await router.interrupt(chatKey);
     return command.run(ctx);
   }
   return null;
 }
 
 /** Whether a run currently owns the conversation. */
-async function isBusy(host: BridgeHost, chatKey: string): Promise<boolean> {
-  // Read-only: a command must never be the thing that creates a conversation.
-  const binding = await host.bindingFor(chatKey);
-  if (!binding) return false;
-  const conversation = await host.harness.conversation(binding.conversationId as never, host.context);
-  if (!conversation) return false;
-  const view = await conversation.viewState(host.context);
-  const live = (view.value as { docs?: Record<string, unknown> }).docs?.["pi.live"] as { run?: unknown } | undefined;
-  view.dispose();
-  return live?.run !== undefined;
+async function isBusy(seam: SessionHost, chatKey: string): Promise<boolean> {
+  // Read-only: a command must never be the thing that creates a conversation,
+  // which is why this resolves first instead of asking for a conversation.
+  const named = await seam.resolve(chatKey);
+  if (!named) return false;
+  return (await seam.snapshot(named.conversationId))?.busy ?? false;
 }

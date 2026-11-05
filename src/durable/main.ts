@@ -80,8 +80,16 @@ async function main(): Promise<void> {
   const client = new ChatClient(config.serviceAccountPath);
   const state = new StateStore(config.stateFile);
 
-  const defaults = defaultSettings(host, config.cwd);
-  const fallback = host.modelRuntime.getModels()[0];
+  // --- The seam every adapter talks to. ---
+  //
+  // In-process today, but constructed once and passed to each adapter, so the
+  // adapters depend on the interface rather than on this object. The artifact
+  // roots are decided here because deriving artifacts is the host's job: a viewer
+  // asks for a list, it does not walk the transcript and filter paths itself.
+  const seam = inProcessSessionHost({ host, roots: artifactRoots(config.cwd, getAgentDir()) });
+
+  const defaults = await defaultSettings(seam);
+  const [fallback] = await seam.models();
   const defaultModel = defaults.provider && defaults.modelId
     ? { provider: defaults.provider, modelId: defaults.modelId }
     : fallback
@@ -96,14 +104,6 @@ async function main(): Promise<void> {
     ...(defaults.thinkingLevel ? { thinkingLevel: defaults.thinkingLevel as never } : {}),
   });
   logger.info(`[bridge] default model ${defaultModel.provider}/${defaultModel.modelId}`);
-
-  // --- The seam every adapter talks to. ---
-  //
-  // In-process today, but constructed once and passed to each adapter, so the
-  // adapters depend on the interface rather than on this object. The artifact
-  // roots are decided here because deriving artifacts is the host's job: a viewer
-  // asks for a list, it does not walk the transcript and filter paths itself.
-  const seam = inProcessSessionHost({ host, roots: artifactRoots(config.cwd, getAgentDir()) });
 
   // --- Health + /notify, the same surface the SDK host exposes. ---
   if (config.healthPort > 0) {
@@ -351,7 +351,7 @@ async function main(): Promise<void> {
 
     const handled = await runDurableCommand({
       client,
-      host,
+      seam,
       router,
       state,
       secrets,

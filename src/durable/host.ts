@@ -404,6 +404,27 @@ export class BridgeHost {
     }, this.context);
   }
 
+  /** Compact a conversation's context. */
+  async compact(conversationId: number, instructions?: string): Promise<void> {
+    const conversation = await this.harness.conversation(
+      conversationId as ConversationId,
+      this.context,
+    );
+    if (!conversation) throw new Error(`no such conversation: ${conversationId}`);
+    await conversation.compact(instructions, this.context);
+  }
+
+  /** Stop whatever a conversation is doing. */
+  async abort(conversationId: number): Promise<boolean> {
+    const conversation = await this.harness.conversation(
+      conversationId as ConversationId,
+      this.context,
+    );
+    if (!conversation) return false;
+    await conversation.abort(this.context);
+    return true;
+  }
+
   /** Store-wide token and cost totals. */
   async usage(): Promise<{ models: Record<string, unknown>; tools: Record<string, unknown> }> {
     return (await this.harness.usage(this.context)) as {
@@ -452,7 +473,7 @@ interface UsageCounters {
 }
 
 /** Sum `docs["pi.usage"]` into the totals a status card shows. */
-function totalUsage(usageDoc: unknown): UsageTotals | undefined {
+export function totalUsage(usageDoc: unknown): UsageTotals | undefined {
   const models = (usageDoc as { models?: Record<string, UsageCounters> } | undefined)?.models;
   if (!models) return undefined;
   const totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0 };
