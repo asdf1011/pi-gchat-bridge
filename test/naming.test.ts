@@ -163,3 +163,31 @@ test("a conversation the titler refuses is also skipped", async () => {
   assert.equal(calls, 2, "no conversation is asked about twice in one pass");
   assert.deepEqual([...labels.keys()], ["threads/2"]);
 });
+
+test("maxPerPass limits a pass, so a slow titler does not hog the machine", async () => {
+  const labels: string[] = [];
+  const stored = new Map<string, string>();
+  const seam = {
+    list: async () =>
+      [conversation({ conversationId: 1 }), conversation({ conversationId: 2 }), conversation({ conversationId: 3 })].map((c) => ({
+        ...c,
+        ...(stored.has(c.name) ? { label: stored.get(c.name) } : {}),
+      })),
+    firstTurn: async () => ({ userText: "hello", assistantText: "hi" }),
+    label: async (name: string, label: string) => {
+      labels.push(name);
+      stored.set(name, label);
+      return true;
+    },
+  } as unknown as SessionHost;
+
+  const named = await nameUntitledConversations({
+    seam,
+    config,
+    intervalMs: 0,
+    summarize: async () => "title",
+    maxPerPass: 1,
+  });
+  assert.equal(named, 1, "one title per pass");
+  assert.equal(labels.length, 1);
+});

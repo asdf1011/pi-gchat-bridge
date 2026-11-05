@@ -504,7 +504,11 @@ async function main(): Promise<void> {
         timeoutMs: config.topicSummaryTimeoutMs,
         ...(config.topicSummaryApiKey ? { apiKey: config.topicSummaryApiKey } : {}),
       },
-      intervalMs: 250,
+      // One title at a time, with a gap between them: the titler shares this
+      // machine's cores with the conversations it is naming, and a title arriving
+      // a minute late is fine.
+      intervalMs: 5_000,
+      maxPerPass: 10,
     }).then(
       (count) => logger.info(`[naming] pass finished: ${count} conversation(s) named`),
       (error: unknown) => logger.error(`[naming] pass failed: ${(error as Error).message}`),

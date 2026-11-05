@@ -267,6 +267,14 @@ export async function handleWebRequest(
       Connection: "keep-alive",
       // No CORS: the page is served from this origin only.
     });
+    // Node does not put headers on the wire until the first write or an explicit
+    // flush. Without this, a conversation whose first frame is slow (idle threads,
+    // where nothing arrives to flush) leaves the browser waiting for headers that
+    // exist only in memory — the page showed a blank pane for exactly this reason.
+    res.flushHeaders();
+    // And a first byte now, so the headers are actually on the wire rather than
+    // waiting for the first frame.
+    res.write(": stream open\n\n");
     let alive = true;
     const client = {
       open: alive,

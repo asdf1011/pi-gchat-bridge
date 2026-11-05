@@ -98,6 +98,13 @@ export function serveSessionHost(seam: SessionHost): Host {
 
     // The conversation's view is the object's state: a task owns the pi-durable
     // subscription and its abort signal is the last viewer letting go.
+    //
+    // ONE subscription per conversation, opened lazily and kept for the object's
+    // lifetime. The first version opened a new one on every attach and closed it
+    // when the viewer went away — which left the session host holding hundreds of
+    // chord watches over a day of traffic, and new attaches queued behind them.
+    // A subscription that nobody is watching costs almost nothing; a stampede of
+    // them costs the event loop.
     self.task(async (ctx) => {
       const handle = await seam.attach(conversation, (frame) => {
         try {
@@ -106,13 +113,12 @@ export function serveSessionHost(seam: SessionHost): Host {
           // The object was released; nothing left to publish to.
         }
       });
-      if (!handle) return;
-      view.change(ctx, () => handle.snapshot);
+      if (handle) view.change(ctx, () => handle.snapshot);
       await new Promise<void>((resolve) => {
         if (ctx.signal.aborted) resolve();
         else ctx.signal.addEventListener("abort", () => resolve(), { once: true });
       });
-      handle.detach();
+      handle?.detach();
     });
 
     return {
@@ -198,6 +204,7 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
         ref.release();
       }
     },
+
 
     attach: async (conversationId: number, onFrame: (view: ProjectedView) => void): Promise<ViewHandle | undefined> => {
       const ref = await conversationRef(host, conversationId, session);
@@ -286,8 +293,9 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
     setModel: () => {
       throw notImplemented("setModel");
     },
-    create: () => {
-      throw notImplemented("create");
+    create: async (name: string, agent: AgentConfig) => {
+      const root = await session();
+      return host.root((ctx) => root.create({ name, agent }, ctx));
     },
     bind: () => {
       throw notImplemented("bind");

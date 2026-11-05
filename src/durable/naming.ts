@@ -32,6 +32,8 @@ export interface NamingPassOptions {
   intervalMs: number;
   /** How long to wait after a failure, so a dead titler is not hammered. */
   retryAfterMs?: number;
+  /** How many conversations may be attempted in one pass. */
+  maxPerPass?: number;
   /** The titler itself, injectable so the loop can be tested without a server. */
   summarize?: (turn: { userText: string; assistantText: string }, config: TopicSummaryConfig) => Promise<string | undefined>;
 }
@@ -58,6 +60,7 @@ export async function nameUntitledConversations(options: NamingPassOptions): Pro
   const retryAfterMs = Math.max(intervalMs, options.retryAfterMs ?? 60_000);
   const summarize = options.summarize ?? summarizeConversationTopic;
   let named = 0;
+  const maxPerPass = Math.max(1, options.maxPerPass ?? Number.POSITIVE_INFINITY);
   /**
    * Conversations this pass has already tried.
    *
@@ -102,6 +105,7 @@ export async function nameUntitledConversations(options: NamingPassOptions): Pro
         continue;
       }
       named += 1;
+      if (named >= maxPerPass) return named;
       // Also marked attempted: a host that does not reflect the new label instantly
       // would otherwise hand this conversation back and be titled again and again.
       attempted.add(conversation.name);
