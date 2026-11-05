@@ -149,11 +149,11 @@ test("a tool frame reports the newest unfinished call, and null clears it", asyn
   await attachWebClient(options(fake.seam), 1, c);
 
   fake.push(view("", [{ callId: "1", name: "bash", status: "running", arguments: { command: "sleep 10" } }]));
-  // `detail` is the summarising the Chat status line does: the pane shows what is
-  // running, not only which tool.
+  // The line is worded exactly as Chat words it ("Running: `sleep 10`"), because
+  // both surfaces should say the same thing about the same tool.
   assert.deepEqual(c.sent.at(-1), {
     event: "tool",
-    data: { name: "bash", status: "running", output: undefined, detail: "sleep 10" },
+    data: { name: "bash", status: "running", output: undefined, line: "Running: sleep 10" },
   });
 
   fake.push(view("", [{ callId: "1", name: "bash", status: "done" }]));

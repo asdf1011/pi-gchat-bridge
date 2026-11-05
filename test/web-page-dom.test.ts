@@ -276,10 +276,12 @@ test("a tool frame shows in the pane, and null clears it", async () => {
   try {
     h = await loadPage({ conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
     const log = h.dom.window.document.getElementById("log")!;
-    h.sources[0]!.emit("tool", { name: "bash", status: "running", detail: "sleep 10" });
-    // In the pane, next to the live answer — the same place Chat shows it,
-    // rather than a footer line that scrolls out of sight.
-    assert.equal(log.querySelector(".msg.live .status")!.textContent, "bash · running — sleep 10");
+    h.sources[0]!.emit("tool", { name: "bash", status: "running", line: "Running: sleep 10" });
+    // Inside the reply's own bubble, where Chat paints it — and the bubble exists
+    // before there is any text, so the turn has somewhere to land.
+    const bubble = log.querySelector(".msg.live .bubble")!;
+    assert.ok(bubble, "the reply box is created as soon as the turn starts");
+    assert.equal(bubble.querySelector(".status")!.textContent, "Running: sleep 10");
     // With no tool and no answer text there is nothing to say about the turn, so
     // the live row goes away rather than leaving an empty bubble behind.
     h.sources[0]!.emit("tool", null);

@@ -44,6 +44,21 @@ function toolSummary(args: unknown): string {
   return (command || path).slice(0, 90);
 }
 
+/**
+ * The status line for a running tool, worded exactly as Chat words it.
+ *
+ * `toolStatusLine` in `stream.ts` renders "Running: `cmd`" as Chat markdown; this
+ * is the same sentence as plain text, because the web pane shows it inside the
+ * bubble rather than as a patched Chat message. Sharing the wording matters more
+ * than sharing the function: the two surfaces should say the same thing about the
+ * same tool.
+ */
+function toolLine(name: string, args: unknown): string {
+  const detail = toolSummary(args);
+  const label = detail && typeof (args as { command?: unknown })?.command === "string" ? "Running" : `Running ${name}`;
+  return detail ? `${label}: ${detail}` : `${label}…`;
+}
+
 /** One connected client. Kept structural so tests need no HTTP server. */
 export interface SseClient {
   /** Send one event. Must not throw; a dead client is disposed by the caller. */
@@ -97,14 +112,12 @@ export async function attachWebClient(
       // `detail` is the same summarising the Chat status line does — a command
       // or a path — so both surfaces say what is running, not just which tool.
       const tool = projected.tools.filter((t) => t.status !== "done").at(-1);
-      const line = tool ? `${tool.name}:${tool.status}:${toolSummary(tool.arguments)}` : "";
-      if (line !== lastTool) {
-        lastTool = line;
+      const text = tool ? toolLine(tool.name, tool.arguments) : "";
+      if (text !== lastTool) {
+        lastTool = text;
         client.send(
           "tool",
-          tool
-            ? { name: tool.name, status: tool.status, output: tool.output, detail: toolSummary(tool.arguments) }
-            : null,
+          tool ? { name: tool.name, status: tool.status, output: tool.output, line: text } : null,
         );
       }
     } catch (error) {
