@@ -134,6 +134,7 @@ async function main(): Promise<void> {
               seam,
               model: defaultModel,
               ...(config.webToken ? { token: config.webToken } : {}),
+              ...(config.artifactsBaseUrl ? { artifactsBaseUrl: config.artifactsBaseUrl } : {}),
               who,
             }))
           ) {

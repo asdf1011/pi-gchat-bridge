@@ -25,6 +25,27 @@
   form { display: flex; gap: .5rem; padding: .75rem; border-top: 1px solid #8884; }
   textarea { flex: 1; resize: none; height: 3.5rem; font: inherit; padding: .5rem; }
   button { padding: .5rem 1rem; font: inherit; }
+  /* Artifacts: a floating toggle and a drawer that is hidden until asked for.
+     The pane is an iframe on the artifact origin — a different origin, so it is
+     sandboxed there and cannot reach this page's DOM or cookies. */
+  #artifacts-toggle { position: fixed; right: 1rem; bottom: 1rem; z-index: 10;
+    width: 2.75rem; height: 2.75rem; padding: 0; border-radius: 50%;
+    border: 1px solid #8886; background: #8883; font-size: 1.1rem; cursor: pointer; }
+  #artifacts-toggle[hidden] { display: none; }
+  #artifacts { position: fixed; top: 0; right: 0; bottom: 0; width: min(38rem, 92vw);
+    z-index: 9; display: flex; flex-direction: column; background: Canvas;
+    border-left: 1px solid #8886; box-shadow: -4px 0 16px #0002; }
+  #artifacts[hidden] { display: none; }
+  #artifacts header { display: flex; align-items: center; gap: .5rem; padding: .5rem .75rem;
+    border-bottom: 1px solid #8884; font-size: .9em; }
+  #artifacts header strong { flex: 1; font-weight: 600; }
+  #artifacts header button { padding: .15rem .5rem; }
+  #artifact-list { overflow: auto; margin: 0; padding: 0; list-style: none; max-height: 40%; }
+  #artifact-list li { padding: .4rem .75rem; cursor: pointer; border-bottom: 1px solid #8882; font-size: .9em; }
+  #artifact-list li.on { background: #8882; }
+  #artifact-list small { display: block; opacity: .6; font-size: .8em; }
+  #artifact-frame { flex: 1; border: 0; width: 100%; background: #fff0; }
+  #artifact-hint { padding: .5rem .75rem; font-size: .85em; opacity: .7; margin: 0; }
 </style>
 </head>
 <body>
@@ -37,6 +58,17 @@
     <button>Send</button>
   </form>
 </div>
+<button id="artifacts-toggle" title="Files this conversation wrote" hidden aria-label="Artifacts">🗂</button>
+<aside id="artifacts" hidden>
+  <header>
+    <strong>Artifacts</strong>
+    <button id="artifacts-newtab" type="button" title="Open in a new tab">↗</button>
+    <button id="artifacts-close" type="button" title="Close">✕</button>
+  </header>
+  <p id="artifact-hint">Pick a file.</p>
+  <ul id="artifact-list"></ul>
+  <iframe id="artifact-frame" sandbox="allow-scripts allow-popups" referrerpolicy="no-referrer"></iframe>
+</aside>
 <script>
 /**
  * A URL relative to wherever this page was served from.
@@ -119,6 +151,95 @@ document.getElementById('send').onsubmit = async (e) => {
     body: JSON.stringify({ text }),
   });
 };
+
+// --- Artifacts: a drawer over the conversation, hidden until asked for. ---
+//
+// The list comes from this origin (`api/c/<id>/artifacts`), so no CORS. The file
+// itself is framed from the artifact host, which is a *different* origin: it is
+// sandboxed there and cannot read this page's DOM, cookies or storage.
+
+let artifactsBase = '';
+let artifactsOpen = false;
+
+const artifactsButton = document.getElementById('artifacts-toggle');
+const artifactsPanel = document.getElementById('artifacts');
+const artifactsList = document.getElementById('artifact-list');
+const artifactsFrame = document.getElementById('artifact-frame');
+const artifactsHint = document.getElementById('artifact-hint');
+const artifactsNewTab = document.getElementById('artifacts-newtab');
+
+function artifactUrl(key, render) {
+  return artifactsBase + '/c/' + current + '/' + key.split('/').map(encodeURIComponent).join('/') + (render ? '?render' : '');
+}
+
+function showArtifact(key, markdown) {
+  for (const li of artifactsList.children) li.classList.toggle('on', li.dataset.key === key);
+  artifactsHint.hidden = true;
+  artifactsFrame.hidden = false;
+  // Markdown is rendered by the artifact host inside its sandboxed document;
+  // everything else is shown as plain text, never as HTML.
+  artifactsFrame.src = artifactUrl(key, markdown);
+  artifactsNewTab.dataset.key = key;
+  artifactsNewTab.dataset.markdown = markdown ? '1' : '';
+}
+
+async function loadArtifacts() {
+  artifactsList.innerHTML = '';
+  if (!current) return;
+  let rows;
+  try {
+    rows = await (await fetch(rel('api/c/' + current + '/artifacts'))).json();
+  } catch {
+    rows = [];
+  }
+  if (!Array.isArray(rows) || rows.length === 0) {
+    artifactsHint.hidden = false;
+    artifactsHint.textContent = 'No files were written or edited in this conversation.';
+    return;
+  }
+  for (const row of rows) {
+    const li = document.createElement('li');
+    li.dataset.key = row.key;
+    li.innerHTML = '<span></span><small></small>';
+    li.firstChild.textContent = row.key;
+    const counts = [];
+    if (row.wrote) counts.push(row.wrote + (row.wrote === 1 ? ' write' : ' writes'));
+    if (row.edited) counts.push(row.edited + (row.edited === 1 ? ' edit' : ' edits'));
+    li.lastChild.textContent = counts.join(', ');
+    li.onclick = () => showArtifact(row.key, Boolean(row.markdown));
+    artifactsList.append(li);
+  }
+  showArtifact(rows[0].key, Boolean(rows[0].markdown));
+}
+
+function setArtifactsOpen(open) {
+  artifactsOpen = open;
+  artifactsPanel.hidden = !open;
+  if (open) void loadArtifacts();
+  else artifactsFrame.src = 'about:blank';
+}
+
+artifactsButton.onclick = () => setArtifactsOpen(!artifactsOpen);
+document.getElementById('artifacts-close').onclick = () => setArtifactsOpen(false);
+artifactsNewTab.onclick = () => {
+  const key = artifactsNewTab.dataset.key;
+  if (key) window.open(artifactUrl(key, artifactsNewTab.dataset.markdown === '1'), '_blank', 'noopener');
+};
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && artifactsOpen) setArtifactsOpen(false);
+});
+
+// The panel is pointless without an artifact host to point at, so it stays
+// hidden unless the deployment says where that is.
+void (async () => {
+  try {
+    const environment = await (await fetch(rel('api/environment'))).json();
+    artifactsBase = String(environment.artifactsBaseUrl || '').replace(/\/$/, '');
+    artifactsButton.hidden = artifactsBase === '';
+  } catch {
+    artifactsButton.hidden = true;
+  }
+})();
 
 // A page served at ".../web" (no trailing slash) resolves relative paths one
 // level too high. Normalise once, preserving any query string.

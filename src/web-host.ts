@@ -26,6 +26,7 @@ import { linkSessionHost } from "./session-host/link.js";
 const port = Number(process.env.BRIDGE_WEB_PORT ?? 0);
 const bind = process.env.BRIDGE_BIND ?? "127.0.0.1";
 const token = process.env.BRIDGE_WEB_TOKEN ?? "";
+const artifactsBaseUrl = process.env.BRIDGE_ARTIFACTS_BASE_URL ?? "";
 const trustedProxy = process.env.BRIDGE_TRUSTED_PROXY ?? "";
 const provider = process.env.BRIDGE_WEB_DEFAULT_PROVIDER ?? "";
 const modelId = process.env.BRIDGE_WEB_DEFAULT_MODEL ?? "";
@@ -66,6 +67,7 @@ const server = http.createServer((req, res) => {
         seam,
         model,
         ...(token ? { token } : {}),
+        ...(artifactsBaseUrl ? { artifactsBaseUrl } : {}),
         who,
       });
       if (handled) return;

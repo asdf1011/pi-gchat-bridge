@@ -351,9 +351,12 @@ test("API paths resolve under a reverse-proxy prefix", async () => {
     // /pi/web/api/... and not to the proxy's root.
     h = await loadPage({ pathname: "/pi/web/", conversations: [] });
     assert.deepEqual(h.errors, []);
-    const first = h.requests[0];
-    assert.ok(first);
-    assert.equal(first.url, "/pi/web/api/conversations");
+    const urls = h.requests.map((request) => request.url);
+    // Every request stays under the proxy's prefix — including the environment
+    // probe the artifact button needs, which is fetched once at load.
+    for (const url of urls) assert.ok(url.startsWith("/pi/web/api/"), url);
+    assert.ok(urls.includes("/pi/web/api/conversations"), urls.join(", "));
+    assert.ok(urls.includes("/pi/web/api/environment"), urls.join(", "));
   } finally {
     h?.close();
   }

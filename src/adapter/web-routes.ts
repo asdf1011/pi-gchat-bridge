@@ -29,6 +29,11 @@ export interface WebRouteOptions {
   model: { provider: string; modelId: string };
   /** Bearer token required for writes. Empty disables the check. */
   token?: string;
+  /**
+   * Where the artifact origin is, for the pane's links. Empty hides the panel's
+   * buttons: an artifact link that cannot be opened is worse than no link.
+   */
+  artifactsBaseUrl?: string;
   /** Resolved by the caller, so this module does no header trust of its own. */
   who: Identity;
   log?: { info(message: string): void };
@@ -77,6 +82,39 @@ export async function handleWebRequest(
   if (req.method === "GET" && (path === "/web" || path === "/web/")) {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     res.end(webPage());
+    return true;
+  }
+
+  // What the page needs to know about this deployment. One field today; a
+  // separate route rather than a field on the conversation list, so the list's
+  // shape stays the array the page already renders.
+  if (req.method === "GET" && path === "/web/api/environment") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ artifactsBaseUrl: (options.artifactsBaseUrl ?? "").replace(/\/$/, "") }));
+    return true;
+  }
+
+  // The artifact list for one conversation, same-origin: the page links to the
+  // artifact host but never fetches from it, so no CORS is needed anywhere.
+  const artifactList = /^\/web\/api\/c\/(\d+)\/artifacts$/.exec(path);
+  if (req.method === "GET" && artifactList) {
+    const artifacts = await seam.artifacts(Number(artifactList[1]));
+    if (artifacts === undefined) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: `no such conversation: ${artifactList[1]}` }));
+      return true;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify(
+        artifacts.map((artifact) => ({
+          key: artifact.key,
+          wrote: artifact.wrote,
+          edited: artifact.edited,
+          markdown: /\.(md|markdown)$/i.test(artifact.key),
+        })),
+      ),
+    );
     return true;
   }
 

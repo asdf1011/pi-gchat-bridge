@@ -51,6 +51,8 @@ export interface Config {
   notifyToken: string;
   /** Bearer token for web writes. Empty means no check (tailnet-only deployment). */
   webToken: string;
+  /** Where the artifact origin lives, for links from the web pane. Empty hides them. */
+  artifactsBaseUrl: string;
   /** Re-title the /model "Model switched" card with a local-model topic (gchat display only). */
   topicSummary: boolean;
   /** OpenAI-compatible base URL of the LOCAL model used for titles (e.g. llama.cpp). */
@@ -117,6 +119,7 @@ export function loadConfig(): Config {
     secretUsers: listEnv("SECRET_USERS"),
     notifyToken: process.env.BRIDGE_NOTIFY_TOKEN ?? "",
     webToken: process.env.BRIDGE_WEB_TOKEN ?? "",
+    artifactsBaseUrl: process.env.BRIDGE_ARTIFACTS_BASE_URL ?? "",
     topicSummary: (process.env.BRIDGE_TOPIC_SUMMARY ?? "1") !== "0",
     // The TITLER's own server, not the conversation router. Sharing one meant
     // every title evicted a conversation's KV prefix, which on a 2-slot server
