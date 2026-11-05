@@ -276,14 +276,34 @@ start_tunnel() {
 
 log "pi-gchat-bridge starting (log: $LOG_FILE)"
 start_tunnel
+
+# Restart backoff for the bridge itself.
+#
+# A fixed 5s retry is right for a one-off restart and wrong for a crash loop: the
+# bridge once restarted 1,138 times at 100% CPU, which buried the real error under
+# identical log lines. The delay now doubles to a five-minute ceiling, and resets
+# once a run has lasted long enough to count as healthy — so a single restart is
+# still immediate.
+BACKOFF_MIN=5
+BACKOFF_MAX=300
+HEALTHY_AFTER=60
+backoff=$BACKOFF_MIN
 while true; do
   # Re-read `.env.durable` every time the bridge is re-executed, so a bridge
   # restart applies an environment change without restarting the container.
   load_durable_env
+  started=$(date +%s)
   node "$ENTRYPOINT" >> "$LOG_FILE" 2>&1 &
   NODE_PID=$!
   wait "$NODE_PID"
   code=$?
+  ran=$(( $(date +%s) - started ))
+  if [ "$ran" -ge "$HEALTHY_AFTER" ]; then
+    backoff=$BACKOFF_MIN
+  else
+    backoff=$(( backoff * 2 ))
+    [ "$backoff" -gt "$BACKOFF_MAX" ] && backoff=$BACKOFF_MAX
+  fi
   # 75 = another process owns the bridge database (see src/durable/main.ts).
   # That is a refusal, not a crash: the owner is already serving Chat, so
   # retrying every 5s would bury any real error under identical log lines.
@@ -294,7 +314,7 @@ while true; do
     sleep 120
     continue
   fi
-  log "bridge exited (code $code) — restarting in 5s"
+  log "bridge exited (code $code) after ${ran}s — restarting in ${backoff}s"
   # The tunnel outlives a bridge restart on purpose (cloudflared reconnects and
   # the edge returns 502 for a few seconds, which is better than a DNS change).
   # But if cloudflared itself died, bring it back.
@@ -303,5 +323,5 @@ while true; do
     TUNNEL_PID=""
     start_tunnel
   fi
-  sleep 5
+  sleep "$backoff"
 done

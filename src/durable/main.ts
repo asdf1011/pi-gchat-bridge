@@ -38,6 +38,7 @@ import { startArtifactsServer } from "../adapter/artifacts-server.js";
 import { artifactRoots } from "./artifacts.js";
 import { inProcessSessionHost } from "../session-host/inprocess.js";
 import { serveSessionHost } from "../session-host/link.js";
+import { supervise, type Supervisor } from "../session-host/supervisor.js";
 import { ipcLink } from "@earendil-works/chord";
 import { SecretRegistry } from "./extensions/redact.js";
 import { secretsFromEnvironment } from "./extensions/secret-redactor.js";
@@ -208,7 +209,7 @@ async function main(): Promise<void> {
   // The child is forked from *this* process rather than the supervisor because
   // the IPC channel is the link: whoever accepts it must be the session host.
   const webEngine = process.env.BRIDGE_WEB_ENGINE ?? "inprocess";
-  let webAdapter: import("node:child_process").ChildProcess | undefined;
+  let webSupervisor: Supervisor<import("node:child_process").ChildProcess> | undefined;
   if (webEngine === "link") {
     const webPort = Number(process.env.BRIDGE_WEB_PORT ?? 0);
     if (!webPort) {
@@ -217,39 +218,44 @@ async function main(): Promise<void> {
     }
     // src/web-host.ts compiles next to the entrypoint, one level up from this file.
     const entry = new URL("../web-host.js", import.meta.url).pathname;
-    const child = fork(entry, [], {
-      stdio: ["ignore", "pipe", "inherit", "ipc"],
-      env: {
-        ...process.env,
-        // The adapter has no business reading the database path or the service
-        // account; it only needs where to listen and which model to default to.
-        BRIDGE_DB: "",
-        GOOGLE_SERVICE_ACCOUNT_JSON: "",
-        BRIDGE_WEB_DEFAULT_PROVIDER: defaultModel.provider,
-        BRIDGE_WEB_DEFAULT_MODEL: defaultModel.modelId,
-      },
-    });
-    webAdapter = child;
-    child.stdout?.on("data", (chunk: Buffer) => {
-      for (const line of chunk.toString().split("\n")) {
-        if (line.startsWith("WEB_ADAPTER_LISTENING ")) {
-          logger.info(`[bridge] web adapter ready on ${line.slice("WEB_ADAPTER_LISTENING ".length)}`);
-        }
-      }
-    });
-    child.on("exit", (code, signal) => {
-      // Not fatal: the session host keeps answering Chat. The supervisor will
-      // restart the whole container if this keeps happening, and the log says why.
-      logger.error(`[bridge] web adapter exited (code ${code ?? signal}) — /web is down until restart`);
-      webAdapter = undefined;
-    });
+
     // `serveSessionHost` only creates a chord host: it opens no socket, so a
-    // bridge that never forks an adapter pays nothing for it.
-    serveSessionHost(seam).accept(
-      ipcLink(child as unknown as Parameters<typeof ipcLink>[0]),
-      { principal: "web-adapter", kind: "client" },
-    );
-    logger.info("[bridge] web engine=link: /web is served by the adapter process");
+    // bridge that never forks an adapter pays nothing for it. It is created once
+    // and accepts one link per adapter generation.
+    const objectHost = serveSessionHost(seam);
+
+    webSupervisor = supervise({
+      start: () =>
+        fork(entry, [], {
+          stdio: ["ignore", "pipe", "inherit", "ipc"],
+          env: {
+            ...process.env,
+            // The adapter has no business reading the database path or the
+            // service account; it only needs where to listen and which model to
+            // default to.
+            BRIDGE_DB: "",
+            GOOGLE_SERVICE_ACCOUNT_JSON: "",
+            BRIDGE_WEB_DEFAULT_PROVIDER: defaultModel.provider,
+            BRIDGE_WEB_DEFAULT_MODEL: defaultModel.modelId,
+          },
+        }),
+      onStart: (child) => {
+        child.stdout?.on("data", (chunk: Buffer) => {
+          for (const line of chunk.toString().split("\n")) {
+            if (line.startsWith("WEB_ADAPTER_LISTENING ")) {
+              logger.info(`[bridge] web adapter ready on ${line.slice("WEB_ADAPTER_LISTENING ".length)}`);
+            }
+          }
+        });
+        // Each generation gets its own link: a dead child's channel is gone.
+        objectHost.accept(ipcLink(child as unknown as Parameters<typeof ipcLink>[0]), {
+          principal: "web-adapter",
+          kind: "client",
+        });
+      },
+      log: (message) => logger.warn(message),
+    });
+    logger.info("[bridge] web engine=link: /web is served by a supervised adapter process");
   }
 
   // --- One Chat message → one durable submission → one Chat reply. ---
@@ -438,7 +444,7 @@ async function main(): Promise<void> {
     logger.info("[bridge] shutting down...");
     await receiver.stop();
     artifactsServer?.close();
-    webAdapter?.kill("SIGTERM");
+    webSupervisor?.stop();
     // Closing the harness waits for running task code to return and leaves the
     // store consistent; anything unfinished resumes on the next start.
     await host.close().catch(() => {});
