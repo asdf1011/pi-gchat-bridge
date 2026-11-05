@@ -250,9 +250,43 @@ place until the last adapter is ported; the seam is additive.
   seam. A generic store would have meant migrating live claims, for a claim whose job is to survive
   exactly that. So the surface is `claimAnswer`/`releaseAnswer`/`recordVerdict`/`verdict`/
   `firstTurn`: fewer foot-guns, no migration, and the semantics are in the names.
-- **S5 — optional, and only if wanted:** `src/session-host/socket.ts` + `bin/session-host.ts`. No
-  adapter file changes, because the interface is the contract. Now the web process restarts alone,
-  and `RECEIVER=none` gives a dev host on its own `BRIDGE_DB` and `PORT` beside a live one.
+- **S5 — the link. Spike done; the approach is chord contracts, not a hand-rolled socket.**
+
+  The open question was whether a chord host can publish pi-durable's *foreign* callback subscription
+  as replicated state. It can, and it survives a real process boundary. Both shapes were run:
+
+  ```ts
+  server.serve(ConversationView, (_input, _principal, self) => {
+    const entries = self.state("entries", Type.Number(), 0);
+    self.task(async (ctx) => {                    // owned by the object: aborts when the last
+      const opened = await conversation.viewState(ctx);   // client releases its reference
+      const push = (value) => entries.change(ctx, () => value.entries?.length ?? 0);
+      push(opened.value);                         // snapshot first
+      opened.subscribe(push);                     // then deltas
+      await untilAborted(ctx.signal); opened.dispose();
+    });
+    return { variant: "default", entries };
+  });
+  ```
+
+  Client: `createHost({ kind: "client", upstream: { link: ipcLink(process), principal: "server" } })`
+  → `ctx.get(ConversationView, { conversation })` → `ref.entries.subscribe(...)`. A forked child
+  process saw `{entries: 0}` then `0 → 1 → 2` as the conversation changed; the same script over
+  `memoryLinkPair()` behaves identically.
+
+  Three findings worth carrying into the build:
+
+  - **Writes need a task ctx, not `BACKGROUND_CONTEXT`** — chord's cell guard reads `ctx.signal`, and
+    the background context has none. The task ctx is also the right lifetime: it aborts when the
+    object is released, which is exactly "one attachment per client, disposed on disconnect".
+  - **State must be schema-shaped** (TypeBox), so `ProjectedView` needs a schema. `tools[].arguments`
+    is `unknown` today; it has to become `JsonValue`, or the tool line loses its arguments.
+  - **Not yet proved:** adapter → host *calls* over the link (`submit`, `attach`, `awaitSubmission`).
+    chord's RPC is the tutorial's first chapter, so this is low risk, but it is a 30-minute check
+    rather than an assumption.
+
+  Remaining work is then mechanical: a `ConversationView` contract, an adapter-side client host, and
+  `start-bridge.sh` supervising one more process.
 
 ## Non-goals
 
