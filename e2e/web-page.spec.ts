@@ -518,3 +518,72 @@ test("mobile: the artifact drawer takes the screen", async ({ page }) => {
   expect(box).not.toBeNull();
   expect(box!.width).toBeGreaterThanOrEqual(389);
 });
+
+test("artifacts: the list shows names, and a file slides over it full width", async ({ page }) => {
+  await stubApi(page);
+  await page.route("**/api/environment", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ artifactsBaseUrl: "https://artifacts.example", pageVersion: "t" }),
+    }),
+  );
+  await page.route("**/api/c/*/artifacts", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([
+        { key: "pi-gchat-bridge/docs/session-host-api.md", wrote: 1, edited: 4, markdown: true },
+        { key: "pi-gchat-bridge/src/adapter/web/page.html", wrote: 3, edited: 2, markdown: false },
+      ]),
+    }),
+  );
+  await page.route("https://artifacts.example/**", (route) =>
+    route.fulfill({ status: 200, contentType: "text/html", body: "<p>rendered</p>" }),
+  );
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/7/");
+  await page.locator("#artifacts-toggle").click();
+
+  // The name is what you pick by; the directory is a second line, not the label.
+  const first = page.locator("#artifact-list li").first();
+  await expect(first.locator(".name")).toHaveText("session-host-api.md");
+  await expect(first.locator(".dir")).toHaveText("pi-gchat-bridge/docs");
+
+  // Nothing is open until you pick something.
+  const before = await page.evaluate(() => ({
+    showing: document.getElementById("artifacts")!.classList.contains("showing-doc"),
+    title: document.getElementById("artifacts-title")!.textContent,
+  }));
+  expect(before.showing).toBe(false);
+  expect(before.title).toBe("Artifacts");
+
+  await first.click();
+  await expect(page.locator("#artifacts-title")).toHaveText("session-host-api.md");
+  // The slide is a transition, so wait for it to land rather than sampling it
+  // mid-flight — 33px short of the edge was the first reading.
+  await expect
+    .poll(() => page.evaluate(() => getComputedStyle(document.getElementById("artifact-doc")!).transform))
+    .toBe("matrix(1, 0, 0, 1, 0, 0)");
+  const after = await page.evaluate(() => {
+    const doc = document.getElementById("artifact-doc")!.getBoundingClientRect();
+    const drawer = document.getElementById("artifacts")!.getBoundingClientRect();
+    return {
+      showing: document.getElementById("artifacts")!.classList.contains("showing-doc"),
+      docWidth: Math.round(doc.width),
+      drawerWidth: Math.round(drawer.width),
+      backVisible: !document.getElementById("artifacts-back")!.hidden,
+      transform: getComputedStyle(document.getElementById("artifact-doc")!).transform,
+    };
+  });
+  // Slid in, and the document owns the drawer rather than sharing it with a list.
+  expect(after.showing).toBe(true);
+  expect(after.docWidth).toBe(after.drawerWidth);
+  expect(after.backVisible).toBe(true);
+
+  // Back goes to the list, and the frame is dropped rather than left loaded.
+  await page.locator("#artifacts-back").click();
+  await expect(page.locator("#artifacts-title")).toHaveText("Artifacts");
+  expect(await page.evaluate(() => document.getElementById("artifact-frame")!.getAttribute("src"))).toBe("about:blank");
+});

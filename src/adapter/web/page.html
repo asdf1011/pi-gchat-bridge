@@ -146,12 +146,30 @@
     border-bottom: 1px solid #8884; font-size: .9em; }
   #artifacts header strong { flex: 1; font-weight: 600; }
   #artifacts header button { padding: .15rem .5rem; }
-  #artifact-list { overflow: auto; margin: 0; padding: 0; list-style: none; max-height: 40%; }
-  #artifact-list li { padding: .4rem .75rem; cursor: pointer; border-bottom: 1px solid #8882; font-size: .9em; }
+  /* Two screens in one drawer: the list, and the document it opens. The document
+     slides in from the right and covers the drawer, so a file gets the whole
+     width instead of a strip under a list of names. */
+  #artifacts-body { flex: 1; position: relative; min-height: 0; }
+  #artifact-list-pane { position: absolute; inset: 0; overflow: auto; }
+  #artifact-list { margin: 0; padding: 0; list-style: none; }
+  #artifact-list li { padding: .5rem .75rem; cursor: pointer; border-bottom: 1px solid #8882;
+    display: flex; gap: .6rem; align-items: baseline; }
+  #artifact-list li:hover { background: #8881; }
   #artifact-list li.on { background: #8882; }
-  #artifact-list small { display: block; opacity: .6; font-size: .8em; }
+  /* The file's name is what you pick by; the directory rides underneath, dimmed,
+     for the ones that share a name. */
+  #artifact-list .col { flex: 1; min-width: 0; }
+  #artifact-list .name { display: block; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; }
+  #artifact-list .dir { display: block; font-size: .78em; opacity: .55; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  #artifact-list .counts { flex: none; font-size: .78em; opacity: .55; }
+  #artifact-doc { position: absolute; inset: 0; display: flex;
+    transform: translateX(100%); transition: transform 180ms ease; background: Canvas; }
+  #artifacts.showing-doc #artifact-doc { transform: translateX(0); }
   #artifact-frame { flex: 1; border: 0; width: 100%; background: #fff0; }
   #artifact-hint { padding: .5rem .75rem; font-size: .85em; opacity: .7; margin: 0; }
+  @media (prefers-reduced-motion: reduce) { #artifact-doc { transition: none; } }
   /* Phones: the index is the whole width, the pane keeps its padding, and the
      drawer takes the screen rather than a strip of it. */
   @media (max-width: 40rem) {
@@ -201,13 +219,20 @@
 <button id="new-chat" title="Start a new conversation" aria-label="New chat">＋</button>
 <aside id="artifacts" hidden>
   <header>
-    <strong>Artifacts</strong>
-    <button id="artifacts-newtab" type="button" title="Open in a new tab">↗</button>
+    <button id="artifacts-back" type="button" title="Back to the list" aria-label="Back to the list" hidden>←</button>
+    <strong id="artifacts-title">Artifacts</strong>
+    <button id="artifacts-newtab" type="button" title="Open in a new tab" hidden>↗</button>
     <button id="artifacts-close" type="button" title="Close">✕</button>
   </header>
-  <p id="artifact-hint">Pick a file.</p>
-  <ul id="artifact-list"></ul>
-  <iframe id="artifact-frame" sandbox="allow-scripts allow-popups" referrerpolicy="no-referrer"></iframe>
+  <div id="artifacts-body">
+    <div id="artifact-list-pane">
+      <p id="artifact-hint">Pick a file.</p>
+      <ul id="artifact-list"></ul>
+    </div>
+    <div id="artifact-doc">
+      <iframe id="artifact-frame" sandbox="allow-scripts allow-popups" referrerpolicy="no-referrer"></iframe>
+    </div>
+  </div>
 </aside>
 <script>
 /**
@@ -690,20 +715,50 @@ const artifactsList = document.getElementById('artifact-list');
 const artifactsFrame = document.getElementById('artifact-frame');
 const artifactsHint = document.getElementById('artifact-hint');
 const artifactsNewTab = document.getElementById('artifacts-newtab');
+const artifactsBack = document.getElementById('artifacts-back');
+const artifactsTitle = document.getElementById('artifacts-title');
 
 function artifactUrl(key, render) {
   return artifactsBase + '/c/' + current + '/' + key.split('/').map(encodeURIComponent).join('/') + (render ? '?render' : '');
 }
 
+/** The last path segment: what the file is actually called. */
+function baseName(key) {
+  const parts = key.split('/');
+  return parts[parts.length - 1] || key;
+}
+
+/** The directory part, which may be empty at the root. */
+function dirName(key) {
+  const parts = key.split('/');
+  parts.pop();
+  return parts.join('/');
+}
+
 function showArtifact(key, markdown) {
   for (const li of artifactsList.children) li.classList.toggle('on', li.dataset.key === key);
-  artifactsHint.hidden = true;
-  artifactsFrame.hidden = false;
+  // The document slides over the list and takes the drawer's full width, so a
+  // name-heavy list stops competing with the thing being read.
+  artifactsPanel.classList.add('showing-doc');
+  artifactsTitle.textContent = baseName(key);
+  artifactsTitle.title = key;
+  artifactsBack.hidden = false;
+  artifactsNewTab.hidden = false;
   // Markdown is rendered by the artifact host inside its sandboxed document;
   // everything else is shown as plain text, never as HTML.
   artifactsFrame.src = artifactUrl(key, markdown);
   artifactsNewTab.dataset.key = key;
   artifactsNewTab.dataset.markdown = markdown ? '1' : '';
+}
+
+/** Back to the list: the document is dropped, not kept loaded behind it. */
+function showArtifactList() {
+  artifactsPanel.classList.remove('showing-doc');
+  artifactsTitle.textContent = 'Artifacts';
+  artifactsTitle.removeAttribute('title');
+  artifactsBack.hidden = true;
+  artifactsNewTab.hidden = true;
+  artifactsFrame.src = 'about:blank';
 }
 
 async function loadArtifacts() {
@@ -720,36 +775,47 @@ async function loadArtifacts() {
     artifactsHint.textContent = 'No files were written or edited in this conversation.';
     return;
   }
+  artifactsHint.hidden = rows.length > 0;
   for (const row of rows) {
     const li = document.createElement('li');
     li.dataset.key = row.key;
-    li.innerHTML = '<span></span><small></small>';
-    li.firstChild.textContent = row.key;
+    li.innerHTML = '<span class="col"><span class="name"></span><span class="dir"></span></span><span class="counts"></span>';
+    // The name first and the directory underneath: a list of full paths is mostly
+    // directory, and the drawer only needs enough to tell two files apart.
+    li.querySelector('.name').textContent = baseName(row.key);
+    li.querySelector('.dir').textContent = dirName(row.key);
     const counts = [];
     if (row.wrote) counts.push(row.wrote + (row.wrote === 1 ? ' write' : ' writes'));
     if (row.edited) counts.push(row.edited + (row.edited === 1 ? ' edit' : ' edits'));
-    li.lastChild.textContent = counts.join(', ');
+    li.querySelector('.counts').textContent = counts.join(', ');
+    li.title = row.key;
     li.onclick = () => showArtifact(row.key, Boolean(row.markdown));
     artifactsList.append(li);
   }
-  showArtifact(rows[0].key, Boolean(rows[0].markdown));
+  // Open on the list: choosing is the first act, and the document takes the screen
+  // once chosen.
+  showArtifactList();
 }
 
 function setArtifactsOpen(open) {
   artifactsOpen = open;
   artifactsPanel.hidden = !open;
   if (open) void loadArtifacts();
-  else artifactsFrame.src = 'about:blank';
+  else showArtifactList();
 }
 
 artifactsButton.onclick = () => setArtifactsOpen(!artifactsOpen);
 document.getElementById('artifacts-close').onclick = () => setArtifactsOpen(false);
+artifactsBack.onclick = () => showArtifactList();
 artifactsNewTab.onclick = () => {
   const key = artifactsNewTab.dataset.key;
   if (key) window.open(artifactUrl(key, artifactsNewTab.dataset.markdown === '1'), '_blank', 'noopener');
 };
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && artifactsOpen) setArtifactsOpen(false);
+  if (event.key !== 'Escape' || !artifactsOpen) return;
+  // Escape steps back one screen: document → list → closed.
+  if (artifactsPanel.classList.contains('showing-doc')) showArtifactList();
+  else setArtifactsOpen(false);
 });
 
 // The panel is pointless without an artifact host to point at, so it stays
