@@ -310,6 +310,51 @@ test("layout: growing the composer keeps the newest message whole", async ({ pag
   expect(geometry.lastBottom).toBeLessThanOrEqual(geometry.logBottom + 1);
 });
 
+test("the running tool's line is inside the reply bubble, not floating under it", async ({ page }) => {
+  // "Put the bash details inside the response box" is a layout claim, so it is
+  // checked as one: the status element's box must be inside the bubble's.
+  await stubApi(page, {
+    frames: [{ event: "tool", data: { name: "bash", status: "running", line: "Running: npm run build" } }],
+  });
+  await page.setViewportSize({ width: 900, height: 600 });
+  await page.goto("/web/");
+
+  const geometry = await page.evaluate(() => {
+    const live = document.querySelector("#log .msg.live");
+    const bubble = live?.querySelector(".bubble");
+    const status = live?.querySelector(".status");
+    if (!bubble || !status) return null;
+    const b = bubble.getBoundingClientRect();
+    const s = status.getBoundingClientRect();
+    return {
+      text: status.textContent,
+      inside:
+        s.top >= b.top - 1 && s.bottom <= b.bottom + 1 && s.left >= b.left - 1 && s.right <= b.right + 1,
+      // The reply box exists before there is any text, so a tool that runs first
+      // still has a message to live in.
+      hasBubble: true,
+    };
+  });
+
+  expect(geometry, "the live turn must render a bubble containing its status").not.toBeNull();
+  expect(geometry!.text).toBe("Running: npm run build");
+  expect(geometry!.inside, "the status must be inside the bubble").toBe(true);
+});
+
+test("the send button keeps its label when the box is wide", async ({ page }) => {
+  await stubApi(page);
+  await page.setViewportSize({ width: 1600, height: 700 });
+  await page.goto("/web/");
+
+  const fits = await page.evaluate(() => {
+    const button = document.querySelector("#send button")!;
+    const box = button.getBoundingClientRect();
+    return { width: box.width, scrollWidth: button.scrollWidth };
+  });
+  // A squeezed flex item overflows its own pill; the label must fit.
+  expect(fits.scrollWidth).toBeLessThanOrEqual(fits.width + 1);
+});
+
 test("a path without a trailing slash is normalised to one", async ({ page }) => {
   // Without this the page's relative API paths resolve one level too high and
   // every call 404s.

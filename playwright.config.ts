@@ -59,6 +59,11 @@ export default defineConfig({
       // The artifact listener is off by default in the page tests: a live bridge
       // already owns 8082 on this machine, and these tests never touch artifacts.
       BRIDGE_ARTIFACTS_PORT: "0",
+      // Pinned, not inherited: a shell that has sourced `.env.durable` exports
+      // BRIDGE_WEB_ENGINE=link, and the test server would then try to fork an
+      // adapter onto the port the live bridge already owns (EADDRINUSE).
+      BRIDGE_WEB_ENGINE: "inprocess",
+      BRIDGE_ARTIFACTS_BASE_URL: "",
     },
   },
 });

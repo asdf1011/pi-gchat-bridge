@@ -226,6 +226,16 @@ export async function handleWebRequest(
     }
     const result = await webSubmit(handleOptions, Number(send[1]), text);
     if (result.ok) {
+      // Chat cannot show this as the person who typed it, but the thread should
+      // read as a conversation: say who spoke and what they said. Failure is
+      // logged and ignored — a missing notice must never fail the submission.
+      const speaker = (who.email ?? "someone").split("@")[0];
+      // Truncated: a long paste would be a Chat API error, and the notice is a
+      // signpost to the conversation, not a copy of it.
+      const notice = text.length > 1200 ? `${text.slice(0, 1200)}…` : text;
+      void seam
+        .announce(Number(send[1]), `${speaker} (webui): ${notice}`)
+        .catch((error: unknown) => log.info(`[web] announce failed: ${(error as Error).message}`));
       // Who asked, and which conversation: this bridge can run shell commands,
       // so "who submitted this" belongs in the log.
       log.info(

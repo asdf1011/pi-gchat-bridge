@@ -342,6 +342,14 @@ export interface SessionHost {
     options?: { signal?: AbortSignal },
   ): Promise<{ userText: string; assistantText: string } | undefined>;
 
+  /**
+   * Tell the Chat side of a conversation that something happened outside Chat.
+   *
+   * False when the conversation has no Chat thread behind it (a web-only
+   * conversation), which is not an error — there is simply nobody to tell.
+   */
+  announce(conversationId: number, text: string, options?: { signal?: AbortSignal }): Promise<boolean>;
+
   /** Compact the conversation's context now. Instructions are free text. */
   compact(conversationId: number, instructions?: string, options?: { signal?: AbortSignal }): Promise<void>;
 

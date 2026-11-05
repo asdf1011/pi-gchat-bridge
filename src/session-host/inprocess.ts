@@ -43,6 +43,13 @@ import type {
 
 export interface InProcessOptions {
   host: BridgeHost;
+  /**
+   * Post `text` into the Chat thread behind a conversation, when there is one.
+   *
+   * Injected rather than implemented here: the Chat client is the session host's
+   * business, and an adapter must never hold those credentials.
+   */
+  announce?: (conversationId: number, text: string) => Promise<boolean>;
   /** Directories an artifact path may resolve under. */
   roots: readonly string[];
   /** Chord context for host calls; defaults to the host's. */
@@ -243,6 +250,11 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
 
     async firstTurn(conversationId: number): Promise<{ userText: string; assistantText: string } | undefined> {
       return host.firstTurn(conversationId);
+    },
+
+    async announce(conversationId: number, text: string): Promise<boolean> {
+      if (!options.announce) return false;
+      return options.announce(conversationId, text);
     },
 
     async compact(conversationId: number, instructions?: string): Promise<void> {

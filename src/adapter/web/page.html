@@ -89,8 +89,11 @@
     border-radius: 1rem; border-top-right-radius: .3rem; padding: .65rem .9rem; }
   textarea::placeholder { color: color-mix(in srgb, CanvasText 55%, transparent); }
   textarea:focus { outline: 2px solid color-mix(in srgb, CanvasText 25%, transparent); outline-offset: 1px; }
-  button { padding: .6rem 1.1rem; font: inherit; color: inherit; background: var(--bubble-me);
-    border: 0; border-radius: 1rem; border-top-right-radius: .3rem; cursor: pointer; }
+  /* `flex: none` because the textarea's flex:1 will otherwise squeeze the button
+     until its label overflows the pill — visible as soon as the box is wide. */
+  button { flex: none; white-space: nowrap; padding: .6rem 1.1rem; font: inherit;
+    color: inherit; background: var(--bubble-me); border: 0; border-radius: 1rem;
+    border-top-right-radius: .3rem; cursor: pointer; }
   button:hover { filter: brightness(.96); }
   /* Artifacts: a floating toggle and a drawer that is hidden until asked for.
      The pane is an iframe on the artifact origin — a different origin, so it is

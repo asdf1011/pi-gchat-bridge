@@ -18,11 +18,17 @@ import type { ProjectedView } from "../src/session-host/projection.js";
 
 const view: ProjectedView = { liveText: "", busy: false, lastAssistantText: "", tools: [] };
 
+const announced: string[] = [];
+
 function fakeSeam(
   options: { conversations?: NamedConversation[]; artifacts?: unknown[]; history?: unknown[] } = {},
 ): SessionHost {
   return {
     history: async (id: number) => (id === 1 ? (options.history ?? []) : undefined),
+    announce: async (_id: number, text: string) => {
+      announced.push(text);
+      return true;
+    },
     list: async () => options.conversations ?? [],
     resolve: async () => undefined,
     snapshot: async () => view,
@@ -199,6 +205,7 @@ test("the conversation list and a submit still answer as before", async () => {
     const rows = (await (await fetch(`${served.base}/web/api/conversations`)).json()) as { chatKey: string }[];
     assert.deepEqual(rows.map((row) => row.chatKey), ["threads/A"]);
 
+    announced.length = 0;
     const sent = await fetch(`${served.base}/web/api/c/1/message`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -208,6 +215,10 @@ test("the conversation list and a submit still answer as before", async () => {
     // The echo carries the rendered message, so the pane can show what you sent
     // before the transcript comes back.
     assert.deepEqual(await sent.json(), { ok: true, submissionId: 7, html: "<p>hello</p>" });
+
+    // The Chat thread learns who spoke and what they said, so it reads as a
+    // conversation the person can follow from either surface.
+    assert.deepEqual(announced, ["someone (webui): hello"]);
 
     const missing = await fetch(`${served.base}/web/api/c/9/message`, {
       method: "POST",

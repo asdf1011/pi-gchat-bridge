@@ -77,6 +77,8 @@ export function serveSessionHost(seam: SessionHost): Host {
     resolve: async ({ name }) => (await seam.resolve(name)) ?? null,
     getOrCreate: async ({ name, agent }) => seam.getOrCreate(name, agent),
     has: async ({ conversation }) => (await seam.snapshot(conversation)) !== undefined,
+    announce: async ({ conversation, text }: { conversation: number; text: string }) =>
+      seam.announce(conversation, text),
   }));
 
   // The factory is synchronous by contract; the wiring it needs is asynchronous,
@@ -242,6 +244,11 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
       } finally {
         ref.release();
       }
+    },
+
+    announce: async (conversationId: number, text: string) => {
+      const root = await session();
+      return host.root((ctx) => root.announce({ conversation: conversationId, text }, ctx));
     },
 
     state: () => {

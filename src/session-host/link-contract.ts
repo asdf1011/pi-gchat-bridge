@@ -130,6 +130,16 @@ export const SessionContract = remote("pi-bridge.session", {
          * from "empty", and the seam promises `undefined` for the former.
          */
         has: method(Type.Object({ conversation: Type.Number() }), Type.Boolean()),
+        /**
+         * Say something in the Chat thread behind a conversation.
+         *
+         * On the session object because it needs the Chat client and the
+         * conversation-name mapping, neither of which an adapter has.
+         */
+        announce: method(
+          Type.Object({ conversation: Type.Number(), text: Type.String() }),
+          Type.Boolean(),
+        ),
       },
     },
   },

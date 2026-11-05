@@ -88,7 +88,40 @@ async function main(): Promise<void> {
   // adapters depend on the interface rather than on this object. The artifact
   // roots are decided here because deriving artifacts is the host's job: a viewer
   // asks for a list, it does not walk the transcript and filter paths itself.
-  const seam = inProcessSessionHost({ host, roots: artifactRoots(config.cwd, getAgentDir()) });
+  /**
+   * Say something in the Chat thread behind a conversation.
+   *
+   * Used when a message arrives from another surface (the web UI): Chat cannot
+   * show it as the person who typed it, but the thread should still read as a
+   * conversation rather than as the bot answering nothing.
+   */
+  const announceInChat = async (conversationId: number, text: string): Promise<boolean> => {
+    const bindings = await host.bindings();
+    const chatKey = Object.entries(bindings.byChatKey).find(
+      ([, binding]) => binding.conversationId === conversationId,
+    )?.[0];
+    if (!chatKey || !chatKey.startsWith("spaces/")) return false;
+
+    const threadMatch = /^(spaces\/[^/]+\/threads\/[^/]+)$/.exec(chatKey);
+    if (threadMatch) {
+      await client.sendMessage(chatKey.slice(0, chatKey.indexOf("/threads/")), text, threadMatch[1]);
+      return true;
+    }
+    const keyed = /^(spaces\/[^/]+)\/(.+)$/.exec(chatKey);
+    if (keyed) {
+      await client.createMessageWithThreadKey(keyed[1], text, keyed[2]);
+      return true;
+    }
+    // A top-level space: the key is the space itself.
+    await client.sendMessage(chatKey, text);
+    return true;
+  };
+
+  const seam = inProcessSessionHost({
+    host,
+    roots: artifactRoots(config.cwd, getAgentDir()),
+    announce: announceInChat,
+  });
 
   const defaults = await defaultSettings(seam);
   const [fallback] = await seam.models();
