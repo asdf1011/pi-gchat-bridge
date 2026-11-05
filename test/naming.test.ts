@@ -69,35 +69,97 @@ test("it names every untitled conversation and then stops", async () => {
   assert.deepEqual([...labels.keys()].sort(), ["threads/1", "threads/3"]);
 });
 
-test("a titler that fails is retried, and does not stop the pass", async () => {
-  const { seam, labels } = fakeSeam([conversation({ conversationId: 1 }), conversation({ conversationId: 2 })]);
-  let attempts = 0;
+test("a titler that fails does not stop the pass, and the thread is named next time", async () => {
+  // A seam that remembers labels, so the pass can actually finish.
+  const labels = new Map<string, string>();
+  let fail = true;
+  const seam = {
+    list: async () =>
+      [conversation({ conversationId: 1 }), conversation({ conversationId: 2 })].map((c) => ({
+        ...c,
+        ...(labels.has(c.name) ? { label: labels.get(c.name) } : {}),
+      })),
+    firstTurn: async () => ({ userText: "how do I shrink a disk image", assistantText: "truncate" }),
+    label: async (name: string, label: string) => {
+      labels.set(name, label);
+      return true;
+    },
+  } as unknown as SessionHost;
 
+  const summarize = async () => {
+    if (fail) throw new Error("titler down");
+    return "Disk images";
+  };
+
+  // First pass: every attempt fails, every conversation is skipped, and the pass
+  // ends rather than spinning.
+  assert.equal(await nameUntitledConversations({ seam, config, intervalMs: 0, retryAfterMs: 1, summarize }), 0);
+  assert.equal(labels.size, 0);
+
+  // Second pass, titler back: the backlog is picked up where it was left.
+  fail = false;
+  assert.equal(await nameUntitledConversations({ seam, config, intervalMs: 0, retryAfterMs: 1, summarize }), 2);
+  assert.equal(labels.size, 2);
+});
+
+test("a conversation with nothing to title is skipped, not retried forever", async () => {
+  const labels: string[] = [];
+  const stored = new Map<string, string>();
+  const seam = {
+    list: async () =>
+      [conversation({ conversationId: 1 }), conversation({ conversationId: 2 })].map((c) => ({
+        ...c,
+        ...(stored.has(c.name) ? { label: stored.get(c.name) } : {}),
+      })),
+    firstTurn: async (id: number) =>
+      id === 1 ? undefined : { userText: "how do I shrink a disk image", assistantText: "truncate" },
+    label: async (name: string, label: string) => {
+      labels.push(name);
+      stored.set(name, label);
+      return true;
+    },
+  } as unknown as SessionHost;
+
+  // One unnameable conversation must not block the backlog behind it: that is what
+  // "no title came back" once a minute for minutes looked like from the log.
+  const named = await nameUntitledConversations({
+    seam,
+    config,
+    intervalMs: 0,
+    retryAfterMs: 1,
+    summarize: async () => "Disk images",
+  });
+  assert.equal(named, 1);
+  assert.deepEqual(labels, ["threads/2"]);
+});
+
+test("a conversation the titler refuses is also skipped", async () => {
+  const labels = new Map<string, string>();
+  const seam = {
+    list: async () =>
+      [conversation({ conversationId: 1 }), conversation({ conversationId: 2 })].map((c) => ({
+        ...c,
+        ...(labels.has(c.name) ? { label: labels.get(c.name) } : {}),
+      })),
+    firstTurn: async () => ({ userText: "hello", assistantText: "hi" }),
+    label: async (name: string, label: string) => {
+      labels.set(name, label);
+      return true;
+    },
+  } as unknown as SessionHost;
+
+  let calls = 0;
   const named = await nameUntitledConversations({
     seam,
     config,
     intervalMs: 0,
     retryAfterMs: 1,
     summarize: async () => {
-      attempts += 1;
-      // The first attempt fails, like a titler that is down for a moment.
-      if (attempts === 1) throw new Error("titler down");
-      return `title ${attempts}`;
+      calls += 1;
+      return calls === 1 ? undefined : "Second title";
     },
   });
-
-  assert.equal(named, 2);
-  assert.equal(labels.size, 2);
-});
-
-test("a conversation with nothing said yet is left for a later pass", async () => {
-  const seam = {
-    list: async () => [conversation({ conversationId: 1 })],
-    firstTurn: async () => undefined,
-    label: async () => true,
-  } as unknown as SessionHost;
-
-  // Returns rather than looping: a thread with no words has nothing to title, and
-  // the next pass (after a message) will pick it up.
-  assert.equal(await nameUntitledConversations({ seam, config, intervalMs: 0, summarize: async () => "x" }), 0);
+  assert.equal(named, 1, "the second conversation is named; the first is left alone this pass");
+  assert.equal(calls, 2, "no conversation is asked about twice in one pass");
+  assert.deepEqual([...labels.keys()], ["threads/2"]);
 });

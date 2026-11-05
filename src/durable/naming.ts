@@ -58,11 +58,20 @@ export async function nameUntitledConversations(options: NamingPassOptions): Pro
   const retryAfterMs = Math.max(intervalMs, options.retryAfterMs ?? 60_000);
   const summarize = options.summarize ?? summarizeConversationTopic;
   let named = 0;
+  /**
+   * Conversations this pass has already tried.
+   *
+   * Without it a conversation the titler cannot name — one that opens with an
+   * empty message, say — is retried forever and blocks every conversation behind
+   * it. Observed: one such thread stalled the whole backlog for minutes, printing
+   * "no title came back" once a minute.
+   */
+  const attempted = new Set<string>();
 
   for (;;) {
     let candidates;
     try {
-      candidates = (await seam.list()).filter(needsTitle);
+      candidates = (await seam.list()).filter((c) => needsTitle(c) && !attempted.has(c.name));
     } catch (error) {
       logger.warn(`[naming] could not list conversations: ${(error as Error).message}`);
       await sleep(retryAfterMs);
@@ -74,30 +83,35 @@ export async function nameUntitledConversations(options: NamingPassOptions): Pro
     try {
       const turn = await seam.firstTurn(conversation.conversationId);
       if (!turn) {
-        // Nothing said yet: leave it, and let the next pass reconsider once there is.
-        await sleep(intervalMs);
-        return named;
+        // Nothing said yet, or nothing nameable: skip it this pass. A later pass
+        // (after someone speaks) will pick it up.
+        logger.info(`[naming] conversation ${conversation.conversationId}: nothing to title yet`);
+        attempted.add(conversation.name);
+        continue;
       }
       const title = await summarize(turn, config);
       if (!title) {
-        logger.info(`[naming] conversation ${conversation.conversationId}: no title came back`);
-        await sleep(retryAfterMs);
+        logger.info(`[naming] conversation ${conversation.conversationId}: no title came back — skipping`);
+        attempted.add(conversation.name);
         continue;
       }
       const labelled = await seam.label(conversation.name, title);
       if (!labelled) {
         logger.warn(`[naming] conversation ${conversation.conversationId}: could not store "${title}"`);
-        await sleep(retryAfterMs);
+        attempted.add(conversation.name);
         continue;
       }
       named += 1;
+      // Also marked attempted: a host that does not reflect the new label instantly
+      // would otherwise hand this conversation back and be titled again and again.
+      attempted.add(conversation.name);
       logger.info(`[naming] conversation ${conversation.conversationId} → "${title}"`);
       await sleep(intervalMs);
     } catch (error) {
       logger.warn(
-        `[naming] conversation ${conversation.conversationId} failed: ${(error as Error).message} — retrying later`,
+        `[naming] conversation ${conversation.conversationId} failed: ${(error as Error).message} — skipping`,
       );
-      await sleep(retryAfterMs);
+      attempted.add(conversation.name);
     }
   }
 }
