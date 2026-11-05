@@ -454,6 +454,19 @@ draftBox.addEventListener('input', () => {
   saveDraft();
 });
 
+// Enter sends, because this is a chat box and that is what a chat box does.
+// Shift-Enter and Ctrl-Enter (and Cmd-Enter) insert a newline instead, so a
+// multi-line message is still possible without reaching for the mouse. IME
+// composition is left alone: pressing Enter to commit a candidate must not send
+// half a word.
+draftBox.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter') return;
+  if (event.shiftKey || event.ctrlKey || event.metaKey) return;
+  if (event.isComposing) return;
+  event.preventDefault();
+  document.getElementById('send').requestSubmit();
+});
+
 document.getElementById('send').onsubmit = async (e) => {
   e.preventDefault();
   const box = textBox;

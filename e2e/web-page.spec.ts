@@ -355,6 +355,31 @@ test("the send button keeps its label when the box is wide", async ({ page }) =>
   expect(fits.scrollWidth).toBeLessThanOrEqual(fits.width + 1);
 });
 
+test("Enter sends, Shift-Enter and Ctrl-Enter add a line instead", async ({ page }) => {
+  const posted: unknown[] = [];
+  await stubApi(page, { onPost: (body) => posted.push(body) });
+  await page.goto("/web/");
+
+  const box = page.locator("#text");
+
+  // Shift-Enter: a newline, no send.
+  await box.fill("first line");
+  await box.press("Shift+Enter");
+  await box.type("second line");
+  expect(posted).toHaveLength(0);
+  expect(await box.inputValue()).toContain("\n");
+
+  // Ctrl-Enter: same.
+  await box.press("Control+Enter");
+  expect(posted).toHaveLength(0);
+
+  // Plain Enter: sends what is there, and clears the box.
+  await box.press("Enter");
+  await expect.poll(() => posted.length).toBe(1);
+  expect((posted[0] as { text: string }).text).toContain("first line");
+  expect(await box.inputValue()).toBe("");
+});
+
 test("a path without a trailing slash is normalised to one", async ({ page }) => {
   // Without this the page's relative API paths resolve one level too high and
   // every call 404s.
