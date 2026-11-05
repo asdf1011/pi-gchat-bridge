@@ -587,3 +587,42 @@ test("artifacts: the list shows names, and a file slides over it full width", as
   await expect(page.locator("#artifacts-title")).toHaveText("Artifacts");
   expect(await page.evaluate(() => document.getElementById("artifact-frame")!.getAttribute("src"))).toBe("about:blank");
 });
+
+test("artifacts: the browser's back gesture returns to the list", async ({ page }) => {
+  await stubApi(page);
+  await page.route("**/api/environment", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ artifactsBaseUrl: "https://artifacts.example", pageVersion: "t" }),
+    }),
+  );
+  await page.route("**/api/c/*/artifacts", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([{ key: "pi-gchat-bridge/CLOUDFLARE.md", wrote: 1, edited: 1, markdown: true }]),
+    }),
+  );
+  await page.route("https://artifacts.example/**", (route) =>
+    route.fulfill({ status: 200, contentType: "text/html", body: "<p>doc</p>" }),
+  );
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/7/");
+  await page.locator("#artifacts-toggle").click();
+  await page.locator("#artifact-list li").first().click();
+  await expect(page.locator("#artifacts-title")).toHaveText("CLOUDFLARE.md");
+  // Opening a document is a history entry, so the gesture has something to undo.
+  // The key is URL-encoded in the hash: it is a path.
+  expect(decodeURIComponent(await page.evaluate(() => window.location.hash.slice(1)))).toBe(
+    "pi-gchat-bridge/CLOUDFLARE.md",
+  );
+
+  await page.evaluate(() => window.history.back());
+
+  // What the gesture means: back to the list — not a file's name over a blank page.
+  await expect(page.locator("#artifacts-title")).toHaveText("Artifacts");
+  expect(await page.evaluate(() => document.getElementById("artifacts")!.classList.contains("showing-doc"))).toBe(false);
+  await expect(page.locator("#artifact-list li").first()).toBeVisible();
+});

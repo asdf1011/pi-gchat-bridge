@@ -79,6 +79,19 @@ function stripStrings(source: string): string {
     .replace(/"(?:\\.|[^"\\\n])*"/g, '""');
 }
 
+test("the page does not shadow the browser globals it uses", () => {
+  // `let history = []` looked harmless and broke the drawer: a top-level `let`
+  // shadows `window.history` for the whole global scope, so `pushState` "was not a
+  // function" and the back gesture had no entry to undo.
+  const script = stripStrings(scriptOf(WEB_PAGE));
+  for (const name of ["history", "location", "document", "navigator", "fetch"]) {
+    assert.ok(
+      !new RegExp(`\\b(?:let|const|var)\\s+${name}\\b`).test(script),
+      `the page must not declare ${name}: it shadows the browser global`,
+    );
+  }
+});
+
 test("the page declares the state its handlers use", () => {
   // Named explicitly: these four were all missing, and each is load-bearing.
   const script = scriptOf(WEB_PAGE);

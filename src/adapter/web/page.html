@@ -287,9 +287,9 @@ const tool = document.getElementById('tool');
 const textBox = document.getElementById('text');
 
 // The transcript so far, as the host bounded it, and the answer in flight.
-// Both are painted into #log: history first, then the live text, so a reload
+// Both are painted into #log: transcript first, then the live text, so a reload
 // mid-turn shows the conversation *and* the half-finished reply.
-let history = [];
+let transcript = [];
 let liveText = '';
 let liveHtml = '';
 let busy = false;
@@ -423,7 +423,7 @@ function messageRow(role, html, at, live, images) {
 /**
  * Whether the conversation is scrolled to its end.
  *
- * Only then should it follow new content: reading history further up must not be
+ * Only then should it follow new content: reading transcript further up must not be
  * yanked to the bottom because a frame arrived or the composer grew.
  */
 let atBottom = true;
@@ -445,7 +445,7 @@ if (typeof ResizeObserver === 'function') {
 
 function paint() {
   log.innerHTML = '';
-  for (const message of history) {
+  for (const message of transcript) {
     log.append(
       messageRow(
         message.role,
@@ -477,9 +477,9 @@ async function loadHistory() {
   if (!current) return;
   try {
     const rows = await (await fetch(rel('api/c/' + current + '/history'))).json();
-    history = Array.isArray(rows) ? rows : [];
+    transcript = Array.isArray(rows) ? rows : [];
   } catch {
-    history = [];
+    transcript = [];
   }
   paint();
 }
@@ -487,7 +487,7 @@ async function loadHistory() {
 function open(id) {
   if (source) source.close();
   current = id;
-  history = [];
+  transcript = [];
   liveText = '';
   liveHtml = '';
   busy = false;
@@ -505,7 +505,7 @@ function open(id) {
     busy = Boolean(d.busy);
     if (busy) statusLine = '';
     paint();
-    // A turn that just finished has become history: refetch so the answer is
+    // A turn that just finished has become transcript: refetch so the answer is
     // shown as a completed message and the live block goes away.
     if (!d.busy && wasBusy) {
       setTimeout(() => {
@@ -678,11 +678,11 @@ document.getElementById('send').onsubmit = async (e) => {
     }),
   });
   // Show it immediately, the way Chat echoes your message: waiting for the
-  // history refetch at the end of the turn made it look lost.
+  // transcript refetch at the end of the turn made it look lost.
   try {
     const result = await response.json();
     if (result && result.ok) {
-      history.push({
+      transcript.push({
         role: 'user',
         text: text,
         html: result.html,
@@ -735,6 +735,30 @@ function dirName(key) {
   return parts.join('/');
 }
 
+/**
+ * Frame loads we caused, and loads we have seen.
+ *
+ * A back gesture can be delivered to the *frame's* own transcript rather than the
+ * page's, in which case no `popstate` fires here and the frame simply walks back
+ * to `about:blank` — the drawer then showed a file's name over an empty page. A
+ * load nobody asked for is that navigation, and the honest response is to treat it
+ * as "back to the list", which is what the gesture meant.
+ */
+let frameLoadsCaused = 0;
+let frameLoadsSeen = 0;
+
+function loadFrame(url) {
+  frameLoadsCaused += 1;
+  artifactsFrame.src = url;
+}
+
+artifactsFrame.addEventListener('load', () => {
+  frameLoadsSeen += 1;
+  if (frameLoadsSeen <= frameLoadsCaused) return; // one of ours
+  frameLoadsCaused = frameLoadsSeen;
+  if (artifactsOpen && artifactsPanel.classList.contains('showing-doc')) applyListState();
+});
+
 function showArtifact(key, markdown) {
   for (const li of artifactsList.children) li.classList.toggle('on', li.dataset.key === key);
   // The document slides over the list and takes the drawer's full width, so a
@@ -744,22 +768,45 @@ function showArtifact(key, markdown) {
   artifactsTitle.title = key;
   artifactsBack.hidden = false;
   artifactsNewTab.hidden = false;
+  // A transcript entry per document, so the browser's own back gesture means what it
+  // looks like it means: close the document, show the list.
+  try {
+    history.pushState({ artifact: key }, '', '#' + encodeURIComponent(key));
+  } catch {
+    // A sandboxed or file: context can refuse pushState; the drawer still works.
+  }
   // Markdown is rendered by the artifact host inside its sandboxed document;
   // everything else is shown as plain text, never as HTML.
-  artifactsFrame.src = artifactUrl(key, markdown);
+  loadFrame(artifactUrl(key, markdown));
   artifactsNewTab.dataset.key = key;
   artifactsNewTab.dataset.markdown = markdown ? '1' : '';
 }
 
-/** Back to the list: the document is dropped, not kept loaded behind it. */
-function showArtifactList() {
+/** The list state, without touching transcript. */
+function applyListState() {
   artifactsPanel.classList.remove('showing-doc');
   artifactsTitle.textContent = 'Artifacts';
   artifactsTitle.removeAttribute('title');
   artifactsBack.hidden = true;
   artifactsNewTab.hidden = true;
-  artifactsFrame.src = 'about:blank';
+  if (artifactsFrame.getAttribute('src') !== 'about:blank') loadFrame('about:blank');
 }
+
+/**
+ * Back to the list.
+ *
+ * Goes through transcript when we own an entry, so the drawer's ← and the browser's
+ * back gesture end in the same place.
+ */
+function showArtifactList() {
+  if (history.state && history.state.artifact) history.back();
+  else applyListState();
+}
+
+// A back gesture after opening a document lands here.
+window.addEventListener('popstate', () => {
+  if (artifactsOpen) applyListState();
+});
 
 async function loadArtifacts() {
   artifactsList.innerHTML = '';
@@ -800,8 +847,12 @@ async function loadArtifacts() {
 function setArtifactsOpen(open) {
   artifactsOpen = open;
   artifactsPanel.hidden = !open;
-  if (open) void loadArtifacts();
-  else showArtifactList();
+  if (open) {
+    void loadArtifacts();
+  } else {
+    applyListState();
+    if (history.state && history.state.artifact) history.replaceState({}, '', location.pathname);
+  }
 }
 
 artifactsButton.onclick = () => setArtifactsOpen(!artifactsOpen);
