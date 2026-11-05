@@ -46,6 +46,7 @@ import type {
   UsageTotals,
 } from "../session-host/api.js";
 import { BindingsDoc, type BindingsValue, type ConversationBinding } from "./bindings-doc.js";
+import { mergeObserved, type ObservedFile } from "./observed-files.js";
 import { defineDoc } from "@earendil-works/pi-durable";
 import { ChatFormat } from "./extensions/chat-format.js";
 import { createCodingToolsWithDelivery } from "./extensions/coding-tools.js";
@@ -254,6 +255,37 @@ export class BridgeHost {
       if (!current) return;
       doc.byChatKey[key] = { ...current, updatedAt: Date.now() };
     }, this.context);
+  }
+
+  /**
+   * Remember files the filesystem showed changing during a turn.
+   *
+   * Kept on the binding, which is the only per-conversation index this store
+   * has. Silently does nothing for a conversation with no binding — a validation
+   * thread has no drawer to show them in.
+   */
+  async recordObservedFiles(conversationId: number, files: readonly ObservedFile[]): Promise<void> {
+    if (files.length === 0) return;
+    const existing = await this.harness.snapshot(BindingsDoc, this.context);
+    const key = Object.entries(existing?.byChatKey ?? {}).find(
+      ([, binding]) => binding.conversationId === conversationId,
+    )?.[0];
+    if (!key) return;
+    await this.harness.commit(async (tx) => {
+      const doc = await tx.doc(BindingsDoc);
+      const current = doc.byChatKey[key];
+      if (!current) return;
+      doc.byChatKey[key] = { ...current, files: mergeObserved(current.files, files) };
+    }, this.context);
+  }
+
+  /** Files the filesystem saw change in this conversation, newest first. */
+  async observedFiles(conversationId: number): Promise<readonly ObservedFile[]> {
+    const all = await this.bindings();
+    const binding = Object.values(all.byChatKey).find(
+      (candidate) => candidate.conversationId === conversationId,
+    );
+    return binding?.files ?? [];
   }
 
   /** The binding for a Chat conversation key, if it has one. */

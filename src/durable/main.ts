@@ -122,6 +122,7 @@ async function main(): Promise<void> {
     host,
     roots: artifactRoots(config.cwd, getAgentDir()),
     announce: announceInChat,
+    onObserveError: (error) => logger.warn(`[artifacts] observation failed: ${String(error)}`),
   });
 
   const defaults = await defaultSettings(seam);

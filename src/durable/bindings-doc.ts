@@ -23,6 +23,8 @@
  */
 import { defineDoc } from "@earendil-works/pi-durable";
 
+import type { ObservedFile } from "./observed-files.js";
+
 export type ConversationBinding = {
   /** pi-durable conversation ID (a branded number; stored as a plain number). */
   conversationId: number;
@@ -52,6 +54,16 @@ export type ConversationBinding = {
    * did not need a document version bump.
    */
   name?: string;
+  /**
+   * Files the filesystem saw change during this conversation's turns.
+   *
+   * The transcript records the files `write` and `edit` named; everything a
+   * `bash` command touched is invisible to it, so it is recorded here instead —
+   * a per-conversation list because there is no document per conversation that
+   * would hold it without inventing one. Optional, so old bindings still read,
+   * and small (paths and times, never contents).
+   */
+  files?: ObservedFile[];
 };
 
 // A type alias, not an interface: pi-durable's JsonObject accepts literals with

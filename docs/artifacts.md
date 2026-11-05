@@ -16,21 +16,41 @@ Deliberately **not** a file browser: the derived list *is* the allow-list, so a
 request for anything the conversation did not write — however it is spelled — is
 a 404 rather than a path to sanitise.
 
-## Why derived rather than recorded
+## Two ledgers, joined
 
-Every `write` and `edit` tool call already names its file, and tool calls are
-durable entries. So:
+**Tool calls (exact).** Every `write` and `edit` tool call already names its file,
+and tool calls are durable entries. So there is no per-call bookkeeping, no second
+list to drift, conversations older than this feature already have lists (measured:
+19 for the largest conversation, ~120 ms to derive), and the list survives a file
+being deleted.
 
-- no per-call bookkeeping, and no second list to drift from the transcript
-- conversations written before this existed have artifact lists too (measured:
-  19 for the largest conversation, ~120 ms to derive)
-- the list survives a file being deleted, so history does not shrink
+**The filesystem (complete).** A tool call only names a file when the tool does.
+`sed -i`, a `>` redirect, a formatter, a build writing into `dist/` — those leave
+no path in the transcript, so nothing can be derived from it. What cannot be
+bypassed is the filesystem itself, so around each turn:
 
-The cost, stated plainly: **a change made through `bash` is invisible.** `sed -i`,
-`>`, a build writing into `dist/` — the tool call does not name the file, so there
-is nothing to derive. Recording those needs a filesystem diff per turn (a
-`git status --porcelain` snapshot per turn is the obvious version) and is not
-implemented.
+1. read the wall clock, then submit;
+2. when the submission settles, walk the roots and keep every regular file whose
+   mtime is at or after that reading (`src/durable/observed-files.ts`);
+3. store the paths on the conversation's binding, newest first, capped at 200.
+
+No command parsing, no per-tool special cases: a new way of writing a file is
+covered the day it is used. The walk is 8.6k files here (~0.4 s, directories in
+parallel, stats in batches) and runs off the reply path, after the answer has
+settled.
+
+What the walk cannot do is tell a write from an edit — mtime says only "changed".
+So observed files carry no counts, and any path a tool call already named keeps
+the counts the transcript gave it (`mergeArtifacts`). Directories named
+`node_modules`, `.git` and `.jj` are skipped, as are the handful of files this
+bridge writes itself (`bridge.sqlite*`, our logs, the pid file) — otherwise every
+conversation would list them as artifacts of its own bookkeeping.
+
+Attribution is by time window: a file changed during a turn belongs to that turn.
+Two conversations running at once both see a file they both touched, which is
+true; a file changed by something else on the machine during a long turn will
+appear as well, which is the price of asking the filesystem instead of the
+transcript.
 
 ## Configuration
 

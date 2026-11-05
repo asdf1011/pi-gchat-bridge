@@ -21,7 +21,8 @@
 import type { Context } from "@earendil-works/chord";
 import type { AgentChange, ConversationId, UserInput } from "@earendil-works/pi-durable";
 
-import { deriveArtifacts, type ArtifactEntryLike, type ArtifactFile } from "../durable/artifacts.js";
+import { deriveArtifacts, mergeArtifacts, type ArtifactEntryLike, type ArtifactFile } from "../durable/artifacts.js";
+import { filesChangedSince } from "../durable/observed-files.js";
 import type { BridgeHost } from "../durable/host.js";
 import { projectView, type ProjectedView, type ViewLike } from "./projection.js";
 import type {
@@ -54,6 +55,8 @@ export interface InProcessOptions {
   roots: readonly string[];
   /** Chord context for host calls; defaults to the host's. */
   context?: Context;
+  /** Told when a filesystem observation fails. Observing is best-effort. */
+  onObserveError?: (error: unknown) => void;
 }
 
 /** `"provider/modelId"` → `{provider, modelId}`, splitting on the FIRST slash. */
@@ -102,6 +105,29 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
     lastActivityAt: binding.updatedAt ?? binding.createdAt,
     ...(binding.preview === undefined ? {} : { preview: binding.preview }),
   });
+
+  /**
+   * Note what the turn changed, once it has settled.
+   *
+   * `awaitSubmission` is the only hook that fires for both surfaces — Chat and
+   * web both submit and forget — so it is where the observation hangs. Concurrent
+   * turns each walk with their own start time; a file two of them touched shows
+   * up in both, which is true.
+   */
+  async function observeFiles(
+    conversationId: number,
+    submissionId: number,
+    startedAt: number,
+  ): Promise<void> {
+    try {
+      await host.awaitSubmission(submissionId);
+      const changed = await filesChangedSince(options.roots, startedAt);
+      await host.recordObservedFiles(conversationId, changed);
+    } catch (error) {
+      // A missing artifact list is a small loss; a crashed host is not.
+      options.onObserveError?.(error);
+    }
+  }
 
   return {
     info(): HostInfo {
@@ -190,7 +216,10 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
       const opened = await conversation.viewState(host.context);
       try {
         const entries = (opened.value as { entries?: unknown }).entries ?? [];
-        return deriveArtifacts(entries as readonly ArtifactEntryLike[], options.roots);
+        const derived = deriveArtifacts(entries as readonly ArtifactEntryLike[], options.roots);
+        // Plus whatever the filesystem saw change during this conversation's
+        // turns: `bash` edits leave no path in the transcript to derive from.
+        return mergeArtifacts(derived, await host.observedFiles(conversationId), options.roots);
       } finally {
         opened.dispose();
       }
@@ -290,6 +319,9 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
       if (typeof request.content === "string" && request.content.trim() === "") {
         return { error: "empty message" };
       }
+      // Before the turn, not after: the walk looks for files newer than this, so
+      // the clock has to be read before the first command can touch anything.
+      const startedAt = Date.now();
       const submission = await conversation.submit(
         {
           type: "input",
@@ -307,6 +339,9 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
           ? request.content
           : request.content.find((part) => part.type === "text")?.text;
       if (firstText) await host.setPreview(conversationId, firstText).catch(() => {});
+      // Off the reply path: the answer does not wait for a filesystem walk, and a
+      // walk that fails costs a drawer entry, not a turn.
+      void observeFiles(conversationId, submission.id as unknown as number, startedAt);
       return { submissionId: submission.id as unknown as number };
     },
   };

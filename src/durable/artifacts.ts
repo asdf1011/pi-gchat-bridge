@@ -10,9 +10,11 @@
  *
  * What that costs, stated up front so it is not a surprise later: a change made
  * through `bash` (`sed -i`, a `>` redirect, a build writing into `dist/`) leaves
- * no artifact, because the tool call does not say which files it touched.
- * Recovering those needs a filesystem diff per turn; the transcript cannot see
- * them.
+ * no artifact *here*, because the tool call does not say which files it touched.
+ * Those come from the other half of the ledger — the filesystem walk around each
+ * turn in `observed-files.ts`, merged in by `mergeArtifacts` below. The two are
+ * combined rather than replaced: a tool call is exact and counted, a walk is
+ * complete and uncounted.
  *
  * Paths are the other half of the problem. The same file shows up under two
  * spellings in this deployment (`/workspace/pi-chat-bridge/...` is a symlink to
@@ -23,6 +25,8 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+
+import type { ObservedFile } from "./observed-files.js";
 
 /** The slice of an entry this module reads. Structural, so tests need no harness. */
 export interface ArtifactEntryLike {
@@ -189,6 +193,39 @@ export function deriveArtifacts(
     }
   }
   return [...byCanonical.values()].sort((a, b) => a.key.localeCompare(b.key));
+}
+
+/**
+ * The two ledgers, joined: tool calls first (they carry counts), then files the
+ * filesystem saw changing that no tool call named.
+ *
+ * Anything the transcript already lists keeps its counts and its spelling; the
+ * walk only fills the gaps, and only for paths that key inside a root — a file
+ * outside them could not be served anyway. An observed file has no counts
+ * because a modification time cannot tell a first write from the tenth edit.
+ */
+export function mergeArtifacts(
+  derived: readonly ArtifactFile[],
+  observed: readonly ObservedFile[] | undefined,
+  roots: readonly string[],
+): ArtifactFile[] {
+  if (!observed || observed.length === 0) return [...derived];
+  const merged = new Map<string, ArtifactFile>();
+  for (const file of derived) merged.set(canonicalPath(file.path), file);
+  for (const file of observed) {
+    const canonical = canonicalPath(file.path);
+    if (merged.has(canonical)) continue;
+    const keyed = artifactKeyFor(file.path, roots);
+    if (keyed === undefined) continue;
+    merged.set(canonical, {
+      key: keyed.key,
+      root: keyed.root,
+      path: file.path,
+      wrote: 0,
+      edited: 0,
+    });
+  }
+  return [...merged.values()].sort((a, b) => a.key.localeCompare(b.key));
 }
 
 export interface ReadArtifactOptions {

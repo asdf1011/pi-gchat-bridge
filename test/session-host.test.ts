@@ -17,6 +17,8 @@ interface Binding {
 }
 
 interface FakeOptions {
+  /** Files the filesystem "saw" change, as the host would report them. */
+  observed?: { path: string; at: number }[];
   bindings?: Record<string, Binding>;
   view?: unknown;
   entries?: readonly ArtifactEntryLike[];
@@ -47,6 +49,9 @@ function fakeHost(options: FakeOptions = {}): BridgeHost {
         .slice(offset ?? 0, (offset ?? 0) + (limit ?? Number.MAX_SAFE_INTEGER)),
     touch: async () => {},
     setPreview: async () => {},
+    observedFiles: async () => options.observed ?? [],
+    recordObservedFiles: async () => {},
+    awaitSubmission: async () => ({ status: "ok" }),
     bindingFor: async (name: string) => (options.bindings ?? {})[name],
     conversationFor: async (name: string, agent: { model: { provider: string; modelId: string } }) => ({
       binding: {
@@ -167,6 +172,39 @@ test("attach() and snapshot() are undefined for a conversation that is gone", as
   const seam = inProcessSessionHost({ host: fakeHost({ conversations: [1] }), roots: [] });
   assert.equal(await seam.snapshot(999), undefined);
   assert.equal(await seam.attach(999, () => {}), undefined);
+});
+
+test("artifacts() adds files the filesystem saw, which no tool call named", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-seam-"));
+  try {
+    const written = path.join(root, "src/app.ts");
+    const viaBash = path.join(root, "dist/bundle.js");
+    fs.mkdirSync(path.dirname(written), { recursive: true });
+    fs.mkdirSync(path.dirname(viaBash), { recursive: true });
+    fs.writeFileSync(written, "export {};\n");
+    fs.writeFileSync(viaBash, "// built\n");
+    const seam = inProcessSessionHost({
+      host: fakeHost({
+        view: {
+          entries: [
+            { id: 3, model: [{ content: [{ type: "toolCall", name: "write", arguments: { path: written } }] }] },
+          ],
+          docs: {},
+        },
+        // `sed -i` and a build: real changes, no path the transcript can see.
+        observed: [{ path: viaBash, at: Date.now() }],
+      }),
+      roots: [fs.realpathSync(root)],
+    });
+    const artifacts = await seam.artifacts(1);
+    assert.ok(artifacts);
+    assert.deepEqual(artifacts.map((a) => a.key), ["dist/bundle.js", "src/app.ts"]);
+    // The tool call keeps its count; the observed file has none to claim.
+    assert.equal(artifacts[1].wrote, 1);
+    assert.equal(artifacts[0].wrote + artifacts[0].edited, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("artifacts() derives host-side from the transcript", async () => {

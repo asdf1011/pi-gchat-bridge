@@ -19,10 +19,12 @@ import { createRequire } from "node:module";
 
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
-import { artifactRoots, deriveArtifacts, type ArtifactEntryLike } from "../durable/artifacts.js";
+import { artifactRoots, deriveArtifacts, mergeArtifacts, type ArtifactEntryLike } from "../durable/artifacts.js";
+import type { ObservedFile } from "../durable/observed-files.js";
 
 interface Prepared {
   all(...params: unknown[]): unknown[];
+  get(...params: unknown[]): unknown;
 }
 interface Database {
   prepare(sql: string): Prepared;
@@ -53,6 +55,36 @@ function entriesOf(conversationId: number): ArtifactEntryLike[] {
   });
 }
 
+/**
+ * Files the filesystem saw change, per conversation, from the bindings document.
+ *
+ * The same numbers the web drawer shows: the derivation from entries cannot see a
+ * `bash` edit, so a debugging tool that stopped at entries would quietly disagree
+ * with the UI. Reads the latest revision of the session-scoped doc; an old
+ * database without one just yields nothing.
+ */
+function observedByConversation(): Map<number, ObservedFile[]> {
+  const map = new Map<number, ObservedFile[]>();
+  let record: string | undefined;
+  try {
+    const row = db
+      .prepare(
+        "select content from document_revisions where document_id = (select id from documents where kind like '%bindings%' limit 1) order by seq desc limit 1",
+      )
+      .get() as { content: string } | undefined;
+    record = row?.content;
+  } catch {
+    return map;
+  }
+  if (!record) return map;
+  const value = JSON.parse(record) as { byChatKey?: Record<string, { conversationId?: number; files?: ObservedFile[] }> };
+  for (const binding of Object.values(value.byChatKey ?? {})) {
+    if (typeof binding?.conversationId !== "number" || !binding.files) continue;
+    map.set(binding.conversationId, binding.files);
+  }
+  return map;
+}
+
 function conversationIds(): number[] {
   const rows = db.prepare("select id from conversations order by id desc").all() as { id: number }[];
   return rows.map((row) => row.id);
@@ -65,9 +97,10 @@ try {
     process.exit(2);
   }
 
+  const observed = observedByConversation();
   const results = ids.map((id) => ({
     conversationId: id,
-    artifacts: deriveArtifacts(entriesOf(id), roots),
+    artifacts: mergeArtifacts(deriveArtifacts(entriesOf(id), roots), observed.get(id), roots),
   }));
 
   if (asJson) {
