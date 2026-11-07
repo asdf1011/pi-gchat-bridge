@@ -47,9 +47,23 @@ import type {
 } from "../session-host/api.js";
 import { BindingsDoc, type BindingsValue, type ConversationBinding } from "./bindings-doc.js";
 import { mergeObserved, type ObservedFile } from "./observed-files.js";
+import { mergeRevisions, type ArtifactRevision } from "./artifact-revisions.js";
+import {
+  addComment as addCommentTo,
+  appendReply,
+  appendSubmission,
+  CommentsDoc,
+  commentsOf,
+  findByShortId,
+  setResolved,
+  type StoredComment,
+  type StoredReply,
+} from "./comments-doc.js";
 import { defineDoc } from "@earendil-works/pi-durable";
 import { ChatFormat } from "./extensions/chat-format.js";
+import { artifactGuidance } from "./extensions/artifact-guidance.js";
 import { createCodingToolsWithDelivery } from "./extensions/coding-tools.js";
+import { createCommentTools } from "./extensions/comment-tools.js";
 import { createSecretRedactor, secretsFromEnvironment } from "./extensions/secret-redactor.js";
 import type { RegisteredSecret } from "./extensions/redact.js";
 import type { SecretStore } from "../secret-store.js";
@@ -70,6 +84,12 @@ export interface BridgeHostOptions {
    * redaction registry; absent means "environment only".
    */
   secrets?: SecretStore;
+  /**
+   * Root of the per-conversation artifact repositories, or empty to leave the
+   * prompt alone. Only used to tell the model where to write; the commits happen
+   * in the session host.
+   */
+  artifactsDir?: string;
 }
 
 /** A created conversation plus the binding that records it. */
@@ -116,6 +136,8 @@ export class BridgeHost {
     const lock = acquireBridgeLock(options.dbPath);
 
     const registry = createRegistry();
+    /** Set once the instance exists (see the comment-tools install below). */
+    let self: { host?: BridgeHost } = {};
     // The coding toolset the old bridge gave its sessions, plus the bridge's own
     // output rules. Tool policy is not ported: per-conversation tools are
     // `configure({ tools })` here, which is what the old extension enforced.
@@ -129,6 +151,27 @@ export class BridgeHost {
       }),
     );
     registry.install(ChatFormat);
+    // Where to put files worth reviewing. Skipped entirely when artifacts are not
+    // tracked, so the model is never told about a directory nothing commits.
+    if (options.artifactsDir) registry.install(artifactGuidance(options.artifactsDir));
+    // Only when there is something to reply to. The tool writes to the comments
+    // document, never to the transcript: a review reply is plumbing.
+    //
+    // The registry is built before the instance exists, so the tool reaches it
+    // through a reference that is set the moment the host is constructed. A tool
+    // call can only happen inside a conversation, which cannot exist before that.
+    if (options.artifactsDir) {
+      const target: { host?: BridgeHost } = {};
+      self = target;
+      registry.install(
+        createCommentTools({
+          reply: (conversationId, commentId, text) =>
+            target.host
+              ? target.host.addCommentReply(conversationId, commentId, text)
+              : Promise.resolve({ error: "the session host is not ready" }),
+        }),
+      );
+    }
     // Installed last, deliberately: hooks compose, and redaction should see the
     // final tool output and the final request.
     //
@@ -183,7 +226,10 @@ export class BridgeHost {
     // store, and the only thing that resumes a run interrupted by a restart.
     harness.resume();
 
-    return new BridgeHost(harness, modelRuntime, options.dbPath, options.cwd, context, lock);
+    const host = new BridgeHost(harness, modelRuntime, options.dbPath, options.cwd, context, lock);
+    // Hand the tools a way back in, now that there is something to hand them.
+    self.host = host;
+    return host;
   }
 
   /** Current bindings, for `/sessions` and `/resume`. */
@@ -276,6 +322,111 @@ export class BridgeHost {
       const current = doc.byChatKey[key];
       if (!current) return;
       doc.byChatKey[key] = { ...current, files: mergeObserved(current.files, files) };
+    }, this.context);
+  }
+
+  /**
+   * Remember which revision of each artifact a turn produced.
+   *
+   * Best-effort like the rest of the artifact bookkeeping: a conversation with no
+   * binding (a validation thread) has no drawer to show them in, and a failed pin
+   * costs a "view as it was" link, not an answer.
+   */
+  async recordRevisions(conversationId: number, revisions: readonly ArtifactRevision[]): Promise<void> {
+    if (revisions.length === 0) return;
+    const existing = await this.harness.snapshot(BindingsDoc, this.context);
+    const key = Object.entries(existing?.byChatKey ?? {}).find(
+      ([, binding]) => binding.conversationId === conversationId,
+    )?.[0];
+    if (!key) return;
+    await this.harness.commit(async (tx) => {
+      const doc = await tx.doc(BindingsDoc);
+      const current = doc.byChatKey[key];
+      if (!current) return;
+      doc.byChatKey[key] = { ...current, revisions: mergeRevisions(current.revisions, revisions) };
+    }, this.context);
+  }
+
+  /** Revisions this conversation pinned for its artifacts, newest first. */
+  async revisions(conversationId: number): Promise<readonly ArtifactRevision[]> {
+    const all = await this.bindings();
+    const binding = Object.values(all.byChatKey).find(
+      (candidate) => candidate.conversationId === conversationId,
+    );
+    return binding?.revisions ?? [];
+  }
+
+  /** Every comment recorded against a conversation, oldest first. */
+  async comments(conversationId: number): Promise<readonly StoredComment[]> {
+    const value = await this.harness.snapshot(CommentsDoc, this.context);
+    return commentsOf(value ?? undefined, conversationId);
+  }
+
+  /** Record one comment. Returns false only when the write itself failed. */
+  async addComment(conversationId: number, comment: StoredComment): Promise<boolean> {
+    await this.harness.commit(async (tx) => {
+      const doc = await tx.doc(CommentsDoc);
+      const key = String(conversationId);
+      const current = doc.byConversation[key]?.comments ?? [];
+      doc.byConversation[key] = { comments: addCommentTo(current, comment) };
+    }, this.context);
+    return true;
+  }
+
+  /** Resolve, or reopen, one comment. True when it changed something. */
+  async setCommentResolved(conversationId: number, id: string, resolved: boolean): Promise<boolean> {
+    let changed = false;
+    await this.harness.commit(async (tx) => {
+      const doc = await tx.doc(CommentsDoc);
+      const key = String(conversationId);
+      const current = doc.byConversation[key]?.comments ?? [];
+      const next = setResolved(current, id, resolved);
+      if (!next.changed) return;
+      changed = true;
+      doc.byConversation[key] = { comments: next.comments };
+    }, this.context);
+    return changed;
+  }
+
+  /**
+   * Append an agent's reply to a comment's thread.
+   *
+   * Returns the id it wrote to, or a reason it could not — a model calling a tool
+   * gets a result either way, and "no comment with that id" is a better answer
+   * than silently doing nothing.
+   */
+  async addCommentReply(
+    conversationId: number,
+    shortId: string,
+    text: string,
+    author = "agent",
+  ): Promise<{ id: string } | { error: string }> {
+    const trimmed = text.trim();
+    if (trimmed === "") return { error: "a reply needs text" };
+    const existing = await this.comments(conversationId);
+    const found = findByShortId(existing, shortId);
+    if (found === undefined) return { error: `no comment with id ${shortId}` };
+    if ("ambiguous" in found) return { error: `more than one comment starts with ${shortId}` };
+
+    const reply: StoredReply = { text: trimmed, at: Date.now(), author };
+    await this.harness.commit(async (tx) => {
+      const doc = await tx.doc(CommentsDoc);
+      const key = String(conversationId);
+      const current = doc.byConversation[key]?.comments ?? [];
+      const next = appendReply(current, found.id, reply);
+      if (!next.changed) return;
+      doc.byConversation[key] = { comments: next.comments };
+    }, this.context);
+    return { id: found.id };
+  }
+
+  /** Note a submission a comment started, so its answer can be joined later. */
+  async appendCommentSubmission(conversationId: number, id: string, submissionId: number): Promise<void> {
+    await this.harness.commit(async (tx) => {
+      const doc = await tx.doc(CommentsDoc);
+      const key = String(conversationId);
+      const current = doc.byConversation[key]?.comments ?? [];
+      doc.byConversation[key] = { comments: appendSubmission(current, id, submissionId) };
     }, this.context);
   }
 

@@ -16,9 +16,14 @@ import type { SessionHost } from "../src/session-host/api.js";
  * the fake is a list of records, which is a much smaller thing to fake than a
  * chord view subscription.
  */
-function fakeSeam(files: readonly ArtifactFile[], conversations = [1]): SessionHost {
+function fakeSeam(
+  files: readonly ArtifactFile[],
+  conversations = [1],
+  comments: unknown[] = [],
+): SessionHost {
   return {
     artifacts: async (id: number) => (conversations.includes(id) ? files : undefined),
+    comments: async (id: number) => (conversations.includes(id) ? comments : undefined),
   } as unknown as SessionHost;
 }
 
@@ -32,11 +37,16 @@ interface Harness {
   close(): Promise<void>;
 }
 
-async function serve(root: string, files: string[], options: { conversations?: number[] } = {}): Promise<Harness> {
+async function serve(
+  root: string,
+  files: string[],
+  options: { conversations?: number[]; comments?: unknown[]; repoFor?: (id: number) => string | undefined } = {},
+): Promise<Harness> {
   const artifacts = files.map((file) => artifact(canonicalPath(root), file, path.join(root, file)));
   const server = await startArtifactsServer({
-    seam: fakeSeam(artifacts, options.conversations ?? [1]),
+    seam: fakeSeam(artifacts, options.conversations ?? [1], options.comments ?? []),
     port: 0,
+    ...(options.repoFor === undefined ? {} : { repoFor: options.repoFor }),
   });
   const { port } = server.address() as AddressInfo;
   return {
@@ -189,5 +199,127 @@ test("healthz answers without touching a conversation", async () => {
   } finally {
     await harness.close();
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the source view numbers its lines and carries a nonce, not a script from the file", async () => {
+  const root = tempDir();
+  const harness = await serve(root, ["a.sh"]);
+  try {
+    // A file that *tries* to be markup, and a comment on line 2 of it.
+    fs.writeFileSync(
+      path.join(root, "a.sh"),
+      "#!/bin/sh\necho '<script>alert(1)</script>'\nexit 0\n",
+    );
+    const response = await fetch(`${harness.base}/c/1/a.sh?view=source`);
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("content-type") ?? "", /text\/html/, "the source view is a document");
+    const csp = response.headers.get("content-security-policy") ?? "";
+    assert.match(csp, /sandbox allow-scripts/);
+    assert.match(csp, /script-src 'nonce-[^']+'/, "script needs a nonce");
+    assert.match(csp, /default-src 'none'/, "and the document still cannot fetch anything");
+    assert.ok(!/allow-same-origin/.test(csp), "allow-scripts without allow-same-origin, or the sandbox is escapable");
+
+    const body = await response.text();
+    assert.match(body, /id="L2" data-line="2"/);
+    assert.match(body, /<a class="no" href="#L2">2<\/a>/);
+    // The file's own bytes are text: escaped, and never a tag that could run.
+    assert.ok(!body.includes("<script>alert(1)</script>"));
+    assert.match(body, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+    // Exactly one script, and it is ours (it carries the nonce).
+    const scripts = body.match(/<script/g) ?? [];
+    assert.equal(scripts.length, 1);
+    assert.match(body, /<script nonce="[^"]+">/);
+  } finally {
+    await harness.close();
+  }
+});
+
+test("a live comment is drawn as a mark with its number, an orphaned one as a different mark", async () => {
+  const root = tempDir();
+  const comment = {
+    id: "c1",
+    file: "a.sh",
+    anchors: [{ changeId: "aaa", originalLine: 2, content: "echo two" }],
+    quote: "two",
+    charStart: 6,
+    charEnd: 8,
+    text: "quote this",
+    at: 1,
+    author: "henry",
+    state: "visible",
+    positions: [2],
+  };
+  const orphan = { ...comment, id: "c2", state: "orphaned", positions: [3], charStart: undefined, charEnd: undefined };
+  const resolved = { ...comment, id: "c3", state: "resolved", positions: [1] };
+  const harness = await serve(root, ["a.sh"], { comments: [comment, orphan, resolved] });
+  try {
+    fs.writeFileSync(path.join(root, "a.sh"), "echo one\necho two\necho three\n");
+    const body = await (await fetch(`${harness.base}/c/1/a.sh?view=source`)).text();
+    // The character range is wrapped exactly, so the highlight is not the whole line.
+    assert.match(body, /echo <mark class="cm visible" data-comment-id="c1">two<\/mark><sup class="cmark"/);
+    // An orphaned comment is still drawn — it is open, and the viewer says so.
+    assert.match(body, /<mark class="cm orphaned" data-comment-id="c2">echo three<\/mark>/);
+    // A resolved comment is not drawn at all.
+    assert.ok(!body.includes('data-comment-id="c3"'));
+  } finally {
+    await harness.close();
+  }
+});
+
+test("a pinned revision is served from jj, and refused when there is no repository", async () => {
+  const root = tempDir();
+  // No repoFor: the origin says so rather than guessing at the live file.
+  const noRepo = await serve(root, ["a.sh"]);
+  try {
+    fs.writeFileSync(path.join(root, "a.sh"), "echo now\n");
+    const refused = await fetch(`${noRepo.base}/c/1/a.sh?rev=abcd1234`);
+    assert.equal(refused.status, 400);
+    assert.match(await refused.text(), /not version controlled/);
+  } finally {
+    await noRepo.close();
+  }
+});
+
+test("rendered Markdown is commentable: the layer is injected, not built into the renderer", async () => {
+  const root = tempDir();
+  const comment = {
+    id: "c9",
+    file: "notes.md",
+    anchors: [{ changeId: "aaa", originalLine: 3, content: "made with **pumpkin**" }],
+    quote: "made with pumpkin",
+    occurrence: 0,
+    text: "vegetable instead?",
+    at: 1,
+    state: "visible",
+    positions: [3],
+  };
+  // A repository is what makes a rendered page commentable: without one there is
+  // nothing to anchor to, and the plain (script-free) document is served instead.
+  const harness = await serve(root, ["notes.md"], {
+    comments: [comment],
+    repoFor: () => "/tmp/not-touched-by-this-test",
+  });
+  try {
+    fs.writeFileSync(path.join(root, "notes.md"), "# Soup\n\nThe soup is made with **pumpkin**.\n");
+
+    const response = await fetch(`${harness.base}/c/1/notes.md?render`);
+    assert.equal(response.status, 200);
+    const csp = response.headers.get("content-security-policy") ?? "";
+    assert.match(csp, /script-src 'nonce-[^']+'/, "a rendered commentable document runs our script");
+    assert.ok(!/allow-same-origin/.test(csp));
+
+    const body = await response.text();
+    // Still rendered: the Markdown the agent wrote is markup, escaped first.
+    assert.match(body, /<strong>pumpkin<\/strong>/);
+    // The comment travels as data, so the script can find its own highlight.
+    assert.match(body, /id="comment-data"/);
+    assert.match(body, /"quote":"made with pumpkin"/);
+    assert.match(body, /"occurrence":0/);
+    // And the script itself is a document script, not a link to one.
+    assert.match(body, /pi-artifact-select/);
+    assert.match(body, /data-file="notes.md"/);
+  } finally {
+    await harness.close();
   }
 });

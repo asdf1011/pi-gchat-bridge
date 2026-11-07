@@ -23,6 +23,15 @@ export interface Config {
   trustedProxy: string;
   /** Working directory pi sessions operate in. */
   cwd: string;
+  /**
+   * Root of the per-conversation artifact directories, or empty to disable them.
+   *
+   * Each conversation gets `<artifactsDir>/conversation/<id>/`, which is a jj
+   * repository, so scratch scripts written there can be annotated and commented
+   * on per revision. Empty means "do not track artifacts in version control" and
+   * leaves the mtime walk as the only witness.
+   */
+  artifactsDir: string;
   sessionsDir: string;
   stateFile: string;
   /** Watchdog: force-reset sessions streaming with no activity for this long (0 = disabled). */
@@ -72,6 +81,27 @@ export interface Config {
    * answer (false — no stub, renders Markdown live).
    */
   replaceOnFinish: boolean;
+  /**
+   * What the bridge's own delivery cursor does (§17 of the design doc).
+   *
+   * `shadow` walks each conversation forward from its cursor and *logs* what it
+   * would post, posting nothing: the cursor arithmetic is proven with no risk to
+   * message delivery. `off` disables the pass entirely.
+   */
+  ledgerMode: "shadow" | "off";
+  /**
+   * Where the cursor lives. Empty means "next to the database", which is the one
+   * directory this deployment can already write to.
+   *
+   * This is the bridge's *own* state, not the server's: a bridge is temporary and
+   * the conversation is not, so "how much of this have I seen" belongs to the
+   * bridge. See `durable/ledger.ts`.
+   */
+  ledgerPath: string;
+  /** How often the pass runs. Cheap: it reads a page or two per active thread. */
+  ledgerIntervalMs: number;
+  /** Ignore threads nobody has touched for this long, so dormant ones cost nothing. */
+  ledgerActiveWithinMs: number;
 }
 
 function required(name: string): string {
@@ -105,6 +135,11 @@ export function loadConfig(): Config {
   const stateFile = path.resolve(process.env.BRIDGE_STATE_FILE ?? "./state.json");
   fs.mkdirSync(sessionsDir, { recursive: true });
 
+  // Empty by default: enabling this creates a repository per conversation, which
+  // is a deployment's choice to make, not something a fresh checkout should do
+  // behind the operator's back.
+  const artifactsDir = (process.env.BRIDGE_ARTIFACTS_DIR ?? "").trim();
+
   return {
     serviceAccountPath,
     pubsubSubscription: process.env.PUBSUB_SUBSCRIPTION ?? "",
@@ -112,6 +147,7 @@ export function loadConfig(): Config {
     bindAddress: process.env.BRIDGE_BIND ?? "127.0.0.1",
     trustedProxy: process.env.BRIDGE_TRUSTED_PROXY ?? "",
     cwd,
+    artifactsDir: artifactsDir === "" ? "" : path.resolve(artifactsDir),
     sessionsDir,
     stateFile,
     stallTimeoutMs: Number(process.env.BRIDGE_STALL_TIMEOUT_MS ?? 20 * 60 * 1000),
@@ -139,5 +175,11 @@ export function loadConfig(): Config {
     // The job is detached, so waiting costs nothing.
     topicSummaryTimeoutMs: Number(process.env.BRIDGE_TOPIC_SUMMARY_TIMEOUT_MS ?? 15 * 60 * 1000),
     replaceOnFinish: (process.env.BRIDGE_REPLACE_ON_FINISH ?? "1") !== "0",
+    // Shadow by default: it posts nothing, so there is no reason to make an
+    // operator opt into the safety net before it can prove anything.
+    ledgerMode: (process.env.BRIDGE_LEDGER ?? "shadow") === "off" ? "off" : "shadow",
+    ledgerPath: (process.env.BRIDGE_LEDGER_PATH ?? "").trim(),
+    ledgerIntervalMs: Number(process.env.BRIDGE_LEDGER_INTERVAL_MS ?? 60_000),
+    ledgerActiveWithinMs: Number(process.env.BRIDGE_LEDGER_ACTIVE_WITHIN_MS ?? 7 * 24 * 60 * 60 * 1000),
   };
 }

@@ -14,6 +14,7 @@
  * alone. pi-durable has no cross-process locking, by design.
  */
 import http from "node:http";
+import path from "node:path";
 
 
 import { ChatClient, collectImageAttachments } from "../chat-client.js";
@@ -30,12 +31,16 @@ import { attachViewSink } from "../adapter/view-sink.js";
 import { DurableRouter } from "../adapter/router.js";
 import { runDurableCommand } from "../adapter/commands.js";
 import { defaultSettings } from "../adapter/commands.js";
+import { mirrorTurn } from "./mirror.js";
+import { runPass } from "./delivery-pass.js";
+import { Ledger } from "./ledger.js";
 import { BridgeHost } from "./host.js";
 import { BridgeLockedError } from "./lock.js";
 import { handleDurableNotify } from "./notify.js";
 import { handleWebRequest, readBody } from "../adapter/web-routes.js";
 import { startArtifactsServer } from "../adapter/artifacts-server.js";
 import { artifactRoots } from "./artifacts.js";
+import { initArtifactRepo } from "./artifact-vcs.js";
 import { inProcessSessionHost } from "../session-host/inprocess.js";
 import { serveSessionHost } from "../session-host/link.js";
 import { supervise, type Supervisor } from "../session-host/supervisor.js";
@@ -71,7 +76,12 @@ async function main(): Promise<void> {
   // registry; the /secret command writes it.
   const secrets = new SecretStore(SecretStore.defaultPath(dbPath));
 
-  const host = await BridgeHost.open({ dbPath, cwd: config.cwd, secrets }).catch((error: unknown) => {
+  const host = await BridgeHost.open({
+    dbPath,
+    cwd: config.cwd,
+    secrets,
+    artifactsDir: config.artifactsDir,
+  }).catch((error: unknown) => {
     if (error instanceof BridgeLockedError) {
       // Not a crash: the owner is serving Chat right now. Exiting non-zero-and-
       // distinct lets the supervisor stop retrying instead of looping forever.
@@ -90,38 +100,73 @@ async function main(): Promise<void> {
   // roots are decided here because deriving artifacts is the host's job: a viewer
   // asks for a list, it does not walk the transcript and filter paths itself.
   /**
-   * Say something in the Chat thread behind a conversation.
-   *
-   * Used when a message arrives from another surface (the web UI): Chat cannot
-   * show it as the person who typed it, but the thread should still read as a
-   * conversation rather than as the bot answering nothing.
+   * Show a turn that started on another surface in the Chat side of the
+   * conversation (see `durable/mirror.ts` for the shape and the API 403 behind
+   * it). Chat is the surface that would otherwise be missing those turns, and a
+   * conversation that only half appears in one client is not much use.
    */
-  const announceInChat = async (conversationId: number, text: string): Promise<boolean> => {
-    const bindings = await host.bindings();
-    const chatKey = Object.entries(bindings.byChatKey).find(
-      ([, binding]) => binding.conversationId === conversationId,
-    )?.[0];
-    if (!chatKey || !chatKey.startsWith("spaces/")) return false;
+  const mirrorTurnIntoChat = (
+    conversationId: number,
+    submissionId: number,
+    prompt: string,
+  ): Promise<boolean> =>
+    mirrorTurn(
+      {
+        client,
+        chatKeyFor: async (id) => {
+          const bindings = await host.bindings();
+          return Object.entries(bindings.byChatKey).find(([, binding]) => binding.conversationId === id)?.[0];
+        },
+        awaitSubmission: (id) => seam.awaitSubmission(id),
+        claimAnswer: (key, answerId) => seam.claimAnswer(key, answerId),
+        releaseAnswer: (key, answerId) => seam.releaseAnswer(key, answerId),
+        // A Chat message steered from the browser is watched from both sides; the
+        // handler's stream posts the answer, so there is nothing left to mirror.
+        isPainting: (key) => markers.has(key),
+        // The same relocation the Chat steer path does: the reply now covers the
+        // steering message too, so its placeholder has to move below it.
+        relocate: async (key) => markers.get(key)?.relocate(),
+      },
+      conversationId,
+      submissionId,
+      prompt,
+    );
 
-    const threadMatch = /^(spaces\/[^/]+\/threads\/[^/]+)$/.exec(chatKey);
-    if (threadMatch) {
-      await client.sendMessage(chatKey.slice(0, chatKey.indexOf("/threads/")), text, threadMatch[1]);
-      return true;
-    }
-    const keyed = /^(spaces\/[^/]+)\/(.+)$/.exec(chatKey);
-    if (keyed) {
-      await client.createMessageWithThreadKey(keyed[1], text, keyed[2]);
-      return true;
-    }
-    // A top-level space: the key is the space itself.
-    await client.sendMessage(chatKey, text);
-    return true;
-  };
+  // Created lazily, on the first turn of a conversation, rather than up front:
+  // most conversations never write an artifact, and an empty repository per
+  // conversation is a directory tree nobody asked for. `initArtifactRepo` is
+  // idempotent, so a repeated turn pays one `jj root` and nothing else.
+  const artifactRepos = new Set<string>();
+  const artifactRepoFor = config.artifactsDir === ""
+    ? undefined
+    : (conversationId: number): string | undefined => {
+        const dir = path.join(config.artifactsDir, "conversation", String(conversationId));
+        if (!artifactRepos.has(dir)) {
+          artifactRepos.add(dir);
+          // Fire and forget: the first turn of a conversation should not wait on
+          // a repository being created, and a failure here leaves the mtime walk
+          // as the only witness, which is the status quo rather than a breakage.
+          void initArtifactRepo(dir).catch((error) =>
+            logger.warn(`[artifacts] no repo at ${dir}: ${String(error)}`),
+          );
+        }
+        return dir;
+      };
+
+  if (config.artifactsDir !== "") {
+    logger.info(`[artifacts] tracking ${config.artifactsDir}/conversation/<id>`);
+  }
 
   const seam = inProcessSessionHost({
     host,
-    roots: artifactRoots(config.cwd, getAgentDir()),
-    announce: announceInChat,
+    roots: config.artifactsDir === ""
+      ? artifactRoots(config.cwd, getAgentDir())
+      : // The artifact root has to include the tracked directory, or files
+        // written there are unservable and the comment feature has nothing to
+        // point at.
+        artifactRoots(config.cwd, getAgentDir(), [config.artifactsDir]),
+    mirrorTurn: mirrorTurnIntoChat,
+    artifactRepoFor,
     onObserveError: (error) => logger.warn(`[artifacts] observation failed: ${String(error)}`),
   });
 
@@ -160,6 +205,48 @@ async function main(): Promise<void> {
             res.end("ok");
             return;
           }
+          // POST /notify: the cron service's single write path into Chat.
+          //
+          // This route was collateral damage in the web-routes extraction
+          // (3a91b1d): the handler moved out, the /notify block was deleted with
+          // the /web routes, and nothing noticed because `handleDurableNotify` is
+          // still *imported* below (so `tsc` was happy) and its unit tests call the
+          // handler directly rather than this server. The result was a silent
+          // 404 for every scheduled notification — balance checks, release notes,
+          // reminders — while `npm test` stayed green.
+          //
+          // The engine check is on purpose: this listener is the durable host's,
+          // and only it holds a `router`/`seam` pair for the durable harness.
+          if (req.method === "POST" && url.pathname === "/notify") {
+            const body = await readBody(req, 1_000_000);
+            if (body === null) {
+              res.writeHead(413, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ ok: false, error: "request body too large" }));
+              return;
+            }
+            let json: unknown;
+            try {
+              json = JSON.parse(body);
+            } catch {
+              res.writeHead(400, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ ok: false, error: "invalid JSON body" }));
+              return;
+            }
+            const result = await handleDurableNotify(
+              {
+                client,
+                seam,
+                router,
+                notifyToken: config.notifyToken || undefined,
+                defaultAgent: { model: defaultModel },
+              },
+              json,
+              req.headers.authorization,
+            );
+            res.writeHead(result.status, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(result.json));
+            return;
+          }
           // The browser front end lives in one module so the same routes can be
           // served from the bridge process or from an adapter process. In link
           // mode the adapter owns them, and this process answers 404 — the tunnel
@@ -171,6 +258,15 @@ async function main(): Promise<void> {
               model: defaultModel,
               ...(config.webToken ? { token: config.webToken } : {}),
               ...(config.artifactsBaseUrl ? { artifactsBaseUrl: config.artifactsBaseUrl } : {}),
+              // Where a comment's file lives, for the text the model receives:
+              // the artifact directory is per conversation, and only this side
+              // knows that.
+              ...(config.artifactsDir === ""
+                ? {}
+                : {
+                    artifactPath: (conversationId: number, file: string) =>
+                      path.join(config.artifactsDir, "conversation", String(conversationId), file),
+                  }),
               who,
             }))
           ) {
@@ -228,6 +324,9 @@ async function main(): Promise<void> {
     artifactsServer = await startArtifactsServer({
       seam,
       port: artifactsPort,
+      // Reads of a specific revision go through jj; the live file is still read
+      // from disk, which is what makes an in-progress turn visible.
+      ...(artifactRepoFor ? { repoFor: artifactRepoFor } : {}),
       bind: config.bindAddress,
       redact: redactArtifact,
       ...(config.webOrigin ? { webOrigin: config.webOrigin } : {}),
@@ -477,7 +576,59 @@ async function main(): Promise<void> {
           config.allowedUsers,
         );
 
+  // --- The bridge's own delivery cursor, in shadow mode -------------------------
+  //
+  // Step one of moving delivery off the server (§17 of the design doc): the bridge
+  // keeps a position per conversation and walks it forward, *posting nothing*. It
+  // proves the cursor arithmetic — adoption at the head, gaps getting adopted rather
+  // than skipped, an unfinished post being reported — while the legacy path keeps
+  // doing the actual posting, so a bug here costs a log line and never a message.
+  //
+  // The state is deliberately the bridge's, not the server's: "how much of this have
+  // I seen" is a fact about this surface, and it survives a conversation outliving
+  // the bridge.
+  let ledgerTimer: NodeJS.Timeout | undefined;
+  if (config.ledgerMode === "shadow") {
+    const ledgerFile =
+      config.ledgerPath === ""
+        ? path.join(path.dirname(dbPath), "bridge-ledger.json")
+        : config.ledgerPath;
+    const ledger = await Ledger.load(ledgerFile);
+    logger.info(
+      `[ledger] shadow mode, positions in ${ledgerFile}${ledger.recovered ? " (adopting afresh: the file was unreadable)" : ""}`,
+    );
+    const pass = async (): Promise<void> => {
+      const summary = await runPass(ledger, {
+        // Only conversations that live in Chat: a web-only conversation has no
+        // surface for this bridge to fall behind on.
+        conversations: async () => host.bindings().then((bindings) =>
+          Object.entries(bindings.byChatKey).map(([chatKey, binding]) => ({
+            conversationId: binding.conversationId,
+            name: chatKey,
+            lastActivityAt: binding.updatedAt ?? binding.createdAt,
+          })),
+        ),
+        history: (conversationId, limit, offset) => seam.history(conversationId, { limit, offset }),
+        present: () => {},
+        owns: (name) => name.startsWith("spaces/"),
+        activeWithinMs: config.ledgerActiveWithinMs,
+      });
+      // Silent when nothing happened: a pass every minute must not fill the log.
+      if (summary.adopted > 0 || summary.presented > 0 || summary.unfinished.length > 0) {
+        logger.info(
+          `[ledger] pass: ${summary.looked} thread(s), adopted ${summary.adopted}, ` +
+            `would post ${summary.presented}, gaps ${summary.gaps}` +
+            (summary.unfinished.length === 0 ? "" : `, unfinished ${summary.unfinished.join(",")}`),
+        );
+      }
+    };
+    void pass();
+    ledgerTimer = setInterval(() => void pass(), config.ledgerIntervalMs);
+    ledgerTimer.unref();
+  }
+
   const shutdown = async (): Promise<void> => {
+    if (ledgerTimer) clearInterval(ledgerTimer);
     logger.info("[bridge] shutting down...");
     await receiver.stop();
     artifactsServer?.close();

@@ -19,7 +19,7 @@ import type { ProjectedView } from "../src/session-host/projection.js";
 
 const view: ProjectedView = { liveText: "", busy: false, lastAssistantText: "", tools: [] };
 
-const announced: string[] = [];
+const mirrored: { submissionId: number; prompt: string }[] = [];
 const submitted: unknown[] = [];
 
 function fakeSeam(
@@ -31,8 +31,8 @@ function fakeSeam(
       id === 1 && entryId === 5 && index === 0
         ? { mimeType: "image/png", data: Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString("base64") }
         : undefined,
-    announce: async (_id: number, text: string) => {
-      announced.push(text);
+    mirrorTurn: async (_id: number, submissionId: number, prompt: string) => {
+      mirrored.push({ submissionId, prompt });
       return true;
     },
     list: async () => options.conversations ?? [],
@@ -47,6 +47,15 @@ function fakeSeam(
       submitted.push(request.content);
       return id === 1 ? { submissionId: 7 } : { error: `no such conversation: ${id}` };
     },
+    comments: async (id: number) => (id === 1 ? (options.comments ?? []) : undefined),
+    addComment: async () =>
+      options.addComment ?? { comment: { ...storedComment, id: "c-new" } },
+    resolveComment: async () => true,
+    noteCommentSubmission: async () => {},
+    commentThread: async () => [
+      { kind: "answer", text: "Done: switched to vegetable stock.", submissionId: 7 },
+    ],
+    replyToComment: async () => ({ id: "c1" }),
   } as unknown as SessionHost;
 }
 
@@ -145,6 +154,22 @@ test("the page links its icon relative to the mount", async () => {
   }
 });
 
+test("the page carries a CSP that keeps images on this origin", async () => {
+  const served = await serve(fakeSeam());
+  try {
+    const response = await fetch(`${served.base}/web/`);
+    const csp = response.headers.get("content-security-policy") ?? "";
+    // The second barrier behind the renderer's source check: even a hostile image
+    // source that slipped past it cannot be fetched from another host.
+    assert.match(csp, /img-src 'self' data:/);
+    // `data:` is deliberate — the composer previews a just-pasted image from it.
+    assert.match(csp, /data:/);
+    assert.doesNotMatch(csp, /img-src[^;]*(https?:|\*)/);
+  } finally {
+    await served.close();
+  }
+});
+
 test("the API answers at the mount root as well as under /web", async () => {
   const served = await serve(fakeSeam());
   try {
@@ -237,7 +262,7 @@ test("an attached image reaches the host as a content part", async () => {
   const served = await serve(fakeSeam());
   try {
     submitted.length = 0;
-    announced.length = 0;
+    mirrored.length = 0;
     const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString("base64");
     const response = await fetch(`${served.base}/web/api/c/1/message`, {
       method: "POST",
@@ -253,8 +278,11 @@ test("an attached image reaches the host as a content part", async () => {
       { type: "text", text: "look" },
       { type: "image", data: png, mimeType: "image/png" },
     ]);
-    // And the Chat thread's notice says an image came with it.
-    assert.equal(announced[0], "someone (webui): look [1 image attached]");
+    // And the prompt that goes into the Chat thread says an image came with it,
+    // paired with the submission whose answer follows it there.
+    assert.deepEqual(mirrored, [
+      { submissionId: 7, prompt: "someone (webui): look [1 image attached]" },
+    ]);
   } finally {
     await served.close();
   }
@@ -264,7 +292,7 @@ test("a message may carry several images, and the notice counts them", async () 
   const served = await serve(fakeSeam());
   try {
     submitted.length = 0;
-    announced.length = 0;
+    mirrored.length = 0;
     const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString("base64");
     const response = await fetch(`${served.base}/web/api/c/1/message`, {
       method: "POST",
@@ -279,7 +307,7 @@ test("a message may carry several images, and the notice counts them", async () 
     });
     assert.equal(response.status, 202);
     assert.equal((submitted[0] as unknown[]).length, 3);
-    assert.equal(announced[0], "someone (webui): two shots [2 images attached]");
+    assert.equal(mirrored[0]?.prompt, "someone (webui): two shots [2 images attached]");
   } finally {
     await served.close();
   }
@@ -415,7 +443,7 @@ test("the conversation list and a submit still answer as before", async () => {
     assert.deepEqual(page.items.map((row) => row.chatKey), ["threads/A"]);
     assert.equal(page.more, false);
 
-    announced.length = 0;
+    mirrored.length = 0;
     const sent = await fetch(`${served.base}/web/api/c/1/message`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -426,9 +454,9 @@ test("the conversation list and a submit still answer as before", async () => {
     // before the transcript comes back.
     assert.deepEqual(await sent.json(), { ok: true, submissionId: 7, html: "<p>hello</p>" });
 
-    // The Chat thread learns who spoke and what they said, so it reads as a
-    // conversation the person can follow from either surface.
-    assert.deepEqual(announced, ["someone (webui): hello"]);
+    // The Chat thread learns who spoke and what they said — carried with the
+    // submission, so the answer is posted under it rather than alongside.
+    assert.deepEqual(mirrored, [{ submissionId: 7, prompt: "someone (webui): hello" }]);
 
     const missing = await fetch(`${served.base}/web/api/c/9/message`, {
       method: "POST",
@@ -467,6 +495,190 @@ test("the environment reports a page version, so a client can tell it changed", 
     // Stable for the life of the process: a page that compared this on every
     // reconnect and saw it change every time would reload in a loop.
     assert.equal(first.pageVersion, second.pageVersion);
+  } finally {
+    await served.close();
+  }
+});
+
+const storedComment = {
+  id: "c1",
+  file: "conversation/1/soup.mjs",
+  anchors: [{ changeId: "aaa", originalLine: 2, content: "const soup = 'pumpkin';" }],
+  quote: "pumpkin",
+  charStart: 15,
+  charEnd: 21,
+  text: "can we use vegetable stock?",
+  at: 1_700_000_000_000,
+  author: "henry",
+  state: "visible",
+  positions: [2],
+  submissions: [7],
+};
+
+test("comments are listed with an address, so the page never formats one", async () => {
+  const served = await serve(fakeSeam({ comments: [storedComment] }));
+  try {
+    const response = await fetch(`${served.base}/api/c/1/comments`);
+    assert.equal(response.status, 200);
+    const rows = (await response.json()) as Record<string, unknown>[];
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]!.address, "conversation/1/soup.mjs#L2C15-L2C21");
+    assert.equal(rows[0]!.state, "visible");
+    assert.deepEqual(rows[0]!.positions, [2]);
+    assert.equal(rows[0]!.replies, 1);
+    // A conversation that does not exist is 404, not an empty list: the page
+    // cannot tell "no comments" from "no such conversation" otherwise.
+    assert.equal((await fetch(`${served.base}/api/c/2/comments`)).status, 404);
+  } finally {
+    await served.close();
+  }
+});
+
+test("a superseded comment travels with the place it moved to", async () => {
+  // The page draws the note against the section that replaced the line, so the
+  // mapping has to survive the route: state, and the range plus its quote.
+  const moved = {
+    ...storedComment,
+    id: "c-moved",
+    state: "superseded",
+    positions: [],
+    successor: { revision: "abc123", kind: "replaced", start: 4, end: 6, quote: "let soup = 'veg';" },
+  };
+  const served = await serve(fakeSeam({ comments: [moved] }));
+  try {
+    const rows = (await (await fetch(`${served.base}/api/c/1/comments`)).json()) as Record<string, unknown>[];
+    assert.equal(rows[0]!.state, "superseded");
+    assert.deepEqual(rows[0]!.successor, {
+      revision: "abc123",
+      kind: "replaced",
+      start: 4,
+      end: 6,
+      quote: "let soup = 'veg';",
+    });
+    // And an unseen comment carries no successor key at all, rather than a null.
+    assert.equal("successor" in (rows[0] as { successor?: unknown }), true);
+  } finally {
+    await served.close();
+  }
+});
+
+test("posting a comment becomes one turn and one Chat prompt", async () => {
+  submitted.length = 0;
+  mirrored.length = 0;
+  // The comment comes back from the store, because the anchors are the host's
+  // business: the route sends a selection, never an anchor.
+  const seam = fakeSeam({ comments: [storedComment] });
+  const served = await serve(seam);
+  try {
+    const response = await fetch(`${served.base}/api/c/1/comments`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        file: "conversation/1/soup.mjs",
+        line: 2,
+        charStart: 15,
+        charEnd: 21,
+        text: "can we use vegetable stock?",
+      }),
+    });
+    assert.equal(response.status, 201);
+    const body = (await response.json()) as { ok: boolean; id: string; submissionId: number };
+    assert.equal(body.ok, true);
+    assert.equal(body.id, "c-new");
+
+    // One turn, whose text names the address and the path and fences the quote.
+    assert.equal(submitted.length, 1);
+    const sent = String(submitted[0]);
+    assert.match(sent, /commented on conversation\/1\/soup\.mjs#L2C15-L2C21/);
+    assert.match(sent, /> pumpkin/);
+    assert.match(sent, /can we use vegetable stock\?|can we change the soup/);
+
+    // And the prompt reaches Chat with the submission, with the address linked
+    // into the viewer.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(mirrored.length, 1);
+    assert.equal(typeof mirrored[0]!.submissionId, "number");
+    assert.match(mirrored[0]!.prompt, /\*\*someone\*\* commented on/);
+  } finally {
+    await served.close();
+  }
+});
+
+test("a reply in a comment thread is mirrored, so Chat is not missing a turn", async () => {
+  // Review replies used to submit a turn and tell nobody in Chat: the thread
+  // showed the agent answering something that only existed in the drawer.
+  submitted.length = 0;
+  mirrored.length = 0;
+  const served = await serve(fakeSeam({ comments: [storedComment] }));
+  try {
+    const response = await fetch(`${served.base}/api/c/1/comments/c1/reply`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "it is reachable from the cron path" }),
+    });
+    assert.equal(response.status, 202);
+
+    // One turn, queued behind whatever is running rather than steering it.
+    assert.equal(submitted.length, 1);
+    assert.match(String(submitted[0]), /vegetable stock|can we change the soup/);
+
+    assert.equal(mirrored.length, 1);
+    assert.equal(typeof mirrored[0]!.submissionId, "number");
+    // Worded as a reply on the same address, not as a second review note.
+    assert.match(mirrored[0]!.prompt, /\*\*someone\*\* replied on soup\.mjs#L2C15-L2C21/);
+    assert.match(mirrored[0]!.prompt, /it is reachable from the cron path$/);
+  } finally {
+    await served.close();
+  }
+});
+
+test("a comment the host refuses is reported, not swallowed", async () => {
+  const served = await serve(
+    fakeSeam({ addComment: { error: "artifacts are not version controlled in this deployment" } }),
+  );
+  try {
+    const response = await fetch(`${served.base}/api/c/1/comments`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file: "a.sh", line: 1, text: "look" }),
+    });
+    // 400, not 500: this is an ordinary answer, and the page shows it verbatim.
+    assert.equal(response.status, 400);
+    const body = (await response.json()) as { ok: boolean; error: string };
+    assert.equal(body.ok, false);
+    assert.match(body.error, /not version controlled/);
+  } finally {
+    await served.close();
+  }
+});
+
+test("a reply and a resolve post to the thread, and the thread carries the answer", async () => {
+  const served = await serve(fakeSeam({ comments: [storedComment] }));
+  try {
+    submitted.length = 0;
+    const reply = await fetch(`${served.base}/api/c/1/comments/c1/reply`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "and the bread too" }),
+    });
+    assert.equal(reply.status, 202);
+    assert.match(String(submitted[0]), /and the bread too/);
+
+    const thread = await fetch(`${served.base}/api/c/1/comments/c1/thread`);
+    assert.equal(thread.status, 200);
+    const turns = (await thread.json()) as { kind: string; submissionId?: number; text: string; html?: string }[];
+    assert.equal(turns[0]!.kind, "answer");
+    assert.equal(turns[0]!.submissionId, 7);
+    assert.match(turns[0]!.text, /vegetable stock/);
+    assert.match(turns[0]!.html ?? "", /<p>/, "rendered server-side, like every other answer");
+
+    const resolved = await fetch(`${served.base}/api/c/1/comments/c1/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ resolved: true }),
+    });
+    assert.equal(resolved.status, 200);
+    assert.equal((await resolved.json() as { resolved: boolean }).resolved, true);
   } finally {
     await served.close();
   }

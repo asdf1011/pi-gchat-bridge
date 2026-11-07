@@ -423,6 +423,97 @@ test("the box is cleared after sending", async () => {
   }
 });
 
+/**
+ * The box being cleared is not the draft being cleared.
+ *
+ * `saveDraft()` is wired to `input` events only. Sending sets `box.value = ''`
+ * *programmatically*, which fires no `input`, so the saved draft survived the
+ * send — and `open()` restores it the next time the conversation is opened. The
+ * message was sent, the transcript showed it, and the input box was refilled
+ * with it later, which reads as the bridge having lost the message.
+ */
+test("sending clears the saved draft, so coming back does not refill the box", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    const doc = h.dom.window.document;
+    const win = h.dom.window;
+    const box = doc.getElementById("text") as HTMLTextAreaElement;
+
+    // Type it the way a person does — this is what saves the draft.
+    box.value = "ship it";
+    box.dispatchEvent(new win.Event("input"));
+    assert.equal(win.localStorage.getItem("pi-draft:7"), "ship it", "precondition: the draft was saved");
+
+    doc.getElementById("send")!.dispatchEvent(new win.Event("submit", { cancelable: true }));
+    await h.settle();
+
+    assert.equal(
+      win.localStorage.getItem("pi-draft:7"),
+      null,
+      "the draft must not survive a send, or it comes back in the box later",
+    );
+  } finally {
+    h?.close();
+  }
+});
+
+test("coming back after a send leaves the box empty", async () => {
+  // The same failure, asserted the way it was reported. A cold page load is what
+  // refilled the input box, so the honest test carries the storage state across
+  // two loads: send on the first, reopen on the second. Reading localStorage
+  // between them (rather than asserting `null` twice) is the point — whatever the
+  // send left behind is exactly what the second load sees.
+  let first: Harness | undefined;
+  let leftover: string | null = "unset";
+  try {
+    first = await loadPage({ conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    const doc = first.dom.window.document;
+    const win = first.dom.window;
+    const box = doc.getElementById("text") as HTMLTextAreaElement;
+
+    box.value = "ship it";
+    box.dispatchEvent(new win.Event("input"));
+    doc.getElementById("send")!.dispatchEvent(new win.Event("submit", { cancelable: true }));
+    await first.settle();
+
+    leftover = win.localStorage.getItem("pi-draft:7");
+  } finally {
+    first?.close();
+  }
+
+  assert.equal(leftover, null, "precondition: a send leaves no draft behind");
+
+  // Reopen the conversation in a fresh page, carrying over what the send left.
+  let second: Harness | undefined;
+  try {
+    second = await loadPage({
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+      ...(leftover === null ? {} : { draft: { conversationId: 7, text: leftover } }),
+    });
+    const box = second.dom.window.document.getElementById("text") as HTMLTextAreaElement;
+    assert.equal(box.value, "", "the message already sent must not be refilled into the box");
+  } finally {
+    second?.close();
+  }
+});
+
+test("a draft survives a reload that is not a send", async () => {
+  // The counterpart to the test above: clearing on send must not become
+  // "clearing on every navigation". A draft is still restored after a reload.
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+      draft: { conversationId: 7, text: "half a thought" },
+    });
+    const box = h.dom.window.document.getElementById("text") as HTMLTextAreaElement;
+    assert.equal(box.value, "half a thought");
+  } finally {
+    h?.close();
+  }
+});
+
 test("an empty box sends nothing", async () => {
   let h: Harness | undefined;
   try {
@@ -924,6 +1015,143 @@ test("a draft is restored when the conversation opens", async () => {
     // Cheap confidence the box was refitted to the restored text, not left at
     // one line.
     assert.ok(box.style.height !== "", "fitBox ran for the restored draft");
+  } finally {
+    h?.close();
+  }
+});
+
+test("an inline image from the renderer is rebased onto the mount", async () => {
+  // The renderer emits a *relative* source (`safeImageSrc` refuses anything
+  // absolute, so the markup stays portable across mounts). On a conversation
+  // page the document sits one level too deep — `/web/1/` — so a bare
+  // `api/c/...` would resolve to `/web/1/api/c/...` and 404. The page rebases it
+  // through `rel()`, which is what this pins: the failure was invisible in unit
+  // tests of the renderer, because the markup itself was correct.
+  const harness = await loadPage({
+    pathname: "/web/1/",
+    conversations: [{ conversationId: 1, chatKey: "c", model: "m", name: "pie" }],
+    history: [
+      {
+        role: "assistant",
+        text: "here ![pie](api/c/1/image/5/0)",
+        html: '<p>here <img src="api/c/1/image/5/0" alt="pie" loading="lazy"></p>',
+        entryId: 5,
+      },
+    ],
+  });
+  try {
+    await harness.settle();
+    const img = harness.dom.window.document.querySelector(".bubble img");
+    assert.ok(img, "the inline image should be in the bubble");
+    assert.equal(img.getAttribute("src"), "/web/api/c/1/image/5/0");
+    assert.deepEqual(harness.errors, []);
+  } finally {
+    harness.close();
+  }
+});
+
+test("a data: image source is left alone", async () => {
+  // The composer previews a just-pasted image from a data: URI; rebasing one
+  // would corrupt it. Only relative paths take the `rel()` treatment.
+  const harness = await loadPage({
+    pathname: "/web/1/",
+    conversations: [{ conversationId: 1, chatKey: "c", model: "m", name: "pie" }],
+    history: [
+      {
+        role: "assistant",
+        text: "x",
+        html: '<p><img src="data:image/png;base64,AAAA" alt="p"></p>',
+        entryId: 5,
+      },
+    ],
+  });
+  try {
+    await harness.settle();
+    const img = harness.dom.window.document.querySelector(".bubble img");
+    assert.ok(img, "the data: image should be in the bubble");
+    assert.equal(img.getAttribute("src"), "data:image/png;base64,AAAA");
+    assert.deepEqual(harness.errors, []);
+  } finally {
+    harness.close();
+  }
+});
+
+// --- Review comments ---------------------------------------------------------
+
+/** The framed artifact document, which is the only source of selection messages. */
+function artifactFrame(dom: JSDOM): HTMLIFrameElement {
+  const frame = dom.window.document.getElementById("artifact-frame");
+  assert.ok(frame instanceof dom.window.HTMLIFrameElement);
+  return frame as HTMLIFrameElement;
+}
+
+/** Post a message as the artifact document would, and let the handlers run. */
+async function fromFrame(h: Harness, data: unknown): Promise<void> {
+  const frame = artifactFrame(h.dom);
+  h.dom.window.dispatchEvent(
+    new h.dom.window.MessageEvent("message", { data, source: frame.contentWindow as Window }),
+  );
+  await h.settle();
+}
+
+test("a selection opens the composer without taking focus", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ pathname: "/7/", conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    assert.deepEqual(h.errors, []);
+    const doc = h.dom.window.document;
+    const bar = doc.getElementById("comment-bar")!;
+    assert.equal(bar.hidden, true, "nothing selected yet");
+
+    await fromFrame(h, { t: "pi-artifact-select", file: "notes.md", quote: "the kitten was a stowaway" });
+
+    assert.equal(bar.hidden, false, "the composer is offered");
+    assert.match(doc.getElementById("comment-addr")!.textContent ?? "", /notes\.md/);
+
+    // The rule this test exists for: focusing the field here raises the mobile
+    // keyboard, and raising the keyboard collapses the selection, so the reader can
+    // never drag the native grabbers to select more words.
+    assert.notEqual(doc.activeElement, doc.getElementById("comment-text"), "the field must not steal focus");
+  } finally {
+    h?.close();
+  }
+});
+
+test("adjusting the selection updates the address but keeps what was typed", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ pathname: "/7/", conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    const doc = h.dom.window.document;
+    const field = doc.getElementById("comment-text") as HTMLTextAreaElement;
+    await fromFrame(h, { t: "pi-artifact-select", file: "notes.md", quote: "crumbs" });
+    field.value = "instead of crumbs, ";
+
+    // A handle drag: same file, a longer quote.
+    await fromFrame(h, { t: "pi-artifact-select", file: "notes.md", quote: "instead of crumbs, mutant mice" });
+
+    assert.equal(field.value, "instead of crumbs, ", "a drag must not wipe the draft");
+    assert.match(doc.getElementById("comment-quote")!.textContent ?? "", /mutant mice/);
+  } finally {
+    h?.close();
+  }
+});
+
+test("deselecting closes the composer, unless a draft is in it", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ pathname: "/7/", conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    const doc = h.dom.window.document;
+    const bar = doc.getElementById("comment-bar")!;
+    const field = doc.getElementById("comment-text") as HTMLTextAreaElement;
+
+    await fromFrame(h, { t: "pi-artifact-select", file: "notes.md", quote: "crumbs" });
+    await fromFrame(h, { t: "pi-artifact-clear", file: "notes.md" });
+    assert.equal(bar.hidden, true, "an empty composer closes with the selection");
+
+    await fromFrame(h, { t: "pi-artifact-select", file: "notes.md", quote: "crumbs" });
+    field.value = "half a thought";
+    await fromFrame(h, { t: "pi-artifact-clear", file: "notes.md" });
+    assert.equal(bar.hidden, false, "a draft is never thrown away by a stray tap");
   } finally {
     h?.close();
   }

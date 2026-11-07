@@ -77,12 +77,19 @@ export const DEFAULT_MAX_ARTIFACT_BYTES = 1024 * 1024;
  * edits files in `PI_CWD` *and* in the agent config directory (`AGENTS.md`), and
  * a root list of just `PI_CWD` would silently hide the latter.
  */
-export function artifactRoots(cwd: string, agentDir: string): string[] {
+export function artifactRoots(
+  cwd: string,
+  agentDir: string,
+  extra: readonly string[] = [],
+): string[] {
   const configured = (process.env.BRIDGE_ARTIFACT_ROOTS ?? "")
     .split(":")
     .map((entry) => entry.trim())
     .filter((entry) => entry !== "");
-  const roots = configured.length > 0 ? configured : [cwd, agentDir];
+  // Deployment-configured roots win, but `extra` is appended either way: the
+  // artifact repository is created by this process, so it has to be servable
+  // regardless of how the roots were configured.
+  const roots = [...(configured.length > 0 ? configured : [cwd, agentDir]), ...extra];
   const seen = new Set<string>();
   const out: string[] = [];
   for (const root of roots) {

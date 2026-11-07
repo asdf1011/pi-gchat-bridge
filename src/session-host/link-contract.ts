@@ -82,6 +82,82 @@ export const ArtifactSchema = Type.Object({
   entryId: Type.Optional(Type.Number()),
 });
 
+export const CommentAnchorSchema = Type.Object({
+  changeId: Type.String(),
+  originalLine: Type.Number(),
+  content: Type.String(),
+});
+
+/**
+ * One comment, as it crosses the wire.
+ *
+ * `positions` travels with it because the host resolved them against the live
+ * revision: an adapter drawing a highlight must not re-derive them, since it has
+ * no repository to annotate against.
+ */
+export const CommentViewSchema = Type.Object({
+  id: Type.String(),
+  file: Type.String(),
+  anchors: Type.Array(CommentAnchorSchema),
+  quote: Type.Optional(Type.String()),
+  charStart: Type.Optional(Type.Number()),
+  charEnd: Type.Optional(Type.Number()),
+  occurrence: Type.Optional(Type.Number()),
+  text: Type.String(),
+  at: Type.Number(),
+  author: Type.Optional(Type.String()),
+  resolved: Type.Optional(Type.Boolean()),
+  state: Type.Union([
+    Type.Literal("visible"),
+    Type.Literal("superseded"),
+    Type.Literal("orphaned"),
+    Type.Literal("resolved"),
+  ]),
+  positions: Type.Array(Type.Number()),
+  successor: Type.Optional(
+    Type.Object({
+      revision: Type.String(),
+      kind: Type.Union([
+        Type.Literal("unchanged"),
+        Type.Literal("moved"),
+        Type.Literal("replaced"),
+        Type.Literal("removed"),
+      ]),
+      start: Type.Number(),
+      end: Type.Number(),
+      quote: Type.Optional(Type.String()),
+    }),
+  ),
+  atRevision: Type.Optional(Type.String()),
+  submissions: Type.Optional(Type.Array(Type.Number())),
+  replies: Type.Optional(
+    Type.Array(
+      Type.Object({ text: Type.String(), at: Type.Number(), author: Type.Optional(Type.String()) }),
+    ),
+  ),
+});
+
+export const CommentReplySchema = Type.Object({
+  kind: Type.Union([Type.Literal("answer"), Type.Literal("note")]),
+  text: Type.String(),
+  at: Type.Optional(Type.Number()),
+  submissionId: Type.Optional(Type.Number()),
+  author: Type.Optional(Type.String()),
+});
+
+/**
+ * The result of adding a comment.
+ *
+ * A loose object rather than a union of two shapes: chord's schema language has
+ * no cheap discriminated union, and "either the stored comment or a reason it
+ * was refused" is exactly two optional fields, which both ends already have to
+ * check anyway.
+ */
+export const CommentCreateResultSchema = Type.Object({
+  comment: Type.Optional(CommentViewSchema),
+  error: Type.Optional(Type.String()),
+});
+
 /** One conversation, as a remote object: its view is state, its actions are methods. */
 export const ConversationContract = remote("pi-bridge.conversation", {
   version: 1,
@@ -109,6 +185,48 @@ export const ConversationContract = remote("pi-bridge.conversation", {
         image: method(
           Type.Object({ entryId: Type.Number(), index: Type.Number() }),
           Type.Union([Type.Object({ mimeType: Type.String(), data: Type.String() }), Type.Null()]),
+        ),
+        // Review comments. The anchors are derived host-side from the artifact
+        // repository's own annotation, so what crosses is a *selection* on the
+        // way in and resolved *positions* on the way out.
+        comments: method(Type.Object({}), Type.Array(CommentViewSchema)),
+        addComment: method(
+          Type.Object({
+            file: Type.String(),
+            // Optional: a *rendered* document reports the selected text and the
+            // host derives the line from it, so this is absent when commenting on
+            // Markdown rather than on a numbered source view.
+            line: Type.Optional(Type.Number()),
+            endLine: Type.Optional(Type.Number()),
+            charStart: Type.Optional(Type.Number()),
+            charEnd: Type.Optional(Type.Number()),
+            quote: Type.Optional(Type.String()),
+            occurrence: Type.Optional(Type.Number()),
+            text: Type.String(),
+            author: Type.Optional(Type.String()),
+          }),
+          CommentCreateResultSchema,
+        ),
+        resolveComment: method(
+          Type.Object({ commentId: Type.String(), resolved: Type.Boolean() }),
+          Type.Boolean(),
+        ),
+        noteCommentSubmission: method(
+          Type.Object({ commentId: Type.String(), submissionId: Type.Number() }),
+          Type.Null(),
+        ),
+        commentThread: method(
+          Type.Object({ commentId: Type.String() }),
+          Type.Array(CommentReplySchema),
+        ),
+        /**
+         * The agent replying into a thread. Not a submission: the reply is for the
+         * review pane, so it never reaches Chat and never re-enters the model's
+         * context.
+         */
+        replyToComment: method(
+          Type.Object({ commentId: Type.String(), text: Type.String() }),
+          Type.Object({ id: Type.Optional(Type.String()), error: Type.Optional(Type.String()) }),
         ),
       },
     },
@@ -149,13 +267,13 @@ export const SessionContract = remote("pi-bridge.session", {
          */
         has: method(Type.Object({ conversation: Type.Number() }), Type.Boolean()),
         /**
-         * Say something in the Chat thread behind a conversation.
+         * Show a turn started on another surface in the Chat side of a conversation.
          *
          * On the session object because it needs the Chat client and the
          * conversation-name mapping, neither of which an adapter has.
          */
-        announce: method(
-          Type.Object({ conversation: Type.Number(), text: Type.String() }),
+        mirrorTurn: method(
+          Type.Object({ conversation: Type.Number(), submission: Type.Number(), prompt: Type.String() }),
           Type.Boolean(),
         ),
       },

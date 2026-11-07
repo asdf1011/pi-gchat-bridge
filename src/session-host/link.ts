@@ -18,9 +18,13 @@
  *
  * Deliberately not published yet: everything the two live adapters never call.
  * `state`, `models`, `setModel`, `create`, `bind`, `unbind`, `label`, `compact`,
- * `abort`, `usage`, `awaitSubmission`, `write`, the claim/verdict operations and
- * `firstTurn` throw `notImplemented` over the link, and each becomes a contract
- * method the day an adapter in another process needs it.
+ * `abort`, `usage`, `awaitSubmission`, `write`, the claim/verdict operations,
+ * `firstTurn` and the comment operations throw `notImplemented` over the link, and
+ * each becomes a contract method the day an adapter in another process needs it.
+ * The comment operations are the next candidates: an artifact origin in its own
+ * process would read them, and `BRIDGE_WEB_ENGINE=link` would need them to create
+ * one. Until then comments work in the default `inprocess` engine only, which is
+ * what `main.ts` runs.
  *
  * Two constraints that cost real debugging and are easy to walk into again:
  *
@@ -36,6 +40,9 @@ import { createHost, type Host } from "@earendil-works/chord";
 
 import type {
   AgentConfig,
+  CommentInput,
+  CommentReply,
+  CommentView,
   TranscriptMessage,
   AdapterEntry,
   AdapterVerdict,
@@ -82,8 +89,15 @@ export function serveSessionHost(seam: SessionHost): Host {
     resolve: async ({ name }) => (await seam.resolve(name)) ?? null,
     getOrCreate: async ({ name, agent }) => seam.getOrCreate(name, agent),
     has: async ({ conversation }) => (await seam.snapshot(conversation)) !== undefined,
-    announce: async ({ conversation, text }: { conversation: number; text: string }) =>
-      seam.announce(conversation, text),
+    mirrorTurn: async ({
+      conversation,
+      submission,
+      prompt,
+    }: {
+      conversation: number;
+      submission: number;
+      prompt: string;
+    }) => seam.mirrorTurn(conversation, submission, prompt),
   }));
 
   // The factory is synchronous by contract; the wiring it needs is asynchronous,
@@ -147,6 +161,56 @@ export function serveSessionHost(seam: SessionHost): Host {
       ],
       image: async ({ entryId, index }: { entryId: number; index: number }) =>
         (await seam.image(conversation, entryId, index)) ?? null,
+      comments: async () => [...((await seam.comments(conversation)) ?? [])],
+      addComment: async (input: {
+        file: string;
+        line?: number;
+        endLine?: number;
+        charStart?: number;
+        charEnd?: number;
+        quote?: string;
+        occurrence?: number;
+        text: string;
+        author?: string;
+      }) => {
+        const result = await seam.addComment(conversation, {
+          file: input.file,
+          selection: {
+            ...(input.line === undefined ? {} : { line: input.line }),
+            ...(input.quote === undefined ? {} : { quote: input.quote }),
+            ...(input.occurrence === undefined ? {} : { occurrence: input.occurrence }),
+            ...(input.endLine === undefined ? {} : { endLine: input.endLine }),
+            ...(input.charStart === undefined ? {} : { charStart: input.charStart }),
+            ...(input.charEnd === undefined ? {} : { charEnd: input.charEnd }),
+          },
+          text: input.text,
+          ...(input.author === undefined ? {} : { author: input.author }),
+        });
+        // The wire shape is two optional fields; the seam's is a union. This is
+        // where they meet, and a "neither" answer is turned into a refusal rather
+        // than a lie about which one it was.
+        if ("error" in result) return { error: result.error };
+        return { comment: result.comment };
+      },
+      resolveComment: async ({ commentId, resolved }: { commentId: string; resolved: boolean }) =>
+        seam.resolveComment(conversation, commentId, resolved),
+      noteCommentSubmission: async ({
+        commentId,
+        submissionId,
+      }: {
+        commentId: string;
+        submissionId: number;
+      }) => {
+        await seam.noteCommentSubmission(conversation, commentId, submissionId);
+        return null;
+      },
+      commentThread: async ({ commentId }: { commentId: string }) => [
+        ...((await seam.commentThread(conversation, commentId)) ?? []),
+      ],
+      replyToComment: async ({ commentId, text }: { commentId: string; text: string }) => {
+        const result = await seam.replyToComment(conversation, commentId, text);
+        return "error" in result ? { error: result.error } : { id: result.id };
+      },
     };
   });
 
@@ -270,9 +334,11 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
       }
     },
 
-    announce: async (conversationId: number, text: string) => {
+    mirrorTurn: async (conversationId: number, submissionId: number, prompt: string) => {
       const root = await session();
-      return host.root((ctx) => root.announce({ conversation: conversationId, text }, ctx));
+      return host.root((ctx) =>
+        root.mirrorTurn({ conversation: conversationId, submission: submissionId, prompt }, ctx),
+      );
     },
 
     image: async (conversationId: number, entryId: number, index: number) => {
@@ -286,6 +352,90 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
       }
     },
 
+    comments: async (conversationId: number) => {
+      const ref = await conversationRef(host, conversationId, session);
+      if (!ref) return undefined;
+      try {
+        return (await host.root((ctx) => ref.comments({}, ctx))) as readonly CommentView[];
+      } finally {
+        ref.release();
+      }
+    },
+
+    addComment: async (conversationId: number, input: CommentInput) => {
+      const ref = await conversationRef(host, conversationId, session);
+      if (!ref) return { error: `no such conversation: ${conversationId}` };
+      try {
+        const result = (await host.root((ctx) =>
+          ref.addComment(
+            {
+              file: input.file,
+              ...(input.selection.line === undefined ? {} : { line: input.selection.line }),
+              ...(input.selection.quote === undefined ? {} : { quote: input.selection.quote }),
+              ...(input.selection.occurrence === undefined ? {} : { occurrence: input.selection.occurrence }),
+              ...(input.selection.endLine === undefined ? {} : { endLine: input.selection.endLine }),
+              ...(input.selection.charStart === undefined ? {} : { charStart: input.selection.charStart }),
+              ...(input.selection.charEnd === undefined ? {} : { charEnd: input.selection.charEnd }),
+              text: input.text,
+              ...(input.author === undefined ? {} : { author: input.author }),
+            },
+            ctx,
+          ),
+        )) as { comment?: CommentView; error?: string };
+        if (result.comment === undefined) {
+          return { error: result.error ?? "the host declined the comment" };
+        }
+        return { comment: result.comment };
+      } finally {
+        ref.release();
+      }
+    },
+
+    resolveComment: async (conversationId: number, commentId: string, resolved: boolean) => {
+      const ref = await conversationRef(host, conversationId, session);
+      if (!ref) return false;
+      try {
+        return Boolean(await host.root((ctx) => ref.resolveComment({ commentId, resolved }, ctx)));
+      } finally {
+        ref.release();
+      }
+    },
+
+    noteCommentSubmission: async (conversationId: number, commentId: string, submissionId: number) => {
+      const ref = await conversationRef(host, conversationId, session);
+      if (!ref) return;
+      try {
+        await host.root((ctx) => ref.noteCommentSubmission({ commentId, submissionId }, ctx));
+      } finally {
+        ref.release();
+      }
+    },
+
+    replyToComment: async (conversationId: number, commentId: string, text: string) => {
+      const ref = await conversationRef(host, conversationId, session);
+      if (!ref) return { error: `no such conversation: ${conversationId}` };
+      try {
+        const result = (await host.root((ctx) => ref.replyToComment({ commentId, text }, ctx))) as {
+          id?: string;
+          error?: string;
+        };
+        return result.id === undefined
+          ? { error: result.error ?? "the host declined the reply" }
+          : { id: result.id };
+      } finally {
+        ref.release();
+      }
+    },
+
+    commentThread: async (conversationId: number, commentId: string) => {
+      const ref = await conversationRef(host, conversationId, session);
+      if (!ref) return undefined;
+      try {
+        return (await host.root((ctx) => ref.commentThread({ commentId }, ctx))) as readonly CommentReply[];
+      } finally {
+        ref.release();
+      }
+    },
     state: () => {
       throw notImplemented("state");
     },

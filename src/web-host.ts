@@ -18,15 +18,27 @@ import http from "node:http";
 
 import { createHost, ipcLink } from "@earendil-works/chord";
 
+import path from "node:path";
+
 import { handleWebRequest } from "./adapter/web-routes.js";
 import { identify } from "./durable/identity.js";
 import { logger } from "./logger.js";
 import { linkSessionHost } from "./session-host/link.js";
+import { repoRelativePath } from "./durable/artifact-vcs.js";
 
 const port = Number(process.env.BRIDGE_WEB_PORT ?? 0);
 const bind = process.env.BRIDGE_BIND ?? "127.0.0.1";
 const token = process.env.BRIDGE_WEB_TOKEN ?? "";
 const artifactsBaseUrl = process.env.BRIDGE_ARTIFACTS_BASE_URL ?? "";
+/**
+ * Where artifact files live on disk, so a comment's message can name the real
+ * path rather than the viewer's key.
+ *
+ * Read here rather than passed down because this process is the one that serves
+ * the routes — with `BRIDGE_WEB_ENGINE=link` the session host never sees a browser
+ * request. Empty means artifacts are not tracked, and the key is all there is.
+ */
+const artifactsDir = (process.env.BRIDGE_ARTIFACTS_DIR ?? "").trim();
 const trustedProxy = process.env.BRIDGE_TRUSTED_PROXY ?? "";
 const provider = process.env.BRIDGE_WEB_DEFAULT_PROVIDER ?? "";
 const modelId = process.env.BRIDGE_WEB_DEFAULT_MODEL ?? "";
@@ -68,6 +80,17 @@ const server = http.createServer((req, res) => {
         model,
         ...(token ? { token } : {}),
         ...(artifactsBaseUrl ? { artifactsBaseUrl } : {}),
+        ...(artifactsDir === ""
+          ? {}
+          : {
+              // The comment names its file the way the viewer does
+              // (`conversation/7/a.sh`); the repository is the conversation's
+              // directory, so strip that much before joining.
+              artifactPath: (conversationId: number, file: string): string => {
+                const dir = path.join(artifactsDir, "conversation", String(conversationId));
+                return path.join(dir, repoRelativePath(dir, file));
+              },
+            }),
         who,
       });
       if (handled) return;

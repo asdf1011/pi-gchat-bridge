@@ -19,12 +19,14 @@ import {
   MAX_WEB_IMAGE_BYTES,
   MAX_WEB_IMAGES,
   WEB_ICON,
+  WEB_RENDER_OPTIONS,
   webPage,
   webPageVersion,
   webSubmit,
   type PastedImage,
 } from "./web.js";
 import { renderMarkdown } from "./markdown.js";
+import { anchorAddress, chatReplyText, chatText, MAX_COMMENT_CHARS, modelText } from "../durable/comments.js";
 import type { SessionHost } from "../session-host/api.js";
 import { logger } from "../logger.js";
 
@@ -76,6 +78,14 @@ export interface WebRouteOptions {
    * buttons: an artifact link that cannot be opened is worse than no link.
    */
   artifactsBaseUrl?: string;
+  /**
+   * Where a comment's file lives on disk, for the message the model receives.
+   *
+   * Absolute, because the model has tools: `a.sh` alone does not say which of the
+   * directories a session can see. Supplied by the caller, which is the only place
+   * that knows where artifacts are rooted.
+   */
+  artifactPath?: (conversationId: number, file: string) => string;
   /** Resolved by the caller, so this module does no header trust of its own. */
   who: Identity;
   log?: { info(message: string): void };
@@ -145,11 +155,20 @@ export async function handleWebRequest(
     res.end(req.method === "HEAD" ? undefined : WEB_ICON);
     return true;
   }
-
   const isPage =
     path === "/" || path === "" || path === "/web" || path === "/web/" || /^\/\d+\/?$/.test(path);
   if ((req.method === "GET" || req.method === "HEAD") && isPage) {
-    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+    res.writeHead(200, {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+      // A second barrier behind the renderer's source check, not a replacement
+      // for it: `img-src 'self' data:` means that even if a source slipped past
+      // `safeImageSrc`, the browser would refuse to fetch another host — and
+      // would refuse `data:` too if the list did not name it. `data:` is here
+      // for the composer's optimistic preview of a just-pasted image, which is
+      // this origin's own bytes. No CDN, no avatars, no remote anything.
+      "Content-Security-Policy": "img-src 'self' data:; object-src 'none'; base-uri 'self'",
+    });
     res.end(webPage());
     return true;
   }
@@ -195,7 +214,7 @@ export async function handleWebRequest(
     // second renderer or an unsanitised `innerHTML` — and this origin can submit
     // messages, so an injected script would be able to run tools.
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(messages.map((m) => ({ ...m, html: renderMarkdown(m.text) }))));
+    res.end(JSON.stringify(messages.map((m) => ({ ...m, html: renderMarkdown(m.text, WEB_RENDER_OPTIONS) }))));
     return true;
   }
 
@@ -318,7 +337,7 @@ export async function handleWebRequest(
           // injected one could drive tools.
           const payload =
             event === "text" && typeof (data as { text?: unknown }).text === "string"
-              ? { ...(data as object), html: renderMarkdown((data as { text: string }).text) }
+              ? { ...(data as object), html: renderMarkdown((data as { text: string }).text, WEB_RENDER_OPTIONS) }
               : data;
           res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
         } catch {
@@ -396,9 +415,12 @@ export async function handleWebRequest(
     }
     const result = await webSubmit(handleOptions, Number(send[1]), text, "steer", images);
     if (result.ok) {
-      // Chat cannot show this as the person who typed it, but the thread should
-      // read as a conversation: say who spoke and what they said. Failure is
-      // logged and ignored — a missing notice must never fail the submission.
+      // Chat cannot show this as the person who typed it, but the conversation
+      // has to read the same on both surfaces: the prompt rides into Chat with
+      // the answer, quoted above it, so there is no message missing from the
+      // thread and no notification about words the person typed themselves
+      // (`durable/mirror.ts`). Failure is logged and ignored — a missing mirror
+      // must never fail the submission.
       const speaker = (who.email ?? "someone").split("@")[0];
       // Truncated: a long paste would be a Chat API error, and the notice is a
       // signpost to the conversation, not a copy of it. "attached", not
@@ -406,8 +428,8 @@ export async function handleWebRequest(
       const attachment = images.length === 0 ? "" : ` [${images.length} image${images.length === 1 ? "" : "s"} attached]`;
       const notice = (text.length > 1200 ? `${text.slice(0, 1200)}…` : text) + attachment;
       void seam
-        .announce(Number(send[1]), `${speaker} (webui): ${notice}`)
-        .catch((error: unknown) => log.info(`[web] announce failed: ${(error as Error).message}`));
+        .mirrorTurn(Number(send[1]), result.submissionId, `${speaker} (webui): ${notice}`)
+        .catch((error: unknown) => log.info(`[web] mirror failed: ${(error as Error).message}`));
       // Who asked, and which conversation: this bridge can run shell commands,
       // so "who submitted this" belongs in the log.
       log.info(
@@ -419,7 +441,286 @@ export async function handleWebRequest(
     return true;
   }
 
+  // --- Review comments -----------------------------------------------------
+  //
+  // A comment is two things at once, and the order matters: a durable record
+  // (so the review survives a restart) and a turn (so the agent can act on it).
+  // The record is written first — losing the answer is recoverable, losing the
+  // reviewer's words is not.
+  const commentList = /^\/api\/c\/(\d+)\/comments$/.exec(api);
+  if (req.method === "GET" && commentList) {
+    const comments = await seam.comments(Number(commentList[1]));
+    if (comments === undefined) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: `no such conversation: ${commentList[1]}` }));
+      return true;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify(
+        comments.map((comment) => ({
+          id: comment.id,
+          file: comment.file,
+          // The address is formatted here, so the page and the Chat message can
+          // never disagree about how a comment is cited.
+          address: anchorAddress(comment),
+          anchors: comment.anchors,
+          ...(comment.quote === undefined ? {} : { quote: comment.quote }),
+          text: comment.text,
+          at: comment.at,
+          ...(comment.author === undefined ? {} : { author: comment.author }),
+          state: comment.state,
+          resolved: comment.resolved === true,
+          positions: comment.positions,
+          // Where the lines went, when the revision that replaced them is known.
+          // The page draws the note against that section instead of filing it under
+          // "orphaned", which was the successful review being reported as a failure.
+          ...(comment.successor === undefined ? {} : { successor: comment.successor }),
+          replies: (comment.submissions ?? []).length,
+        })),
+      ),
+    );
+    return true;
+  }
+
+  const commentCreate = /^\/api\/c\/(\d+)\/comments$/.exec(api);
+  if (req.method === "POST" && commentCreate) {
+    if (token && req.headers.authorization !== `Bearer ${token}`) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "unauthorized" }));
+      return true;
+    }
+    const body = await readBody(req, 64_000);
+    if (body === null) {
+      res.writeHead(413, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "request body too large" }));
+      return true;
+    }
+    let parsed: {
+      file?: unknown;
+      line?: unknown;
+      endLine?: unknown;
+      charStart?: unknown;
+      charEnd?: unknown;
+      quote?: unknown;
+      occurrence?: unknown;
+      text?: unknown;
+    };
+    try {
+      parsed = JSON.parse(body) as typeof parsed;
+    } catch {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "invalid JSON body" }));
+      return true;
+    }
+    const conversationId = Number(commentCreate[1]);
+    if (typeof parsed.file !== "string" || parsed.file === "") {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "missing file" }));
+      return true;
+    }
+    if (typeof parsed.text !== "string" || parsed.text.trim() === "") {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "empty comment" }));
+      return true;
+    }
+    const number = (value: unknown): number | undefined =>
+      typeof value === "number" && Number.isFinite(value) ? value : undefined;
+    const selection = {
+      ...(number(parsed.line) === undefined ? {} : { line: number(parsed.line)! }),
+      ...(number(parsed.endLine) === undefined ? {} : { endLine: number(parsed.endLine)! }),
+      ...(number(parsed.charStart) === undefined ? {} : { charStart: number(parsed.charStart)! }),
+      ...(number(parsed.charEnd) === undefined ? {} : { charEnd: number(parsed.charEnd)! }),
+      ...(typeof parsed.quote === "string" && parsed.quote.trim() !== "" ? { quote: parsed.quote } : {}),
+      ...(number(parsed.occurrence) === undefined ? {} : { occurrence: number(parsed.occurrence)! }),
+    };
+    const speaker = (who.email ?? "someone").split("@")[0]!;
+    const created = await seam.addComment(conversationId, {
+      file: parsed.file,
+      selection,
+      text: parsed.text,
+      author: speaker,
+    });
+    if ("error" in created) {
+      // Not a 500: "this deployment does not version artifacts" is an ordinary
+      // answer, and the page shows it next to the selection.
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: created.error }));
+      return true;
+    }
+
+    // The turn. Rendered by the host's own rule for what a comment looks like to
+    // a model, so the message and the review pane cannot drift apart.
+    const path = options.artifactPath?.(conversationId, parsed.file) ?? parsed.file;
+    // The host returns the comment it stored — anchors and resolved quote
+    // included — so the message is worded from what was recorded, never from
+    // what the request claimed.
+    const stored = created.comment;
+    const message = modelText({ ...stored, author: speaker }, { path });
+    const result = await seam.submit(conversationId, {
+      content: message,
+      whenBusy: "steer",
+      // One comment, one turn: a double-click or a retry must not start two.
+      requestId: `comment:${stored.id}`,
+    });
+    if ("error" in result) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: result.error, id: stored.id }));
+      return true;
+    }
+    await seam.noteCommentSubmission(conversationId, stored.id, result.submissionId).catch(() => {});
+
+    // A Chat reader cannot see the web pane, so the thread is told what is being
+    // reviewed — with the address as a link into the viewer — and then the answer
+    // follows it, in one message (see the submit path above).
+    void seam
+      .mirrorTurn(
+        conversationId,
+        result.submissionId,
+        chatText({ ...stored, author: speaker }, { url: viewerUrl(options, conversationId, stored), speaker }),
+      )
+      .catch((error: unknown) => log.info(`[web] mirror failed: ${(error as Error).message}`));
+    log.info(`[web] ${who.email ?? "anonymous"}: commented on ${parsed.file} (submission ${result.submissionId})`);
+
+    res.writeHead(201, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, id: stored.id, submissionId: result.submissionId }));
+    return true;
+  }
+
+  const commentReply = /^\/api\/c\/(\d+)\/comments\/([^/]+)\/reply$/.exec(api);
+  if (req.method === "POST" && commentReply) {
+    if (token && req.headers.authorization !== `Bearer ${token}`) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "unauthorized" }));
+      return true;
+    }
+    const conversationId = Number(commentReply[1]);
+    const commentId = decodeURIComponent(commentReply[2]!);
+    const body = await readBody(req, 64_000);
+    if (body === null) {
+      res.writeHead(413, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "request body too large" }));
+      return true;
+    }
+    let text = "";
+    try {
+      text = (JSON.parse(body) as { text?: unknown }).text as string;
+    } catch {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "invalid JSON body" }));
+      return true;
+    }
+    if (typeof text !== "string" || text.trim() === "" || text.length > MAX_COMMENT_CHARS) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "a reply needs text, under the length limit" }));
+      return true;
+    }
+    const stored = (await seam.comments(conversationId))?.find((candidate) => candidate.id === commentId);
+    if (!stored) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "no such comment" }));
+      return true;
+    }
+    // A reply is a follow-up in the same thread, so it names the comment it
+    // belongs to — the model sees the address again and knows what it is about.
+    const path = options.artifactPath?.(conversationId, stored.file) ?? stored.file;
+    const reply = `${modelText(stored, { path })}\n\n(reply from ${(who.email ?? "someone").split("@")[0]})\n\n${text.trim()}`;
+    const result = await seam.submit(conversationId, { content: reply, whenBusy: "followUp" });
+    if ("error" in result) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: result.error }));
+      return true;
+    }
+    await seam.noteCommentSubmission(conversationId, commentId, result.submissionId).catch(() => {});
+    // Mirrored like every other submission. It used to be missing here, which made
+    // a review reply the one kind of message Chat never saw: the thread showed the
+    // agent answering a reply that was only in the drawer.
+    const speaker = (who.email ?? "someone").split("@")[0]!;
+    void seam
+      .mirrorTurn(
+        conversationId,
+        result.submissionId,
+        chatReplyText(stored, text.trim(), { url: viewerUrl(options, conversationId, stored), speaker }),
+      )
+      .catch((error: unknown) => log.info(`[web] mirror failed: ${(error as Error).message}`));
+    res.writeHead(202, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, submissionId: result.submissionId }));
+    return true;
+  }
+
+  const commentThread = /^\/api\/c\/(\d+)\/comments\/([^/]+)\/thread$/.exec(api);
+  if (req.method === "GET" && commentThread) {
+    const replies = await seam.commentThread(Number(commentThread[1]), decodeURIComponent(commentThread[2]!));
+    if (replies === undefined) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "no such comment" }));
+      return true;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify(
+        replies.map((reply) => ({
+          kind: reply.kind,
+          ...(reply.submissionId === undefined ? {} : { submissionId: reply.submissionId }),
+          ...(reply.at === undefined ? {} : { at: reply.at }),
+          ...(reply.author === undefined ? {} : { author: reply.author }),
+          text: reply.text,
+          html: renderMarkdown(reply.text),
+        })),
+      ),
+    );
+    return true;
+  }
+
+  const commentResolve = /^\/api\/c\/(\d+)\/comments\/([^/]+)\/resolve$/.exec(api);
+  if (req.method === "POST" && commentResolve) {
+    if (token && req.headers.authorization !== `Bearer ${token}`) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "unauthorized" }));
+      return true;
+    }
+    const body = await readBody(req, 4096);
+    let resolved = true;
+    if (body !== null && body.trim() !== "") {
+      try {
+        const parsed = JSON.parse(body) as { resolved?: unknown };
+        if (typeof parsed.resolved === "boolean") resolved = parsed.resolved;
+      } catch {
+        // A body-less resolve is the common case; a malformed one resolves too.
+      }
+    }
+    const changed = await seam.resolveComment(
+      Number(commentResolve[1]),
+      decodeURIComponent(commentResolve[2]!),
+      resolved,
+    );
+    res.writeHead(changed ? 200 : 404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: changed, resolved }));
+    return true;
+  }
+
   return false;
+}
+
+/**
+ * A link into the viewer for one comment's address.
+ *
+ * Empty when `artifactsBaseUrl` is unset — the side-panel deployment has no origin
+ * to link to, and a plain label still says which line is being discussed. The
+ * anchor suffix is the address's own tail (`#L3C126-L3C131`), sliced rather than
+ * rebuilt so a person reading Chat links to exactly what a person reading the
+ * drawer sees.
+ */
+function viewerUrl(
+  options: { artifactsBaseUrl?: string },
+  conversationId: number,
+  comment: { file: string; anchors: readonly { originalLine: number }[]; charStart?: number; charEnd?: number },
+): string {
+  const base = (options.artifactsBaseUrl ?? "").replace(/\/$/, "");
+  if (base === "") return "";
+  const suffix = anchorAddress(comment).slice(comment.file.length);
+  const framePath = comment.file.split("/").map(encodeURIComponent).join("/");
+  return `${base}/c/${conversationId}/${framePath}?view=source${suffix}`;
 }
 
 /** Read a request body up to `maxBytes`; returns null when the cap is exceeded. */

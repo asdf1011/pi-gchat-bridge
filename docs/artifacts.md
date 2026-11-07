@@ -117,6 +117,101 @@ reads, so a rendered document must be assumed hostile.
 - **The listener is GET-only and bound to `127.0.0.1`.** The tunnel is the only
   way in, and the mutating API is not reachable on this port at all.
 
+## Review comments
+
+A comment is a position **in history**, not in a file, and everything here follows
+from that.
+
+**The anchor.** Each selected line becomes `(change id, original line, that
+line's text)` from `jj file annotate`. All three are needed: the change id narrows
+to "this revision touched it", the line numbers pick which of that revision's
+lines it was, and the text rules out a different line sliding into the same
+number after a deletion. `original_line_number` — not `line_number` — is the
+field that matters: insert three lines above a comment and the current number
+shifts while the original one does not, so an insertion does not orphan a review
+(`test/artifact-vcs.test.ts`).
+
+**Liveness.** A comment is `visible` while every anchor still resolves in the
+revision being displayed, `orphaned` when it does not, and `resolved` only by an
+explicit action. Orphaned is not resolved: a comment whose line was rewritten is
+still open, still listed, and still shown — it just has no position to highlight.
+Nothing is ever auto-resolved, because a deleted line is not an answered question.
+
+**What the address means.** `conversation/7/note.md#L3C13-L3C19` — 1-based,
+inclusive, counted in code points; character offsets only within one line, since
+a two-dimensional span (`#L3C13-L5C4`) is a shape no viewer knows how to draw. The
+model receives that address plus the absolute path and the quoted text in a
+blockquote; Chat receives the same address as a link, so a reader can open the
+exact line.
+
+**Where comments live.** `gchat.comments`, a session-scoped document
+(`src/durable/comments-doc.ts`), written *before* the turn is submitted: losing an
+answer is recoverable, losing the reviewer's words is not. The turn's text is a
+normal submission (`whenBusy: "steer"`, `requestId: comment:<id>` so a double click
+cannot start two), and the submission id is recorded so a thread can recover its
+answers with `awaitSubmission` instead of copying the transcript.
+
+**The agent's replies are plumbing, and that is enforced by construction.** The
+agent has one tool, `comment_reply(commentId, text)`, and it writes a `replies[]`
+entry on the comment document — not a submission, not a transcript entry, and never
+a `mirrorTurn`. So its reply shows in the drawer and nowhere else: it does not
+reach Chat, and it cannot come back to the model as context on a later turn and
+read like something the user said.
+
+A *reviewer's* reply is the other half of that asymmetry, and it is an ordinary
+submission (`whenBusy: "followUp"`, mirrored into Chat like any other turn) because
+a person speaking is a message, not an annotation. Replies were once left unmirrored
+here, which made them the one kind of message Chat never saw: the thread showed the
+agent answering something only the drawer held. The conversation sees only the turn's own answer,
+which is what makes a Chat thread read as "here is the change, and here is why".
+
+That is why the model is told the comment id — `[comment a123dcee]` on the
+address line — and why the prefix is resolved host-side: a model should not have
+to reproduce thirty-six characters, and an ambiguous prefix is refused rather
+than guessed.
+
+There is deliberately **no `comment_resolve` tool and no `comment_list`**.
+Resolving says nothing actionable, so the agent neither needs it nor may close a
+reviewer's note; resolve stays a human action, recorded where the model cannot
+see it. A list tool would invite an agent to invent work from other people's open
+notes.
+
+**Who can submit.** Not the artifact origin. The framed document is a different
+origin, sandboxed with `allow-scripts` and without `allow-same-origin`, and it can
+only `postMessage` a selection to its parent — it has no network at all
+(`default-src 'none'`). The composer, the thread and the resolve button live in
+the chat UI, which owns the session and the API. The parent verifies
+`event.source === frame.contentWindow`, because a sandboxed frame's origin is
+`"null"` and an origin check would have to accept everything.
+
+**The source view.** `?view=source` serves numbered lines with the comments already
+marked: whole-line comments highlight the line, a character range highlights
+exactly those characters, and a superscript number opens the thread. It is the one
+document on this origin that runs script, so it carries a per-response nonce
+(`script-src 'nonce-…'`) and every byte of the file is escaped into it as text.
+The plain `text/plain` view and `?render` are unchanged.
+
+**Revisions.** `?rev=<changeId>` serves the file as a revision held it, out of jj
+rather than off the disk; the live file remains the default. Bindings record the
+newest revision each conversation produced (`ArtifactRevision`), which is what a
+revision picker will list.
+
+### Not done yet
+
+- **The drawer opens the live file.** Pinning by default to "the revision this
+  conversation produced" needs the picker, and the pins are already recorded.
+- **No dropdown.** `revisionLog()` (jj `files()` revset) lists a file's revisions
+  in one call; the UI for choosing one is not written.
+- **Commenting is source-view only.** A rendered Markdown page has no line numbers
+  to anchor to, so `?render` shows no marks yet.
+- **`BRIDGE_WEB_ENGINE=link`** publishes the comment operations over the chord
+  link (see `link-contract.ts`); the other adapter-side operations still do not.
+- **Replying has no idempotency key.** A double-click on "Reply" can start two
+  turns; the comment's own turn is keyed, the replies are not.
+- **The agent cannot resolve**, and cannot see resolved state at all — by design
+  (above), but it means it will happily re-fix something you already resolved if
+  the same line is commented on again.
+
 ## Known limits
 
 - `bash`-made changes are not listed (above).

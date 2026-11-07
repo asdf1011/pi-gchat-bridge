@@ -256,6 +256,35 @@
   #artifacts.showing-doc #artifact-doc { transform: translateX(0); }
   #artifact-frame { flex: 1; border: 0; width: 100%; background: #fff0; }
   #artifact-hint { padding: .5rem .75rem; font-size: .85em; opacity: .7; margin: 0; }
+  /* Review comments. The bar sits at the foot of the drawer rather than floating
+     over the selection: it is one place for all comment chrome, it cannot cover
+     the text being commented on, and on a phone the keyboard pushes it up. */
+  #comment-bar, #comment-sheet { position: absolute; left: 0; right: 0; bottom: 0; z-index: 3;
+    background: Canvas; border-top: 1px solid #8886; box-shadow: 0 -6px 24px #0002;
+    padding: .6rem .75rem; display: flex; flex-direction: column; gap: .45rem;
+    max-height: 70%; overflow: auto; }
+  #comment-bar[hidden], #comment-sheet[hidden] { display: none; }
+  #comment-bar .addr, #comment-sheet .addr { font: .78em var(--mono, monospace); opacity: .75;
+    display: flex; gap: .5rem; align-items: baseline; }
+  #comment-bar .addr span, #comment-sheet .addr span { flex: 1; min-width: 0; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  #comment-bar .quote, #comment-sheet .quote { margin: 0; padding: .3rem .5rem; border-left: 3px solid #8886;
+    font: .82em var(--mono, monospace); opacity: .85; max-height: 6em; overflow: auto;
+    white-space: pre-wrap; word-break: break-word; }
+  #comment-text, #comment-reply { width: 100%; box-sizing: border-box; min-height: 3.2em;
+    resize: vertical; font: inherit; padding: .45rem .55rem; border-radius: .5rem;
+    border: 1px solid #8886; background: Field; color: FieldText; }
+  .comment-actions { display: flex; gap: .5rem; align-items: center; }
+  .comment-actions button { padding: .35rem .7rem; border-radius: .5rem; }
+  .comment-actions .spacer { flex: 1; }
+  #comment-error { color: #c33; font-size: .85em; margin: 0; }
+  #comment-thread { display: flex; flex-direction: column; gap: .5rem; }
+  .comment-turn { display: flex; flex-direction: column; gap: .2rem; }
+  .comment-turn .who { font-size: .75em; opacity: .6; }
+  .comment-turn .said { margin: 0; white-space: pre-wrap; word-break: break-word; }
+  .comment-turn.answer .said { background: #8881; border-radius: .5rem; padding: .4rem .55rem; }
+  .comment-turn.note .said { border-left: 3px solid #8886; padding-left: .5rem; opacity: .9; }
+  .comment-open { display: flex; align-items: center; gap: .5rem; font-size: .8em; opacity: .8; }
   @media (prefers-reduced-motion: reduce) { #artifact-doc { transition: none; } }
   /* Phones: the index is the whole width, the pane keeps its padding, and the
      drawer takes the screen rather than a strip of it. */
@@ -334,6 +363,31 @@
     </div>
     <div id="artifact-doc">
       <iframe id="artifact-frame" sandbox="allow-scripts allow-popups" referrerpolicy="no-referrer"></iframe>
+      <!-- Composing a comment on a selection, from inside the framed document.
+           The document can only *report* a selection; this is where it becomes
+           a message, because this origin is the one allowed to send. -->
+      <div id="comment-bar" hidden>
+        <div class="addr"><span id="comment-addr"></span></div>
+        <p class="quote" id="comment-quote" hidden></p>
+        <textarea id="comment-text" placeholder="Comment on this…" rows="2"></textarea>
+        <p id="comment-error" hidden></p>
+        <div class="comment-actions">
+          <button type="button" id="comment-send">Comment</button>
+          <button type="button" id="comment-cancel">Cancel</button>
+        </div>
+      </div>
+      <!-- One comment's thread: what was said, what came back, and resolve. -->
+      <div id="comment-sheet" hidden>
+        <div class="addr"><span id="comment-sheet-addr"></span><button type="button" id="comment-sheet-close" title="Close">✕</button></div>
+        <p class="quote" id="comment-sheet-quote" hidden></p>
+        <div id="comment-thread"></div>
+        <textarea id="comment-reply" placeholder="Reply in this thread…" rows="2"></textarea>
+        <div class="comment-actions">
+          <button type="button" id="comment-reply-send">Reply</button>
+          <span class="spacer"></span>
+          <button type="button" id="comment-resolve">Resolve</button>
+        </div>
+      </div>
     </div>
   </div>
 </aside>
@@ -499,6 +553,24 @@ function messageRow(role, html, at, live, images) {
   // Server-rendered markdown: the renderer escapes source before emitting any
   // tag, so this HTML is ours and cannot carry a script.
   bubble.innerHTML = html;
+
+  // Inline images the renderer allowed (`![alt](api/c/<id>/image/<e>/<i>)`).
+  //
+  // The server emits the source exactly as the Markdown gave it, relative — it
+  // deliberately refuses anything absolute, because a root-absolute path would
+  // escape the mount a proxied page lives under. That leaves the path relative
+  // to whatever this document's directory is, which on a conversation page
+  // (`/web/1/`) is one level too deep, so it has to be rebased onto the mount
+  // here, exactly as `rel()` does for every other URL on the page. Done as a
+  // rewrite rather than by relaxing the renderer: the source stays relative, so
+  // the same markup is still safe to serve from any mount.
+  if (html.includes('<img ')) {
+    for (const img of bubble.querySelectorAll('img')) {
+      const src = img.getAttribute('src');
+      if (!src || src.startsWith('data:')) continue;
+      img.src = rel(src);
+    }
+  }
 
   // Images someone sent: fetched from this origin by entry and index, so the
   // transcript payload stays text.
@@ -787,6 +859,9 @@ function open(id) {
           liveHtml = '';
           paint();
         });
+        // The turn may have edited an artifact and replied in a thread; both are
+        // this pane's business, and neither is in the transcript frames.
+        void refreshReview();
       }, 300);
     }
   });
@@ -1079,6 +1154,12 @@ document.getElementById('send').onsubmit = async (e) => {
   pendingImages = [];
   renderAttachments();
   box.value = '';
+  // Clearing the box programmatically fires no `input` event, and `saveDraft()`
+  // is only wired to `input`. Without this explicit call the draft outlived the
+  // send, and `open()` refilled the box with the message already sent the next
+  // time the conversation was opened. Save after clearing rather than removing
+  // the key directly, so the empty-box rule stays in one place.
+  saveDraft();
   fitBox();
   const response = await fetch(rel('api/c/' + current + '/message'), {
     method: 'POST',
@@ -1129,8 +1210,28 @@ const artifactsNewTab = document.getElementById('artifacts-newtab');
 const artifactsBack = document.getElementById('artifacts-back');
 const artifactsTitle = document.getElementById('artifacts-title');
 
-function artifactUrl(key, render) {
-  return artifactsBase + '/c/' + current + '/' + key.split('/').map(encodeURIComponent).join('/') + (render ? '?render' : '');
+/**
+ * Where the framed document is fetched from.
+ *
+ * The drawer always asks for the *source* view, which is the one with numbered
+ * lines and the selection script — a rendered Markdown page has no lines to
+ * anchor a comment to, and a bare `text/plain` response cannot carry a script at
+ * all. `?view=source` is still inert HTML: every byte of the file is escaped into
+ * it, and the only script is the one the artifact origin writes with a per-response
+ * nonce.
+ */
+/**
+ * Which view a file opens in.
+ *
+ * Markdown opens *rendered*, because that is what a person wants to read — and
+ * the rendered document is commentable too: it reports the selected text and the
+ * session host finds the source lines it came from, so neither side has to know
+ * how the other numbered anything. Everything else opens as the source view,
+ * where a line number is the obvious unit.
+ */
+function artifactUrl(key, markdown) {
+  const path = key.split('/').map(encodeURIComponent).join('/');
+  return artifactsBase + '/c/' + current + '/' + path + (markdown ? '?render' : '?view=source');
 }
 
 /** The last path segment: what the file is actually called. */
@@ -1189,6 +1290,8 @@ function showArtifact(key, markdown) {
   // Markdown is rendered by the artifact host inside its sandboxed document;
   // everything else is shown as plain text, never as HTML.
   loadFrame(artifactUrl(key, markdown));
+  closeCommentBar();
+  closeThread();
   artifactsNewTab.dataset.key = key;
   artifactsNewTab.dataset.markdown = markdown ? '1' : '';
 }
@@ -1219,7 +1322,15 @@ window.addEventListener('popstate', () => {
   if (artifactsOpen) applyListState();
 });
 
-async function loadArtifacts() {
+/**
+ * Rebuild the list.
+ *
+ * `preserve` is for a refresh the reader did not ask for: it keeps the document
+ * they are reading open and restores the highlight, instead of dropping them back
+ * to the list every time a turn ends.
+ */
+async function loadArtifacts(preserve) {
+  const framed = preserve ? artifactsFrame.dataset.key || '' : '';
   artifactsList.innerHTML = '';
   if (!current) return;
   let rows;
@@ -1250,6 +1361,11 @@ async function loadArtifacts() {
     li.onclick = () => showArtifact(row.key, Boolean(row.markdown));
     artifactsList.append(li);
   }
+  if (preserve && framed !== '') {
+    // Same document, same place: only the rows are new.
+    for (const li of artifactsList.children) li.classList.toggle('on', li.dataset.key === framed);
+    return;
+  }
   // Open on the list: choosing is the first act, and the document takes the screen
   // once chosen.
   showArtifactList();
@@ -1259,12 +1375,308 @@ function setArtifactsOpen(open) {
   artifactsOpen = open;
   artifactsPanel.hidden = !open;
   if (open) {
+    void loadComments();
     void loadArtifacts();
   } else {
     applyListState();
     if (history.state && history.state.artifact) history.replaceState({}, '', location.pathname);
   }
 }
+
+// --- Review comments ---------------------------------------------------------
+//
+// The framed document cannot submit anything, by design: it is a different origin,
+// sandboxed, and its own bytes are agent-written. So it *reports* — a selection, a
+// click on a highlight — and this page, which owns the session and the API, turns
+// that into a message. Nothing crosses except numbers and text, and the frame is
+// identified by `event.source`, not by an origin string (a sandboxed frame's
+// origin is the string "null", which no check can distinguish).
+
+const commentBar = document.getElementById('comment-bar');
+const commentAddr = document.getElementById('comment-addr');
+const commentQuote = document.getElementById('comment-quote');
+const commentText = document.getElementById('comment-text');
+const commentError = document.getElementById('comment-error');
+const commentSheet = document.getElementById('comment-sheet');
+const commentSheetAddr = document.getElementById('comment-sheet-addr');
+const commentSheetQuote = document.getElementById('comment-sheet-quote');
+const commentThread = document.getElementById('comment-thread');
+const commentReply = document.getElementById('comment-reply');
+
+/** The selection the comment bar is currently about. */
+let pendingSelection = null;
+/** The comment whose thread is open. */
+let openCommentId = null;
+/** Every comment this conversation has, keyed by id, from the last load. */
+let commentsById = new Map();
+
+/**
+ * What to show above the composer.
+ *
+ * A source view reports lines, so the address is the real one. A rendered view
+ * reports text, and the address is only decided once the host has found it — so
+ * the bar shows the quotation instead of inventing a line number.
+ */
+function commentAddress(selection) {
+  const line = selection.line;
+  if (line === undefined) {
+    const quote = (selection.quote || '').replace(/\s+/g, ' ').trim();
+    return quote.length > 60 ? quote.slice(0, 60) + '…' : quote;
+  }
+  const endLine = selection.endLine || line;
+  if (selection.charStart && selection.charEnd && line === endLine) {
+    return 'L' + line + 'C' + selection.charStart + '-L' + line + 'C' + selection.charEnd;
+  }
+  return endLine === line ? 'L' + line : 'L' + line + '-L' + endLine;
+}
+
+/**
+ * Show the composer for a selection — **without taking focus**.
+ *
+ * Focus is the whole problem on a touch screen: focusing the textarea raises the
+ * keyboard, and raising the keyboard ends the document's selection, so the
+ * native grabbers vanish the instant you start dragging one. The reader can then
+ * never extend the selection they were making. So the bar appears, follows the
+ * selection while it is still being adjusted, and only takes focus when the
+ * reader taps it — which is the gesture that means "I am done selecting, now I am
+ * typing".
+ *
+ * A selection that arrives while the bar is already open only updates what the
+ * bar is about: the words already typed stay, because the reader may be nudging a
+ * handle mid-sentence.
+ */
+function showCommentBar(selection) {
+  const opening = commentBar.hidden || !pendingSelection;
+  pendingSelection = selection;
+  closeThread();
+  const where = commentAddress(selection);
+  commentAddr.textContent = (selection.file || '') + (selection.line === undefined ? ' — ' : '#') + where;
+  commentQuote.hidden = !selection.quote;
+  commentQuote.textContent = selection.quote || '';
+  if (opening) {
+    commentText.value = '';
+    commentError.hidden = true;
+  }
+  commentBar.hidden = false;
+}
+
+function closeCommentBar() {
+  pendingSelection = null;
+  commentBar.hidden = true;
+  commentText.value = '';
+}
+
+function closeThread() {
+  openCommentId = null;
+  commentSheet.hidden = true;
+  commentThread.innerHTML = '';
+  commentReply.value = '';
+}
+
+/** Post one comment, then redraw the frame so the new highlight appears. */
+async function sendComment() {
+  if (!pendingSelection) return;
+  const text = commentText.value.trim();
+  if (!text) {
+    commentError.hidden = false;
+    commentError.textContent = 'A comment needs words.';
+    return;
+  }
+  const selection = pendingSelection;
+  commentError.hidden = true;
+  try {
+    const response = await fetch(rel('api/c/' + current + '/comments'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        file: selection.file,
+        ...(selection.line === undefined ? {} : { line: selection.line }),
+        ...(selection.endLine === undefined ? {} : { endLine: selection.endLine }),
+        ...(selection.charStart === undefined ? {} : { charStart: selection.charStart }),
+        ...(selection.charEnd === undefined ? {} : { charEnd: selection.charEnd }),
+        ...(selection.quote === undefined ? {} : { quote: selection.quote }),
+        ...(selection.occurrence === undefined ? {} : { occurrence: selection.occurrence }),
+        text,
+      }),
+    });
+    const result = await response.json().catch(() => ({ ok: false, error: 'unreadable response' }));
+    if (!response.ok || result.ok === false) {
+      commentError.hidden = false;
+      // The host's refusal is the useful message ("artifacts are not version
+      // controlled in this deployment"), so it is shown verbatim.
+      commentError.textContent = result.error || 'comment failed';
+      return;
+    }
+    closeCommentBar();
+    await loadComments();
+    reloadFrame();
+  } catch (error) {
+    commentError.hidden = false;
+    commentError.textContent = String(error && error.message ? error.message : error);
+  }
+}
+
+/** Re-fetch a document so its highlights match the comments that exist now. */
+function reloadFrame() {
+  const src = artifactsFrame.getAttribute('src');
+  if (src && src !== 'about:blank') loadFrame(src);
+}
+
+async function loadComments() {
+  if (!current) return;
+  try {
+    const rows = await (await fetch(rel('api/c/' + current + '/comments'))).json();
+    commentsById = new Map((Array.isArray(rows) ? rows : []).map((row) => [row.id, row]));
+  } catch {
+    commentsById = new Map();
+  }
+}
+
+/** One told exchange in a thread: who said it, and what they said. */
+function threadTurn(who, said, kind) {
+  const wrap = document.createElement('div');
+  wrap.className = 'comment-turn' + (kind ? ' ' + kind : '');
+  const label = document.createElement('span');
+  label.className = 'who';
+  label.textContent = who;
+  const body = document.createElement('p');
+  body.className = 'said';
+  body.textContent = said;   // textContent, not innerHTML: this is untrusted text
+  wrap.append(label, body);
+  return wrap;
+}
+
+/** Open one comment's thread, loading its answers from the conversation. */
+async function openThread(id) {
+  const comment = commentsById.get(id);
+  if (!comment) return;
+  closeCommentBar();
+  openCommentId = id;
+  commentSheetAddr.textContent = comment.address || id;
+  commentSheetQuote.hidden = !comment.quote;
+  commentSheetQuote.textContent = comment.quote || '';
+  commentThread.innerHTML = '';
+  commentThread.append(threadTurn(comment.author || 'you', comment.text, 'question'));
+  if (comment.replies > 0) commentThread.append(threadTurn('agent', '…', 'answer-pending'));
+  commentSheet.hidden = false;
+  document.getElementById('comment-resolve').textContent = comment.resolved ? 'Reopen' : 'Resolve';
+  try {
+    const replies = await (await fetch(rel('api/c/' + current + '/comments/' + encodeURIComponent(id) + '/thread'))).json();
+    if (openCommentId !== id) return;
+    for (const node of commentThread.querySelectorAll('.comment-turn.answer-pending')) node.remove();
+    for (const reply of Array.isArray(replies) ? replies : []) {
+      // A `note` is the agent replying inside the thread through its tool — kept
+      // out of the conversation on purpose, so it is shown plainly and not as a
+      // turn. An `answer` is what the turn said in Chat, already worded for it.
+      commentThread.append(
+        threadTurn(reply.kind === 'note' ? 'agent (thread)' : 'agent', reply.text || '(no answer yet)', reply.kind === 'note' ? 'note' : 'answer'),
+      );
+    }
+  } catch {
+    // A thread that cannot be read still shows what was asked.
+  }
+}
+
+async function replyInThread() {
+  if (!openCommentId) return;
+  const text = commentReply.value.trim();
+  if (!text) return;
+  commentReply.value = '';
+  try {
+    const response = await fetch(rel('api/c/' + current + '/comments/' + encodeURIComponent(openCommentId) + '/reply'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+    if (!response.ok) return;
+    await openThread(openCommentId);
+  } catch {
+    // The reply is lost; the thread is still there to try again.
+  }
+}
+
+async function resolveComment() {
+  if (!openCommentId) return;
+  const comment = commentsById.get(openCommentId);
+  const next = !(comment && comment.resolved);
+  try {
+    await fetch(rel('api/c/' + current + '/comments/' + encodeURIComponent(openCommentId) + '/resolve'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ resolved: next }),
+    });
+    await loadComments();
+    closeThread();
+    reloadFrame();
+  } catch {
+    // Leave the thread open: the button is the whole interaction.
+  }
+}
+
+/**
+ * Bring the review pane up to date without being asked.
+ *
+ * Three things can change it: a turn that wrote files, a turn that replied in a
+ * thread, and a comment made on another device. The first two arrive here when a
+ * turn settles (the stream already says so); the third is caught by the focus
+ * handler below, because nothing in this page hears about it otherwise.
+ *
+ * What is *not* refreshed blindly is the framed document: a reload throws away
+ * the selection the composer is about. So the frame is only reloaded when no
+ * comment is being written, which is also the case where the reader is just
+ * looking and a stale file would mislead them.
+ */
+async function refreshReview() {
+  if (!artifactsOpen || !current) return;
+  await loadComments();
+  if (openCommentId) void openThread(openCommentId);
+  await loadArtifacts(true);
+  if (!pendingSelection) reloadFrame();
+}
+
+window.addEventListener('message', (event) => {
+  // Identity, not origin: the frame is sandboxed without `allow-same-origin`, so
+  // its origin is "null" and an origin check would have to accept everything.
+  if (!artifactsFrame.contentWindow || event.source !== artifactsFrame.contentWindow) return;
+  const data = event.data;
+  if (!data || typeof data !== 'object') return;
+  if (data.t === 'pi-artifact-select' && typeof data.file === 'string') {
+    showCommentBar(data);
+  } else if (data.t === 'pi-artifact-open' && typeof data.id === 'string') {
+    void openThread(data.id);
+  } else if (data.t === 'pi-artifact-clear') {
+    // The reader dismissed the selection. Close the composer, but never over a
+    // draft, and never while the field has focus — tapping the field itself can
+    // collapse the document's selection on some browsers, and that tap means
+    // "I am typing now", not "forget this".
+    if (commentBar.hidden) return;
+    if (document.activeElement === commentText) return;
+    if (commentText.value.trim() !== '') return;
+    closeCommentBar();
+  }
+});
+
+// A comment made on a phone while this page sat idle is only visible when the
+// tab is looked at again. Cheaper and more predictable than a poll.
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) void refreshReview();
+});
+
+// The bar is the only thing that may focus the field, and only when tapped:
+// `pointerdown` on the chrome, never an automatic focus.
+commentBar.addEventListener('pointerdown', (event) => {
+  const target = event.target;
+  if (!target || target === commentText || target.tagName === 'TEXTAREA' || target.tagName === 'BUTTON') return;
+  // Defer, so the tap does not land inside the newly focused field and move the
+  // caret to wherever the finger was.
+  setTimeout(() => commentText.focus(), 0);
+});
+
+document.getElementById('comment-send').onclick = () => void sendComment();
+document.getElementById('comment-cancel').onclick = () => closeCommentBar();
+document.getElementById('comment-sheet-close').onclick = () => closeThread();
+document.getElementById('comment-reply-send').onclick = () => void replyInThread();
+document.getElementById('comment-resolve').onclick = () => void resolveComment();
 
 /* How wide the drawer is: a choice, remembered, in pixels. `min(38rem, 45%)` is
    the starting point until you drag it — a percentage so a narrow window gets a

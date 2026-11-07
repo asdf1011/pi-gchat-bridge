@@ -26,9 +26,20 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 
 import { logger } from "../logger.js";
-import { renderMarkdown } from "./markdown.js";
+import { renderMarkdown, type RenderOptions } from "./markdown.js";
 import type { ProjectedView } from "../session-host/projection.js";
 import type { SessionHost, WhenBusy } from "../session-host/api.js";
+
+/**
+ * How this surface renders Markdown.
+ *
+ * Images on, because the pane is the one place a displayed picture is the point
+ * — but only same-origin relative sources (`safeImageSrc`), and the page's CSP
+ * names `img-src 'self'` as a second, independent barrier. Exported so the two
+ * web route call sites pass the same thing as the submit echo; a picture must
+ * not appear when the answer arrives and vanish on the next history read.
+ */
+export const WEB_RENDER_OPTIONS: RenderOptions = { images: true };
 
 /**
  * The one-line summary a status row shows for a tool: the command, or the path.
@@ -207,7 +218,7 @@ export async function webSubmit(
     ? { ok: false, error: result.error }
     : // Rendered here so the pane can show your message the moment it is sent,
       // in the same markup the transcript will use when it comes back.
-      { ok: true, submissionId: result.submissionId, html: renderMarkdown(text) };
+      { ok: true, submissionId: result.submissionId, html: renderMarkdown(text, WEB_RENDER_OPTIONS) };
 }
 
 /**

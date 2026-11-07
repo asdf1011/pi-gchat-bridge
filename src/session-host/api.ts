@@ -90,6 +90,126 @@ export interface AgentConfig {
 }
 
 /**
+ * One line a comment is anchored to.
+ *
+ * `(changeId, originalLine, content)` is the identity of a line in history: the
+ * revision that last touched it, which of that revision's lines it was, and what
+ * it said. All three, because any two of them can be satisfied by a different
+ * line after an edit.
+ */
+export interface CommentAnchor {
+  changeId: string;
+  originalLine: number;
+  content: string;
+}
+
+/**
+ * Where a comment stands against the revision being displayed.
+ *
+ * `superseded` means the lines it was written on are gone *and* the revision that
+ * replaced them is known — the normal, successful outcome of asking for a change,
+ * which used to be reported as `orphaned`.
+ */
+export type CommentState = "visible" | "superseded" | "orphaned" | "resolved";
+
+/**
+ * Where a comment's lines went, when the revision that replaced them is known.
+ *
+ * A location, not a claim of causation: a turn may rewrite a file for reasons the
+ * comment had nothing to do with, so this says "the text you commented on now
+ * lives here", never "your note caused this".
+ */
+export interface CommentSuccessor {
+  /** Change id of the revision the successor was found in. */
+  revision: string;
+  /** `moved` kept the text, `replaced` changed it, `removed` deleted it. */
+  kind: "unchanged" | "moved" | "replaced" | "removed";
+  /** 1-based range in that revision; `end < start` means "the gap it left". */
+  start: number;
+  end: number;
+  /** The text now at that range, for a drawer to show above the note. */
+  quote?: string;
+}
+
+/**
+ * A comment, as a viewer draws it.
+ *
+ * `positions` are line numbers in the revision the host resolved against — the
+ * only field a highlight needs. A comment is *anchored* to history and *drawn*
+ * at a position, and keeping both is what lets a line move without losing its
+ * review.
+ */
+export interface CommentView {
+  id: string;
+  file: string;
+  anchors: CommentAnchor[];
+  quote?: string;
+  charStart?: number;
+  charEnd?: number;
+  /**
+   * Which occurrence of `quote` this comment was written on, 0-based.
+   *
+   * Only a rendered document needs it: painting a highlight there means finding
+   * the text again, and the same phrase can appear many times.
+   */
+  occurrence?: number;
+  text: string;
+  at: number;
+  author?: string;
+  resolved?: boolean;
+  state: CommentState;
+  positions: number[];
+  /** Where it went, when the anchor no longer matches but the diff can say. */
+  successor?: CommentSuccessor;
+  /** The revision this comment was written against, as a change id. */
+  atRevision?: string;
+  /** Submissions this comment started, oldest first. Answers are fetched apart. */
+  submissions?: number[];
+}
+
+/**
+ * A selection, as a viewer reports it.
+ *
+ * A source view knows line numbers; a *rendered* document does not, so it reports
+ * the selected text and the host finds where it came from. Either `line` or
+ * `quote` must be present.
+ */
+export interface CommentSelection {
+  line?: number;
+  endLine?: number;
+  charStart?: number;
+  charEnd?: number;
+  /** The selected text, as the reader sees it. */
+  quote?: string;
+  /** 0-based occurrence of `quote`, when the same text appears more than once. */
+  occurrence?: number;
+}
+
+/** What a new comment needs. The anchors are derived host-side, never sent. */
+export interface CommentInput {
+  /** Path relative to the artifact repository root. */
+  file: string;
+  selection: CommentSelection;
+  text: string;
+  author?: string;
+}
+
+/**
+ * One exchange in a comment's thread.
+ *
+ * `answer` is a turn the comment started (`submissionId` says which), and `note`
+ * is the agent replying through its tool. They are one list because a reviewer
+ * reads them in one order; `kind` is what lets a view style them differently.
+ */
+export interface CommentReply {
+  kind: "answer" | "note";
+  text: string;
+  at?: number;
+  submissionId?: number;
+  author?: string;
+}
+
+/**
  * One part of a message.
  *
  * Images travel **inline**: a Chat attachment arrives as base64, and it is one
@@ -292,6 +412,87 @@ export interface SessionHost {
   ): Promise<readonly ArtifactFile[] | undefined>;
 
   /**
+   * The review comments on a conversation's artifacts, with their current state.
+   *
+   * Resolved against the *live* revision of each file. A viewer showing an older
+   * revision resolves the same anchors itself, from `anchors` and `positions`
+   * being recomputed — the seam carries what is true now, not every view of it.
+   */
+  comments(
+    conversationId: number,
+    options?: { signal?: AbortSignal },
+  ): Promise<readonly CommentView[] | undefined>;
+
+  /**
+   * Add a comment to an artifact.
+   *
+   * The selection is lines (and optionally characters within one line); the host
+   * turns it into anchors from the artifact repository's own annotation, so a
+   * stale viewer cannot pin a comment to a line it never saw. Errors are returned
+   * rather than thrown: "no jj repository" is an ordinary answer here.
+   *
+   * Returns the comment as stored, anchors and resolved quote included, so a
+   * caller can word the turn and the Chat notice without a second read — and
+   * without having to trust the request for either.
+   */
+  addComment(
+    conversationId: number,
+    input: CommentInput,
+    options?: { signal?: AbortSignal },
+  ): Promise<{ comment: CommentView } | { error: string }>;
+
+  /**
+   * Reply into one comment's thread as the agent.
+   *
+   * Deliberately *not* a submission: a review reply is plumbing, so it must not
+   * appear in Chat and must not come back to the model as context. Reachable
+   * from the agent's own tool; there is no HTTP route, because a person replying
+   * to a thread is a turn (`/comments/:id/reply`).
+   */
+  replyToComment(
+    conversationId: number,
+    commentId: string,
+    text: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<{ id: string } | { error: string }>;
+
+  /** Resolve, or reopen, one comment. True when something changed. */
+  resolveComment(
+    conversationId: number,
+    commentId: string,
+    resolved: boolean,
+    options?: { signal?: AbortSignal },
+  ): Promise<boolean>;
+
+  /**
+   * Note a submission a comment started.
+   *
+   * Separate from `addComment` because the id only exists once the turn has been
+   * submitted, and a comment must be recorded before it is submitted — otherwise a
+   * crash between the two loses the reviewer's words. Losing the answer instead is
+   * recoverable: the thread still shows what was asked.
+   */
+  noteCommentSubmission(
+    conversationId: number,
+    commentId: string,
+    submissionId: number,
+    options?: { signal?: AbortSignal },
+  ): Promise<void>;
+
+  /**
+   * The answers a comment's submissions have produced, oldest first.
+   *
+   * Separate from `comments` because awaiting a submission blocks until its turn
+   * settles, and a review pane asks for this when a thread is opened, not when a
+   * page is painted.
+   */
+  commentThread(
+    conversationId: number,
+    commentId: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<readonly CommentReply[] | undefined>;
+
+  /**
    * Add a message to a conversation.
    *
    * The returned id is the handle for everything that happens next; awaiting the
@@ -396,12 +597,23 @@ export interface SessionHost {
   ): Promise<{ userText: string; assistantText: string } | undefined>;
 
   /**
-   * Tell the Chat side of a conversation that something happened outside Chat.
+   * Show a turn that started on another surface in the Chat side of the
+   * conversation, so neither surface is missing part of the conversation.
    *
-   * False when the conversation has no Chat thread behind it (a web-only
-   * conversation), which is not an error — there is simply nobody to tell.
+   * `prompt` is what the person typed (`henry (webui): …`, or a review comment),
+   * quoted above the answer in the same message: a separate message about the
+   * reader's own words would notify them about what they just typed, and a silent
+   * one cannot be posted into an existing thread (see `durable/mirror.ts`).
+   *
+   * False when there is nothing to do, which is not an error: no Chat side at all
+   * (a web-only conversation), or a Chat stream already posting this turn.
    */
-  announce(conversationId: number, text: string, options?: { signal?: AbortSignal }): Promise<boolean>;
+  mirrorTurn(
+    conversationId: number,
+    submissionId: number,
+    prompt: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<boolean>;
 
   /** Compact the conversation's context now. Instructions are free text. */
   compact(conversationId: number, instructions?: string, options?: { signal?: AbortSignal }): Promise<void>;

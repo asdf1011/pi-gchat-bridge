@@ -23,6 +23,7 @@
  */
 import { defineDoc } from "@earendil-works/pi-durable";
 
+import type { ArtifactRevision } from "./artifact-revisions.js";
 import type { ObservedFile } from "./observed-files.js";
 
 export type ConversationBinding = {
@@ -64,6 +65,14 @@ export type ConversationBinding = {
    * and small (paths and times, never contents).
    */
   files?: ObservedFile[];
+  /**
+   * The newest revision of each artifact this conversation produced.
+   *
+   * Written by the same turn that writes `files`: the walk says which paths
+   * changed, the commit says which revision holds them. Optional, so bindings
+   * written before version control existed still read.
+   */
+  revisions?: ArtifactRevision[];
 };
 
 // A type alias, not an interface: pi-durable's JsonObject accepts literals with
