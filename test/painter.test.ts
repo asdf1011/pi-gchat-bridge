@@ -336,3 +336,31 @@ test("a conversation with no position is adopted at the head, not replayed", asy
   assert.equal(ledger.get(1)?.cursor, 11);
   assert.equal(ledger.get(1)?.adoptedReason, "new");
 });
+
+test("a poke finishes the answer immediately, without waiting for a tick", async () => {
+  // The settle edge of a view frame calls this, which is what stops a finished turn from
+  // sitting unposted until the next tick. It does the same work a tick does for one
+  // conversation, so there is one definition of "here is the answer".
+  const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
+  ledger.adopt(1, 10, "new");
+  const { painter, posted } = painterFor(ledger, { 11: [answer("the answer")] });
+
+  await painter.poke(1);
+  assert.deepEqual(posted, [{ conversationId: 1, text: "the answer" }]);
+  assert.equal(ledger.get(1)?.cursor, 11);
+});
+
+test("a poke does nothing for a conversation this painter does not own, or has not adopted", async () => {
+  const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
+  const { painter, posted } = painterFor(ledger, { 11: [answer("x")] }, { owns: () => false });
+  await painter.poke(1);
+  assert.deepEqual(posted, [], "not owned, not painted");
+
+  // Owned but never adopted: a poke must not invent a position, or the first thing it saw
+  // would be treated as already-delivered history.
+  const fresh = await Ledger.load(path.join(scratch, `l${++counter}.json`));
+  const second = painterFor(fresh, { 11: [answer("x")] });
+  await second.painter.poke(1);
+  assert.deepEqual(second.posted, []);
+  assert.equal(fresh.get(1), undefined, "adoption stays the tick's job");
+});

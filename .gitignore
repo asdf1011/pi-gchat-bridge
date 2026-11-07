@@ -37,3 +37,6 @@ playwright-report/
 # The bridge's own delivery cursor: runtime state, not source.
 bridge-ledger.json
 bridge-ledger.json.*.tmp
+
+# The newline-separated keys .env.durable last defined: runtime state.
+.env.durable.keys

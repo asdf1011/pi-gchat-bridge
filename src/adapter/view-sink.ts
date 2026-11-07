@@ -30,10 +30,30 @@ import type { SessionHost } from "../session-host/api.js";
  * carries the same JSON. So this takes the projection and never re-projects — projecting a
  * projection yields an empty one, which is the bug this signature exists to prevent.
  */
-export function viewFramePainter(stream: StreamTarget): (projected: ProjectedView) => void {
+export interface FrameHooks {
+  /**
+   * The turn finished, as far as the *view* can tell (`busy` went true → false).
+   *
+   * This is the one push-driven edge worth having: the answer arrives as a transcript entry
+   * a moment later, and without this the painter would find it on its next tick — up to
+   * fifteen seconds of an answer sitting unposted at the end of every turn. The frame says
+   * "stop looking at the view"; the entry read says "here is what to post".
+   */
+  onSettle?(): void;
+}
+
+export function viewFramePainter(
+  stream: StreamTarget,
+  hooks: FrameHooks = {},
+): (projected: ProjectedView) => void {
   let painted = "";
   let shownCallId: string | undefined;
+  let wasBusy: boolean | undefined;
   return (projected) => {
+    // Settle edge first: the caller may read entries inside this call, and painting the last
+    // snapshot first would put an answer behind a stale "Thinking…".
+    if (wasBusy === true && projected.busy === false) hooks.onSettle?.();
+    wasBusy = projected.busy;
     if (projected.liveText !== painted) {
       painted = projected.liveText;
       if (painted !== "") stream.onSnapshot(painted);
@@ -63,6 +83,8 @@ export interface ViewSinkOptions {
   stream: StreamTarget;
   /** Called for a snapshot the sink cannot paint (never fatal). */
   onError?: (error: unknown) => void;
+  /** The turn settled, as far as the view can tell. See `FrameHooks.onSettle`. */
+  onSettle?: () => void;
 }
 
 export interface ViewSink {
@@ -87,7 +109,7 @@ export async function attachViewSink(options: ViewSinkOptions): Promise<ViewSink
   // Painting is `viewFramePainter`'s job — the same function the stream transport uses, so
   // the two cannot drift. What stays local is the *sink's* own bookkeeping: what the
   // placeholder currently shows, and whether it is still attached.
-  const paint = viewFramePainter(stream);
+  const paint = viewFramePainter(stream, { ...(options.onSettle ? { onSettle: options.onSettle } : {}) });
   const apply = (next: ProjectedView): void => {
     if (detached) return;
     projected = next;

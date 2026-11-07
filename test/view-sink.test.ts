@@ -165,3 +165,29 @@ test("the shared frame painter is what both transports paint with", async () => 
   paint(projectView(partial("working", [{ callId: "c1", name: "bash", status: "done" }])));
   assert.equal(stream.cleared, 1, "cleared once the round ends");
 });
+
+test("the settle edge fires once, and only when a turn actually ended", async () => {
+  // What makes the tick a fallback rather than the mechanism: the view says when the turn is
+  // over, and the caller reads the entry then. Firing on every idle frame would re-read the
+  // transcript continuously; never firing would leave the answer to the next tick.
+  const { viewFramePainter } = await import("../src/adapter/view-sink.js");
+  const stream = fakeStream();
+  let settles = 0;
+  const paint = viewFramePainter(stream, { onSettle: () => (settles += 1) });
+
+  // `busy` is derived from a live run being present, so the frame is built the way the seam
+  // builds it rather than by setting the flag directly.
+  const state = (busy: boolean) => projectView(partial("work", [], busy));
+  paint(state(false)); // idle conversation, nothing to settle
+  assert.equal(settles, 0);
+
+  paint(state(true)); // a turn starts
+  assert.equal(settles, 0);
+
+  paint(state(false)); // it ends
+  assert.equal(settles, 1);
+
+  paint(state(false)); // still idle: not another turn
+  paint(state(false));
+  assert.equal(settles, 1, "one edge, one read");
+});

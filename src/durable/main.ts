@@ -675,6 +675,9 @@ async function main(): Promise<void> {
           open: async (conversationId) => {
             const target = chatTarget(await addressOf(conversationId));
             if (!target) return undefined;
+            // Both transports report the settle edge, so the answer is finished the moment the
+            // turn ends instead of at the next tick — and the tick stops being load-bearing.
+            const settled = { onSettle: () => void painter?.poke(conversationId) };
             const stream = new ReplyStream(client, target.space, target.threadName, "gchat", {
               replaceOnFinish: config.replaceOnFinish,
             });
@@ -682,7 +685,7 @@ async function main(): Promise<void> {
             stream.register(key);
             // One painter for both transports: the wire carries the same projection the seam
             // hands out, so the frame rule lives in `viewFramePainter` and nowhere else.
-            const paint = viewFramePainter(stream);
+            const paint = viewFramePainter(stream, settled);
             let detachView: () => void;
 
             if (config.viewMode === "stream") {
@@ -704,7 +707,7 @@ async function main(): Promise<void> {
               void ladder.run();
               detachView = () => ladder.stop();
             } else {
-              const sink = await attachViewSink({ seam, conversationId, stream });
+              const sink = await attachViewSink({ seam, conversationId, stream, ...settled });
               detachView = () => sink.detach();
             }
             return {

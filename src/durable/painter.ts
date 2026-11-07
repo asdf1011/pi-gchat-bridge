@@ -151,6 +151,33 @@ export class Painter {
   }
 
   /**
+   * Look at one conversation now.
+   *
+   * The settle edge of a view frame calls this, so an answer is finished the moment the turn
+   * ends rather than at the next tick. It is the same work a tick does for that conversation
+   * — one read of the entries past the cursor, then paint or post — so there is one path and
+   * no second way to decide what an answer is.
+   */
+  async poke(conversationId: number): Promise<void> {
+    const run = this.chain.then(async () => {
+      if (!this.deps.owns(conversationId)) return;
+      const position = this.deps.ledger.get(conversationId);
+      if (!position) return; // adoption is the tick's job; a poke never invents a position
+      const summary: PaintSummary = { painted: 0, streamed: 0, posted: 0, failed: 0, adopted: 0 };
+      try {
+        await this.tickOne(conversationId, position.cursor, summary);
+      } catch (error) {
+        this.log(`[paint] conversation ${conversationId}: ${(error as Error).message}`);
+      }
+    });
+    this.chain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  /**
    * Run one tick, serialised against any other.
    *
    * Two ticks for one conversation would each read the same unposted answer and each
