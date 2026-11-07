@@ -20,6 +20,9 @@ bridge.sqlite
 bridge.sqlite-shm
 bridge.sqlite-wal
 bridge.sqlite.lock
+# The bridge's own delivery cursor: runtime state, not source.
+bridge-ledger.json
+bridge-ledger.json.*.tmp
 # Legacy session backups taken before the 1.4.0 upgrade and the cutover.
 sessions.pre-1.4.0/
 backups/
@@ -30,3 +33,7 @@ playwright-report/
 
 # Runtime: the supervisor pid file, rewritten at every start.
 .start-bridge.pid
+
+# The bridge's own delivery cursor: runtime state, not source.
+bridge-ledger.json
+bridge-ledger.json.*.tmp
