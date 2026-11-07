@@ -33,6 +33,9 @@ import { runDurableCommand } from "../adapter/commands.js";
 import { defaultSettings } from "../adapter/commands.js";
 import { mirrorTurn } from "./mirror.js";
 import { runPass } from "./delivery-pass.js";
+import { Painter } from "./painter.js";
+import { chatTarget } from "./mirror.js";
+import { splitMessage } from "../stream.js";
 import { reconcile, type ReconcileState } from "./reconcile.js";
 import { Ledger } from "./ledger.js";
 import { BridgeHost } from "./host.js";
@@ -106,6 +109,11 @@ async function main(): Promise<void> {
    * it). Chat is the surface that would otherwise be missing those turns, and a
    * conversation that only half appears in one client is not much use.
    */
+  // Conversations whose turns the painter posts (see the painter block below). Read
+  // by the handler *and* the painter, from one value, so the two cannot disagree about
+  // who owns a thread.
+  const painted = new Set(config.paintConversations);
+
   const mirrorTurnIntoChat = (
     conversationId: number,
     submissionId: number,
@@ -479,11 +487,10 @@ async function main(): Promise<void> {
       logger.info(`[chat] ${display}: attachments present but no image could be downloaded`);
     }
 
-    const stream = new ReplyStream(client, spaceName, threadName, display, {
-      replaceOnFinish: config.replaceOnFinish,
-    });
-    stream.register(chatKey);
-
+    // A conversation the painter owns has exactly one mouth. The handler still
+    // submits, still waits (waiting is what stamps the answer's origin) and still
+    // reports a failure — it just does not paint, so nothing can be posted twice.
+    let stream: ReplyStream | undefined;
     let sink: Awaited<ReturnType<typeof attachViewSink>> | undefined;
     try {
       // The delivery is idempotent on the Chat message name, so a Pub/Sub
@@ -495,14 +502,20 @@ async function main(): Promise<void> {
         text,
         images,
       });
+      if (!painted.has(delivered.conversationId)) {
+        stream = new ReplyStream(client, spaceName, threadName, display, {
+          replaceOnFinish: config.replaceOnFinish,
+        });
+        stream.register(chatKey);
+      }
 
       // Attach the sink *before* waiting: the answer may already be streaming.
-      sink = await attachViewSink({ seam, conversationId: delivered.conversationId, stream });
+      if (stream) sink = await attachViewSink({ seam, conversationId: delivered.conversationId, stream });
 
       const turnStarted = Date.now();
       const settled = await seam.awaitSubmission(delivered.submissionId);
       const turnMs = Date.now() - turnStarted;
-      await sink.detach();
+      await sink?.detach();
       sink = undefined;
 
       // The host resolves the answer's text; the adapter never sees an entry.
@@ -523,7 +536,7 @@ async function main(): Promise<void> {
             ` after ${turnMs}ms conversation=${delivered.conversationId}` +
             (detail === undefined ? "" : ` detail=${JSON.stringify(detail).slice(0, 300)}`),
         );
-        await stream.abandon();
+        await stream?.abandon();
         await client
           .sendMessage(spaceName, failureNotice(settled.status, reason, turnMs), threadName)
           .catch((error) => logger.error("[chat] empty-reply notice failed:", (error as Error).message));
@@ -547,11 +560,11 @@ async function main(): Promise<void> {
           `[chat] ${display}: answer ${answerKey} already delivered in this thread — not posting it again ` +
             `(conversation=${delivered.conversationId})`,
         );
-        await stream.abandon();
+        await stream?.abandon();
         return "ok";
       }
       try {
-        await stream.finish(final);
+        if (stream) await stream.finish(final);
       } catch (error) {
         // The reply was not delivered after all: hand the claim back so another
         // handler for this answer (or a Pub/Sub redelivery) still delivers it.
@@ -582,11 +595,11 @@ async function main(): Promise<void> {
     } catch (error) {
       const aborted = (error as Error)?.name === "AbortError";
       logger.error(`[chat] ${display}: handler ${aborted ? "interrupted" : "error"}:`, (error as Error).message);
-      await stream.onError(aborted);
+      await stream?.onError(aborted);
       return "ok";
     } finally {
       await sink?.detach().catch(() => {});
-      stream.unregister(chatKey);
+      stream?.unregister(chatKey);
       markers.delete(chatKey);
     }
   };
@@ -618,6 +631,7 @@ async function main(): Promise<void> {
   // I seen" is a fact about this surface, and it survives a conversation outliving
   // the bridge.
   let ledgerTimer: NodeJS.Timeout | undefined;
+  let paintTimer: NodeJS.Timeout | undefined;
   if (config.ledgerMode === "shadow") {
     const ledgerFile =
       config.ledgerPath === ""
@@ -697,10 +711,85 @@ async function main(): Promise<void> {
     void pass();
     ledgerTimer = setInterval(() => void pass(), config.ledgerIntervalMs);
     ledgerTimer.unref();
+
+    // --- The painter: the one mouth for the conversations it owns -----------------
+    //
+    // Rolled out per *conversation*, not per bridge: there is one Chat bridge, so
+    // "one bridge at a time" is all or nothing, whereas a conversation is exactly the
+    // unit whose cursor, thread and notification policy are already its own. Opted-in
+    // threads get their turns posted here and the handler keeps its hands off them
+    // (same predicate, same process, so the two cannot disagree).
+    if (painted.size > 0) {
+      logger.info(`[paint] posting for conversation(s) ${[...painted].join(", ")} — the handler will not`);
+      // The address a conversation lives at. Read per use rather than cached: bindings
+      // are rewritten on every message, and a stale key here would post into the wrong
+      // thread — the failure this whole arrangement exists to make impossible.
+      const addressOf = async (conversationId: number): Promise<string | undefined> => {
+        const bindings = await host.bindings().catch(() => ({ byChatKey: {} }));
+        return Object.entries(bindings.byChatKey).find(([, b]) => b.conversationId === conversationId)?.[0];
+      };
+      const painter = new Painter({
+        surface: "gchat",
+        ledger,
+        owns: (conversationId) => painted.has(conversationId),
+        conversations: async () => [...painted].map((conversationId) => ({ conversationId })),
+        history: (conversationId, limit, offset) => seam.history(conversationId, { limit, offset }),
+        busy: async (conversationId) => (await seam.snapshot(conversationId))?.busy === true,
+        surfaceClient: {
+          // The stream and its subscription are one act: a Chat placeholder cannot be
+          // patched before it exists, and creating it later would be a second message.
+          open: async (conversationId) => {
+            const target = chatTarget(await addressOf(conversationId));
+            if (!target) return undefined;
+            const stream = new ReplyStream(client, target.space, target.threadName, "gchat", {
+              replaceOnFinish: config.replaceOnFinish,
+            });
+            const key = (await addressOf(conversationId)) ?? String(conversationId);
+            stream.register(key);
+            const sink = await attachViewSink({ seam, conversationId, stream });
+            return {
+              stream: {
+                text: (full) => stream.onSnapshot(full),
+                tool: (name, args) => stream.showTool(name, args),
+                clearTool: () => stream.clearTool(),
+                finish: async (text) => {
+                  await stream.finish(text);
+                  stream.unregister(key);
+                },
+                abandon: async () => {
+                  await stream.abandon();
+                  stream.unregister(key);
+                },
+              },
+              detach: () => {
+                sink.detach();
+                stream.unregister(key);
+              },
+            };
+          },
+          post: async (conversationId, text) => {
+            const target = chatTarget(await addressOf(conversationId));
+            if (!target) return;
+            for (const [index, chunk] of splitMessage(text).entries()) {
+              await client.sendMessage(
+                target.space,
+                chunk,
+                target.threadName,
+                index > 0 && target.threadName === undefined ? { silent: true } : undefined,
+              );
+            }
+          },
+        },
+      });
+      paintTimer = setInterval(() => void painter.tick(), Math.min(config.ledgerIntervalMs, 15_000));
+      paintTimer.unref();
+      void painter.tick();
+    }
   }
 
   const shutdown = async (): Promise<void> => {
     if (ledgerTimer) clearInterval(ledgerTimer);
+    if (paintTimer) clearInterval(paintTimer);
     logger.info("[bridge] shutting down...");
     await receiver.stop();
     artifactsServer?.close();

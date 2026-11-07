@@ -300,6 +300,32 @@ function ownership(entry: EntryRef, surface: string): "own" | "skip-unknown" | "
   return "present";
 }
 
+/** One page-walk's worth of entries after a cursor. Shared with the painter. */
+export interface EntryWindow {
+  /** Entries in ascending order, grouped by entry id. */
+  entries: EntryRef[];
+  /** Highest entry id seen, or `0` for a conversation with nothing in it. */
+  newest: number;
+  /** False when the cursor was never reached — the pages ran out first. */
+  reachedCursor: boolean;
+}
+
+/**
+ * Read entries after `cursor`, newest page first.
+ *
+ * Exported because the painter asks the same question the pass does ("what is after
+ * my position") and the two must agree about grouping: one entry per surface message,
+ * even when the transcript holds several messages for it.
+ */
+export async function entriesAfter(
+  deps: Pick<PassDeps, "history">,
+  conversationId: number,
+  cursor: number,
+  options: { pageSize?: number; maxPages?: number } = {},
+): Promise<EntryWindow> {
+  return readWindow(deps, conversationId, cursor, options.pageSize ?? 50, options.maxPages ?? 10);
+}
+
 interface Window {
   /** Entries in ascending order, grouped by entry id. */
   entries: EntryRef[];
@@ -317,7 +343,7 @@ interface Window {
  * of an entry is the one kept, which is the assistant's text for an answer.
  */
 async function readWindow(
-  deps: PassDeps,
+  deps: Pick<PassDeps, "history">,
   conversationId: number,
   cursor: number,
   pageSize: number,

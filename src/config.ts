@@ -102,6 +102,16 @@ export interface Config {
   ledgerIntervalMs: number;
   /** Ignore threads nobody has touched for this long, so dormant ones cost nothing. */
   ledgerActiveWithinMs: number;
+  /**
+   * Conversations whose turns the painter posts, instead of the Chat handler.
+   *
+   * The rollout unit is a *conversation*, not a bridge: there is one Chat bridge, so
+   * "one bridge at a time" would be all or nothing — while a conversation is exactly
+   * the thing whose cursor, thread and notification policy are already per-instance.
+   * Empty means the handler posts everything (today's behaviour); a list opts those
+   * threads in, one at a time.
+   */
+  paintConversations: number[];
 }
 
 function required(name: string): string {
@@ -181,5 +191,8 @@ export function loadConfig(): Config {
     ledgerPath: (process.env.BRIDGE_LEDGER_PATH ?? "").trim(),
     ledgerIntervalMs: Number(process.env.BRIDGE_LEDGER_INTERVAL_MS ?? 60_000),
     ledgerActiveWithinMs: Number(process.env.BRIDGE_LEDGER_ACTIVE_WITHIN_MS ?? 7 * 24 * 60 * 60 * 1000),
+    paintConversations: listEnv("BRIDGE_PAINT_CONVERSATIONS")
+      .map((id) => Number(id))
+      .filter((id) => Number.isFinite(id) && id > 0),
   };
 }
