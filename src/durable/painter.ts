@@ -95,6 +95,9 @@ export interface PainterDeps {
   /** Is a turn running in this conversation right now? */
   busy(conversationId: number): Promise<boolean>;
   surfaceClient: PaintSurface;
+  /** How much history one look may read before calling the position unreachable. */
+  pageSize?: number;
+  maxPages?: number;
   log?(message: string): void;
 }
 
@@ -104,6 +107,8 @@ export interface PaintSummary {
   streamed: number;
   posted: number;
   failed: number;
+  /** Conversations whose cursor was too far behind to trust, and were adopted at the head. */
+  adopted: number;
 }
 
 /** Live stream and view handle per conversation, held across ticks. */
@@ -116,7 +121,7 @@ interface Open {
 
 export class Painter {
   private open = new Map<number, Open>();
-  private summary: PaintSummary = { painted: 0, streamed: 0, posted: 0, failed: 0 };
+  private summary: PaintSummary = { painted: 0, streamed: 0, posted: 0, failed: 0, adopted: 0 };
   /** Serialises ticks. Two at once could both see one unposted answer and post it twice. */
   private chain: Promise<unknown> = Promise.resolve();
   private wakeTimer: NodeJS.Timeout | undefined;
@@ -167,7 +172,7 @@ export class Painter {
 
   /** One tick over every conversation this painter owns. Never throws. */
   private async tickAll(): Promise<PaintSummary> {
-    const summary: PaintSummary = { painted: 0, streamed: 0, posted: 0, failed: 0 };
+    const summary: PaintSummary = { painted: 0, streamed: 0, posted: 0, failed: 0, adopted: 0 };
     let conversations: readonly { conversationId: number }[];
     try {
       conversations = await this.deps.conversations();
@@ -186,12 +191,16 @@ export class Painter {
         // painter from ever painting it), so there is nobody else to take the position.
         // Adopting at the head is the same rule the pass uses — never at zero, or a
         // captured conversation would be replayed.
-        const window = await entriesAfter(this.deps, conversationId, 0, {});
-        this.deps.ledger.adopt(conversationId, window.newest, "new");
+        const window = await entriesAfter(this.deps, conversationId, 0, this.pages);
+        this.deps.ledger.adopt(conversationId, window.newest, this.deps.ledger.recovered ? "lost-position" : "new");
         await this.deps.ledger.save();
         this.log(
           `[paint] ${this.deps.address?.(conversationId) ?? `conversation ${conversationId}`}: ` +
-            `adopted at entry ${window.newest} (nothing before this painter's first look is repainted)`,
+            `adopted at entry ${window.newest} (` +
+            (this.deps.ledger.recovered
+              ? "the position file was unreadable"
+              : "nothing before this painter's first look is repainted") +
+            ")",
         );
         continue;
       }
@@ -206,8 +215,39 @@ export class Painter {
     return summary;
   }
 
+  /** Page budget for one look. Exposed so a test can make "too far behind" cheap to reach. */
+  private get pages(): { pageSize?: number; maxPages?: number } {
+    return {
+      ...(this.deps.pageSize === undefined ? {} : { pageSize: this.deps.pageSize }),
+      ...(this.deps.maxPages === undefined ? {} : { maxPages: this.deps.maxPages }),
+    };
+  }
+
   private async tickOne(conversationId: number, cursor: number, summary: PaintSummary): Promise<void> {
-    const window = await entriesAfter(this.deps, conversationId, cursor, {});
+    const window = await entriesAfter(this.deps, conversationId, cursor, this.pages);
+
+    // --- Too far behind to be sure of anything: adopt, do not paint it all. ---
+    //
+    // This is the rule the shadow pass has had from the start, and the painter needs it
+    // for a sharper reason: it *posts*. A bridge that was down for a week comes back with
+    // a cursor at the far end of a conversation, and walking forward from there would put
+    // every answer it missed into the thread as a burst of messages — which is not
+    // catch-up, it is a replay nobody asked for. So a cursor the pages cannot reach means
+    // "start from the head", said out loud, and the conversation resumes rather than
+    // re-runs.
+    if (!window.reachedCursor) {
+      const head = window.newest;
+      this.deps.ledger.adopt(conversationId, head, "gap");
+      await this.deps.ledger.save();
+      summary.adopted += 1;
+      this.log(
+        `[paint] ${this.deps.address?.(conversationId) ?? `conversation ${conversationId}`}: cursor ${cursor} ` +
+          `is further back than ${(this.deps.maxPages ?? 10) * (this.deps.pageSize ?? 50)} entries — ` +
+          `adopting at ${head} instead of repainting the gap`,
+      );
+      return;
+    }
+
     const pending = window.entries.filter((entry) => entry.entryId > cursor);
     const answer = pending.find((entry) => this.isAnswer(entry));
     const busy = await this.deps.busy(conversationId);

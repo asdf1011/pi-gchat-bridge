@@ -283,6 +283,45 @@ test("two ticks cannot both post the same answer", async () => {
   assert.deepEqual(posted, [{ conversationId: 1, text: "the answer" }]);
 });
 
+test("a cursor too far behind is adopted, never repainted", async () => {
+  // The failure this exists for: the bridge was down for a week, the cursor sits at the
+  // far end, and walking forward would put every missed answer into the thread as a burst
+  // of messages. That is a replay, not catch-up, so the position is abandoned loudly and
+  // the conversation resumes from the head.
+  const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
+  ledger.adopt(1, 1, "new");
+  const transcript: Transcript = {};
+  for (let id = 2; id <= 40; id += 1) transcript[id] = [answer(`entry ${id}`)];
+
+  const fake = fakeSurface();
+  const messages: MessageLike[] = [];
+  for (const id of Object.keys(transcript).map(Number).sort((a, b) => a - b)) {
+    for (const message of transcript[id] ?? []) messages.push({ ...message, entryId: id });
+  }
+  const painter = new Painter({
+    surface: "gchat",
+    ledger,
+    owns: () => true,
+    conversations: async () => [{ conversationId: 1 }],
+    history: async (_id, limit, offset) => {
+      const end = Math.max(0, messages.length - offset);
+      return messages.slice(Math.max(0, end - limit), end);
+    },
+    busy: async () => false,
+    surfaceClient: fake.surface,
+    pageSize: 5,
+    maxPages: 2,
+    log: () => {},
+  });
+
+  const summary = await painter.tick();
+  assert.equal(summary.adopted, 1);
+  assert.equal(summary.painted, 0);
+  assert.deepEqual(fake.posted, [], "39 missed answers are not posted");
+  assert.equal(ledger.get(1)?.cursor, 40, "it starts again from the head");
+  assert.equal(ledger.get(1)?.adoptedReason, "gap");
+});
+
 test("a conversation with no position is adopted at the head, not replayed", async () => {
   // The painter owns its conversations outright, so nobody else is going to take a
   // position for it. Adopting at the head is the same rule the shadow pass uses: the
