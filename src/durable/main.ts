@@ -33,6 +33,7 @@ import { runDurableCommand } from "../adapter/commands.js";
 import { defaultSettings } from "../adapter/commands.js";
 import { mirrorTurn } from "./mirror.js";
 import { runPass } from "./delivery-pass.js";
+import { reconcile, type ReconcileState } from "./reconcile.js";
 import { Ledger } from "./ledger.js";
 import { BridgeHost } from "./host.js";
 import { BridgeLockedError } from "./lock.js";
@@ -597,6 +598,9 @@ async function main(): Promise<void> {
     logger.info(
       `[ledger] shadow mode, positions in ${ledgerFile}${ledger.recovered ? " (adopting afresh: the file was unreadable)" : ""}`,
     );
+    // Carried between passes: a disagreement that clears on its own is latency, and
+    // one that persists is a fault. Only the second is worth a line.
+    let reconcileState: ReconcileState = { pending: {} };
     const pass = async (): Promise<void> => {
       const summary = await runPass(ledger, {
         // This process is the Chat bridge, so entries stamped `gchat` are already in
@@ -616,6 +620,41 @@ async function main(): Promise<void> {
         owns: (name) => name.startsWith("spaces/"),
         activeWithinMs: config.ledgerActiveWithinMs,
       });
+      // --- The invariant check (§16): does the cursor agree with the mouth? ---
+      //
+      // While the legacy path is still the thing that posts, the cursor is a claim
+      // about somebody else's work. Comparing them is what turns "the cursor looks
+      // right" into evidence, and it is the one check that would catch a mistake in
+      // the painter before the painter exists.
+      const posts = await host.bindings().catch(() => ({ byChatKey: {} }));
+      const chatKeyFor = new Map(
+        Object.entries(posts.byChatKey).map(([chatKey, binding]) => [binding.conversationId, chatKey]),
+      );
+      const checked = await reconcile(
+        reconcileState,
+        {
+          confirmed: summary.answers,
+          cursors: ledger
+            .conversations()
+            .filter(({ conversationId }) => chatKeyFor.has(conversationId))
+            .map(({ conversationId, cursor }) => ({ conversationId, cursor: cursor.cursor })),
+        },
+        {
+          lastPosted: async (conversationId) => {
+            const chatKey = chatKeyFor.get(conversationId);
+            if (chatKey === undefined) return undefined;
+            // `undefined` means "no claim recorded", which the reconciler treats as
+            // nothing posted — and a thrown lookup (an unknown name) as no answer at
+            // all, because not knowing must never read as a fault.
+            const claimed = await seam.lastPostedAnswer(chatKey);
+            return claimed?.answerId;
+          },
+          graceMs: config.ledgerIntervalMs * 3,
+        },
+      );
+      reconcileState = checked.state;
+      if (checked.recovered > 0) logger.info(`[ledger] ${checked.recovered} disagreement(s) cleared`);
+
       // Silent when nothing happened: a pass every minute must not fill the log.
       if (summary.adopted > 0 || summary.presented > 0 || summary.unfinished.length > 0) {
         logger.info(

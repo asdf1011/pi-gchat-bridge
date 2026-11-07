@@ -112,6 +112,14 @@ export interface PassSummary {
   unfinished: number[];
   /** Entries this surface already had, and so were skipped. */
   own: number;
+  /**
+   * Assistant entries this pass confirmed, i.e. now claims are on the surface.
+   *
+   * Reported rather than acted on: whether they really were posted is a question
+   * about *this bridge's mouth*, which the pass deliberately knows nothing about.
+   * `reconcile.ts` asks it.
+   */
+  answers: { conversationId: number; entryId: number }[];
   /** Entries nobody claimed: user entries skipped, assistant entries presented. */
   unknown: number;
 }
@@ -130,7 +138,16 @@ export async function runPass(ledger: Ledger, deps: PassDeps): Promise<PassSumma
   const now = deps.now ?? (() => Date.now());
   const pageSize = deps.pageSize ?? 50;
   const maxPages = deps.maxPages ?? 10;
-  const summary: PassSummary = { looked: 0, adopted: 0, presented: 0, gaps: 0, unfinished: [], own: 0, unknown: 0 };
+  const summary: PassSummary = {
+    looked: 0,
+    adopted: 0,
+    presented: 0,
+    gaps: 0,
+    unfinished: [],
+    own: 0,
+    unknown: 0,
+    answers: [],
+  };
 
   let conversations: Awaited<ReturnType<PassDeps["conversations"]>>;
   try {
@@ -236,6 +253,7 @@ async function walk(
     });
     ledger.confirm(conversationId, entry.entryId);
     summary.presented += 1;
+    if (entry.role === "assistant") summary.answers.push({ conversationId, entryId: entry.entryId });
     if (entry.origin === undefined) summary.unknown += 1;
     log(
       `${SHADOW_LOG_PREFIX} conversation ${conversationId} entry ${entry.entryId} ` +
