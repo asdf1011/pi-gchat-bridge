@@ -42,7 +42,17 @@ function fakeSurface() {
         finish: async (text) => record.calls.push(`finish:${text.length}`),
         abandon: async () => record.calls.push("abandon"),
       };
-      return { stream, detach() {} };
+      // `paint` is the transport's frame→stream rule: the fake records it so a test can see
+      // that a pushed frame reached the placeholder.
+      const paint = (projected: unknown): void => {
+        const text = (projected as { liveText?: unknown }).liveText;
+        if (typeof text === "string" && text !== "") record.calls.push(`text:${text.length}`);
+        const tools = (projected as { tools?: { name?: string; status?: string }[] }).tools ?? [];
+        const tool = tools.filter((entry) => entry.status !== "done").at(-1);
+        if (tool?.name) record.calls.push(`tool:${tool.name}`);
+        else if (record.calls.at(-1)?.startsWith("tool:")) record.calls.push("clear");
+      };
+      return { stream, paint, detach() {} };
     },
     post: async (conversationId, text) => posted.push({ conversationId, text }),
   };
@@ -363,4 +373,57 @@ test("a poke does nothing for a conversation this painter does not own, or has n
   await second.painter.poke(1);
   assert.deepEqual(second.posted, []);
   assert.equal(fresh.get(1), undefined, "adoption stays the tick's job");
+});
+
+test("a held subscription paints a turn as it starts, and the tick does not open a second stream", async () => {
+  // The point of holding a subscription per conversation: a turn that starts is *pushed*, so
+  // the placeholder appears without waiting for a tick. The tick must then stay out of the
+  // way — two openers means two placeholders for one turn.
+  const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
+  ledger.adopt(1, 10, "new");
+  const fake = fakeSurface();
+  const watchers: { conversationId: number; handlers: { frame(p: unknown): void; settled(): void } }[] = [];
+  const messages: MessageLike[] = [{ role: "user", text: "hi", origin: "gchat", entryId: 11, at: 1 }];
+  let busy = true;
+  const painter = new Painter({
+    surface: "gchat",
+    ledger,
+    owns: () => true,
+    conversations: async () => [{ conversationId: 1 }],
+    history: async (_id, limit, offset) => {
+      const end = Math.max(0, messages.length - offset);
+      return messages.slice(Math.max(0, end - limit), end);
+    },
+    busy: async () => busy,
+    surfaceClient: fake.surface,
+    watch: (conversationId, handlers) => {
+      watchers.push({ conversationId, handlers });
+      return { detach() {} };
+    },
+    log: () => {},
+  });
+
+  await painter.tick();
+  assert.equal(watchers.length, 1, "one subscription per conversation, held");
+  await painter.tick();
+  assert.equal(watchers.length, 1, "and not a second one on the next tick");
+
+  // The turn is announced by the subscription, not discovered by a poll.
+  watchers[0]!.handlers.frame({ busy: true, liveText: "work", tools: [] });
+  await Promise.resolve();
+  assert.equal(fake.streams.length, 1, "a placeholder, opened by the frame");
+  // The tick now finds the stream already open and leaves it alone.
+  await painter.tick();
+  assert.equal(fake.streams.length, 1, "one placeholder, not two");
+
+  // It settles: the answer is posted by the poke the subscription triggers.
+  busy = false;
+  messages.push({ role: "assistant", text: "the answer", origin: "gchat", entryId: 12, at: 1 });
+  watchers[0]!.handlers.settled();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(fake.streams[0]!.calls.at(-1), "finish:10", "finished in place");
+  assert.deepEqual(fake.posted, [], "no second message");
+  assert.equal(ledger.get(1)?.cursor, 12);
+
+  await painter.close();
 });

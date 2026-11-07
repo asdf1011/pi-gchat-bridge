@@ -63,10 +63,21 @@ export function quotePrompt(prompt: string): string {
  * between them.
  */
 export interface PaintSurface {
-  /** Open a live stream for a conversation and start feeding it view frames. */
-  open(
-    conversationId: number,
-  ): Promise<{ stream: PaintStream; detach(): void } | undefined>;
+  /**
+   * Open a live stream for a conversation, and return the painter for it.
+   *
+   * The frame→stream mapping belongs to whoever owns the transport (it is where the tool-line
+   * and snapshot rules already live), so the painter is handed one rather than importing it.
+   * `paint` is a no-op for a surface that subscribed the stream itself.
+   */
+  open(conversationId: number): Promise<
+    | {
+        stream: PaintStream;
+        detach(): void;
+        paint(projected: unknown): void;
+      }
+    | undefined
+  >;
   /** Post a finished answer with no live stream, chunked by the surface. */
   post(conversationId: number, text: string): Promise<void>;
 }
@@ -95,6 +106,25 @@ export interface PainterDeps {
   /** Is a turn running in this conversation right now? */
   busy(conversationId: number): Promise<boolean>;
   surfaceClient: PaintSurface;
+  /**
+   * Hold a live subscription for this conversation and report what the view says.
+   *
+   * This is what makes the tick a *fallback* rather than the mechanism: with a subscription
+   * the start of a turn is pushed too (a browser message starts one with no local hint), and
+   * the frames drive the placeholder. Without it — the in-process mode, or before the split —
+   * the tick notices a running turn instead, one interval later.
+   *
+   * Returns `undefined` when the surface cannot hold one; the painter then falls back.
+   */
+  watch?(
+    conversationId: number,
+    handlers: {
+      /** A frame for this conversation. `busy` says whether a turn is running. */
+      frame(projected: unknown): void;
+      /** The turn ended, as far as the view can tell. */
+      settled(): void;
+    },
+  ): { detach(): void } | undefined;
   /** How much history one look may read before calling the position unreachable. */
   pageSize?: number;
   maxPages?: number;
@@ -115,12 +145,13 @@ export interface PaintSummary {
 interface Open {
   stream: PaintStream;
   detach(): void;
-  /** The tool line currently shown, so a frame that changes nothing costs nothing. */
-  tool?: string;
+  paint(projected: unknown): void;
 }
 
 export class Painter {
   private open = new Map<number, Open>();
+  /** One subscription per conversation, held across turns — the push half of the design. */
+  private watching = new Map<number, { detach(): void }>();
   private summary: PaintSummary = { painted: 0, streamed: 0, posted: 0, failed: 0, adopted: 0 };
   /** Serialises ticks. Two at once could both see one unposted answer and post it twice. */
   private chain: Promise<unknown> = Promise.resolve();
@@ -210,6 +241,7 @@ export class Painter {
 
     for (const { conversationId } of conversations) {
       if (!this.deps.owns(conversationId)) continue;
+      this.ensureWatching(conversationId);
       const position = this.deps.ledger.get(conversationId);
       if (!position) {
         // No position yet. The painter adopts for itself rather than deferring to the
@@ -248,6 +280,53 @@ export class Painter {
       ...(this.deps.pageSize === undefined ? {} : { pageSize: this.deps.pageSize }),
       ...(this.deps.maxPages === undefined ? {} : { maxPages: this.deps.maxPages }),
     };
+  }
+
+  /**
+   * Hold a subscription for a conversation, creating it once.
+   *
+   * Idempotent and cheap to call every tick: a watcher that is already there is left alone,
+   * so this is "make sure", not "open another".
+   */
+  private ensureWatching(conversationId: number): void {
+    if (this.watching.has(conversationId)) return;
+    const watch = this.deps.watch;
+    if (!watch) return;
+    const handle = watch(conversationId, {
+      frame: (projected) => {
+        // Painting happens here, not on a timer: the frames are the turn.
+        void this.paintFrame(conversationId, projected);
+      },
+      settled: () => {
+        // Reading the answer is the one thing a frame cannot do: the entry lands just after
+        // the view goes idle, which is what `poke` is for.
+        void this.poke(conversationId);
+      },
+    });
+    if (handle) this.watching.set(conversationId, handle);
+  }
+
+  /**
+   * Paint one frame, opening the turn's stream the first time the turn is seen running.
+   *
+   * The stream is per *turn* while the subscription is per conversation: a placeholder must
+   * not exist between turns, or every conversation would own a bot message saying "Thinking…"
+   * forever.
+   */
+  private async paintFrame(conversationId: number, projected: unknown): Promise<void> {
+    const busy = (projected as { busy?: unknown }).busy === true;
+    if (!busy) return; // the settle edge is reported separately, and finishes the stream
+    let open = this.open.get(conversationId);
+    if (!open) {
+      const opened = await this.deps.surfaceClient.open(conversationId);
+      if (!opened) return;
+      open = { stream: opened.stream, detach: () => opened.detach(), paint: (projected) => opened.paint(projected) };
+      this.open.set(conversationId, open);
+      this.log(
+        `[paint] ${this.deps.address?.(conversationId) ?? `conversation ${conversationId}`}: streaming a turn (pushed)`,
+      );
+    }
+    open.paint(projected);
   }
 
   private async tickOne(conversationId: number, cursor: number, summary: PaintSummary): Promise<void> {
@@ -317,11 +396,17 @@ export class Painter {
         await this.deps.ledger.save();
       }
       if (!this.open.has(conversationId)) {
+        // Only when nobody is watching: a held subscription has already opened the stream and
+        // is painting into it, and opening a second one would be a second placeholder.
         const opened = await this.deps.surfaceClient.open(conversationId);
         if (opened) {
-          this.open.set(conversationId, { stream: opened.stream, detach: () => opened.detach() });
+          this.open.set(conversationId, {
+            stream: opened.stream,
+            detach: () => opened.detach(),
+            paint: (projected) => opened.paint(projected),
+          });
           this.log(
-            `[paint] ${this.deps.address?.(conversationId) ?? `conversation ${conversationId}`}: streaming a turn`,
+            `[paint] ${this.deps.address?.(conversationId) ?? `conversation ${conversationId}`}: streaming a turn (polled)`,
           );
         }
       }
@@ -370,6 +455,8 @@ export class Painter {
   /** Detach everything; called on shutdown so a restart leaves no half-open view. */
   async close(): Promise<void> {
     if (this.wakeTimer) clearTimeout(this.wakeTimer);
+    for (const [, watcher] of this.watching) watcher.detach();
+    this.watching.clear();
     this.wakeTimer = undefined;
     for (const [, open] of this.open) {
       open.detach();

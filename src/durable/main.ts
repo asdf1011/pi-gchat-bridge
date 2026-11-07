@@ -669,47 +669,86 @@ async function main(): Promise<void> {
         },
         history: (conversationId, limit, offset) => seam.history(conversationId, { limit, offset }),
         busy: async (conversationId) => (await seam.snapshot(conversationId))?.busy === true,
+        // Held per conversation, across turns: this is what makes a turn *starting* pushed
+        // rather than polled, and it is the shape the extracted bridge will have.
+        ...(config.viewMode === "stream"
+          ? {
+              watch: (
+                conversationId: number,
+                handlers: { frame(projected: unknown): void; settled(): void },
+              ) => {
+                // Settle is a transition, not a state: a stream that is idle stays idle, and
+                // reporting every idle frame would re-read the transcript continuously.
+                let wasBusy: boolean | undefined;
+                const ladder = new ViewLadder({
+                  source: httpViewSource({
+                    baseUrl: config.selfUrl === "" ? `http://127.0.0.1:${config.healthPort}` : config.selfUrl,
+                    conversationId,
+                    ...(config.webToken ? { token: config.webToken } : {}),
+                  }),
+                  onView: (view) => {
+                    const busy = (view as { busy?: unknown }).busy === true;
+                    if (wasBusy === true && !busy) handlers.settled();
+                    wasBusy = busy;
+                    handlers.frame(view);
+                  },
+                  // Degraded: read the entries, which is what the bridge would otherwise do on
+                  // its own timer. That is the §18 fallback, and it is the only polling left.
+                  poll: async () => {
+                    await painter?.poke(conversationId);
+                  },
+                  heartbeatMs: 15_000,
+                  onMode: (mode) => logger.info(`[paint] conversation ${conversationId}: view ${mode}`),
+                });
+                void ladder.run();
+                return { detach: () => ladder.stop() };
+              },
+            }
+          : {}),
         surfaceClient: {
           // The stream and its subscription are one act: a Chat placeholder cannot be
           // patched before it exists, and creating it later would be a second message.
+          // Opening a stream is all this does. Subscribing it is the *watcher's* job in
+          // stream mode (one subscription held across turns), and the sink's in-process mode,
+          // so a conversation never ends up with two.
           open: async (conversationId) => {
             const target = chatTarget(await addressOf(conversationId));
             if (!target) return undefined;
-            // Both transports report the settle edge, so the answer is finished the moment the
-            // turn ends instead of at the next tick — and the tick stops being load-bearing.
-            const settled = { onSettle: () => void painter?.poke(conversationId) };
+            const key = (await addressOf(conversationId)) ?? String(conversationId);
             const stream = new ReplyStream(client, target.space, target.threadName, "gchat", {
               replaceOnFinish: config.replaceOnFinish,
             });
-            const key = (await addressOf(conversationId)) ?? String(conversationId);
             stream.register(key);
-            // One painter for both transports: the wire carries the same projection the seam
-            // hands out, so the frame rule lives in `viewFramePainter` and nowhere else.
-            const paint = viewFramePainter(stream, settled);
-            let detachView: () => void;
+            const paint = viewFramePainter(stream);
 
             if (config.viewMode === "stream") {
-              // The same bytes a separate bridge would read: this is the extraction
-              // rehearsed as configuration rather than as a rewrite.
-              const ladder = new ViewLadder({
-                source: httpViewSource({
-                  baseUrl: config.selfUrl === "" ? `http://127.0.0.1:${config.healthPort}` : config.selfUrl,
-                  conversationId,
-                  ...(config.webToken ? { token: config.webToken } : {}),
-                }),
-                onView: (view) => paint(view as ProjectedView),
-                // The painter's own tick is still the entry path, so a degraded stream
-                // costs liveness, not messages. When the tick goes (once this is the only
-                // view path), this becomes the poll.
-                poll: async () => {},
-                onMode: (mode) => logger.info(`[paint] ${key}: view ${mode}`),
-              });
-              void ladder.run();
-              detachView = () => ladder.stop();
-            } else {
-              const sink = await attachViewSink({ seam, conversationId, stream, ...settled });
-              detachView = () => sink.detach();
+              // The watcher paints; nothing to attach here.
+              return {
+                stream: {
+                  text: (full) => stream.onSnapshot(full),
+                  tool: (name, args) => stream.showTool(name, args),
+                  clearTool: () => stream.clearTool(),
+                  finish: async (text) => {
+                    await stream.finish(text);
+                    stream.unregister(key);
+                  },
+                  abandon: async () => {
+                    await stream.abandon();
+                    stream.unregister(key);
+                  },
+                },
+                paint: (projected) => paint(projected as ProjectedView),
+                detach: () => stream.unregister(key),
+              };
             }
+
+            // In-process: the sink subscribes, paints and reports the settle edge itself.
+            const sink = await attachViewSink({
+              seam,
+              conversationId,
+              stream,
+              onSettle: () => void painter?.poke(conversationId),
+            });
             return {
               stream: {
                 text: (full) => stream.onSnapshot(full),
@@ -724,8 +763,9 @@ async function main(): Promise<void> {
                   stream.unregister(key);
                 },
               },
+              paint: () => {}, // the sink is already painting this stream
               detach: () => {
-                detachView();
+                sink.detach();
                 stream.unregister(key);
               },
             };
