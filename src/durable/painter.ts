@@ -29,8 +29,20 @@
  *     already there.
  *
  * The cursor is the recovery story: an answer that fails to post leaves the cursor
- * behind it, so the next tick tries again. That is strictly better than the handler's
- * one-shot post, which is why the reconciler can tell the two apart.
+ * behind it, so the next look tries again. That is strictly better than the handler's
+ * one-shot post, and it is why the reconciler that compared the two could be deleted.
+ *
+ * Three mechanisms, and each has one job — the split matters because two of them overlapping
+ * is how a turn gets painted twice:
+ *
+ *   - **subscriptions** (when the surface can hold one) are *liveness*: a turn that starts is
+ *     pushed, and its frames paint the placeholder. Held per conversation, so one that starts
+ *     later is seen too.
+ *   - **`poke`** is *delivery of one answer*: a frame can say the turn ended, but only the
+ *     transcript can say what it said.
+ *   - **`tick`** is *discovery*, and nothing else: it adopts conversations it has never seen,
+ *     and reads the ones nobody is watching — a dormant thread, or every thread in in-process
+ *     mode. It is the residual polling §18 allows, and it never runs for a watched thread.
  */
 import type { EntryRef, MessageLike } from "./delivery-pass.js";
 import { entriesAfter } from "./delivery-pass.js";
@@ -265,7 +277,12 @@ export class Painter {
       const recently = lastActivityAt !== undefined && (within === undefined || Date.now() - lastActivityAt <= within);
       if (recently) {
         active.add(conversationId);
-        this.ensureWatching(conversationId);
+        if (await this.ensureWatching(conversationId)) {
+          // Subscribed: its turns are pushed and its answers posted on the settle edge, so the
+          // sweep has nothing to discover here. This is the reduction the whole subscription
+          // work was for — the tick now only reads what nobody is watching.
+          continue;
+        }
       }
       const position = this.deps.ledger.get(conversationId);
       if (!position) {
@@ -320,10 +337,22 @@ export class Painter {
    * Idempotent and cheap to call every tick: a watcher that is already there is left alone,
    * so this is "make sure", not "open another".
    */
-  private ensureWatching(conversationId: number): void {
-    if (this.watching.has(conversationId)) return;
+  private async ensureWatching(conversationId: number): Promise<boolean> {
+    if (this.watching.has(conversationId)) return true;
     const watch = this.deps.watch;
-    if (!watch) return;
+    if (!watch) return false;
+    // A watched conversation is painted from frames and posted by `poke`, and both need a
+    // position — so taking one is part of starting to watch. Adopting at the head, as ever:
+    // nothing that predates this bridge is repainted.
+    if (!this.deps.ledger.get(conversationId)) {
+      const window = await entriesAfter(this.deps, conversationId, 0, this.pages);
+      this.deps.ledger.adopt(conversationId, window.newest, this.deps.ledger.recovered ? "lost-position" : "new");
+      await this.deps.ledger.save();
+      this.log(
+        `[paint] ${this.deps.address?.(conversationId) ?? `conversation ${conversationId}`}: ` +
+          `adopted at entry ${window.newest} while starting its subscription`,
+      );
+    }
     const handle = watch(conversationId, {
       frame: (projected) => {
         // Painting happens here, not on a timer: the frames are the turn.
@@ -336,6 +365,7 @@ export class Painter {
       },
     });
     if (handle) this.watching.set(conversationId, handle);
+    return handle !== undefined;
   }
 
   /**

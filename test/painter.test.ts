@@ -375,6 +375,57 @@ test("a poke does nothing for a conversation this painter does not own, or has n
   assert.equal(fresh.get(1), undefined, "adoption stays the tick's job");
 });
 
+test("a subscribed conversation is never read by the sweep", async () => {
+  // The point of holding subscriptions: the tick stops reading what is already watched. Without
+  // this the sweep is 127 entry reads a minute for conversations whose turns are already pushed.
+  const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
+  ledger.adopt(1, 10, "new");
+  let reads = 0;
+  const painter = new Painter({
+    surface: "gchat",
+    ledger,
+    owns: () => true,
+    conversations: async () => [{ conversationId: 1, lastActivityAt: Date.now() }],
+    history: async () => {
+      reads += 1;
+      return [];
+    },
+    busy: async () => false,
+    surfaceClient: fakeSurface().surface,
+    watch: () => ({ detach() {} }),
+    log: () => {},
+  });
+
+  await painter.tick();
+  assert.equal(reads, 0, "subscribed, so the sweep has nothing to look at");
+  await painter.close();
+});
+
+test("a conversation with no subscription is still swept, so a dormant thread is not lost", async () => {
+  // The other half: no subscription (dormant, or in-process mode) means the sweep is the only
+  // thing that can notice a new turn there. Discovery is what the tick is for now.
+  const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
+  ledger.adopt(1, 10, "new");
+  let reads = 0;
+  const painter = new Painter({
+    surface: "gchat",
+    ledger,
+    owns: () => true,
+    conversations: async () => [{ conversationId: 1, lastActivityAt: Date.now() }],
+    history: async () => {
+      reads += 1;
+      return [];
+    },
+    busy: async () => false,
+    surfaceClient: fakeSurface().surface,
+    log: () => {}, // no `watch`: the sweep is the mechanism
+  });
+
+  await painter.tick();
+  assert.ok(reads > 0, "an unwatched conversation is read by the sweep");
+  await painter.close();
+});
+
 test("two frames arriving together open one stream, not two", async () => {
   // The regression: a view attach sends a snapshot and then deltas, so two `frame` callbacks
   // reached the open path in the same millisecond, both saw "no stream yet", and both created a

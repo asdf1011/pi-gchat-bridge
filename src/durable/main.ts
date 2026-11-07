@@ -795,7 +795,12 @@ async function main(): Promise<void> {
       // about (a web message, a resume after a restart). Anything the handler knows
       // about arrives via `wake()` and is painted immediately.
       const instance = painter;
-      paintTimer = setInterval(() => void instance.tick(), Math.min(config.ledgerIntervalMs, 15_000));
+      // The interval is the *sweep*, not the delivery path: with a subscription in place a
+      // conversation's turns are pushed and its answers posted on the settle edge, so the sweep
+      // only reads threads nobody is watching. Slow is right; in-process mode, which has no
+      // subscriptions, keeps the faster cadence because the sweep is its mechanism.
+      const sweepMs = config.viewMode === "stream" ? 60_000 : Math.min(config.ledgerIntervalMs, 15_000);
+      paintTimer = setInterval(() => void instance.tick(), sweepMs);
       paintTimer.unref();
       void instance.tick();
     }
