@@ -138,3 +138,30 @@ test("detach stops painting and disposes the view", async () => {
   assert.deepEqual(stream.snapshots, []);
   assert.equal(fake.disposed, true);
 });
+
+test("the shared frame painter is what both transports paint with", async () => {
+  // The two view paths (in-process attachment and the wire) must make the same decisions,
+  // so the decision lives in one function and this test pins it directly: whole snapshots,
+  // no blanking, one tool line per call, cleared when the round ends.
+  const { viewFramePainter } = await import("../src/adapter/view-sink.js");
+  const stream = fakeStream();
+  const paint = viewFramePainter(stream);
+
+  paint(projectView({ entries: [], docs: {} }));
+  assert.deepEqual(stream.snapshots, [], "an idle first frame paints nothing");
+
+  paint(projectView(partial("half an ans")));
+  paint(projectView(partial("half an answer")));
+  assert.deepEqual(stream.snapshots, ["half an ans", "half an answer"], "whole snapshots, in order");
+
+  // An empty live text after a run must not blank the message: `finish()` owns the end state.
+  paint(projectView(partial("")));
+  assert.deepEqual(stream.snapshots, ["half an ans", "half an answer"]);
+
+  paint(projectView(partial("working", [{ callId: "c1", name: "bash", status: "running" }])));
+  paint(projectView(partial("working", [{ callId: "c1", name: "bash", status: "running" }])));
+  assert.deepEqual(stream.tools.map((tool) => tool.name), ["bash"], "one line per call, not per frame");
+
+  paint(projectView(partial("working", [{ callId: "c1", name: "bash", status: "done" }])));
+  assert.equal(stream.cleared, 1, "cleared once the round ends");
+});

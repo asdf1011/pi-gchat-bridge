@@ -27,14 +27,14 @@ import type { MessageReceiver } from "../receiver.js";
 import { StateStore } from "../state.js";
 import { ReplyStream } from "../stream.js";
 import type { IncomingMessage } from "../types.js";
-import { attachViewSink } from "../adapter/view-sink.js";
+import { attachViewSink, viewFramePainter } from "../adapter/view-sink.js";
 import { DurableRouter } from "../adapter/router.js";
 import { runDurableCommand } from "../adapter/commands.js";
 import { defaultSettings } from "../adapter/commands.js";
 import { runPass } from "./delivery-pass.js";
 import { Painter } from "./painter.js";
 import { httpViewSource, ViewLadder } from "../adapter/view-client.js";
-import { activeTool, projectView, type ViewLike } from "../session-host/projection.js";
+import type { ProjectedView } from "../session-host/projection.js";
 import { chatTarget } from "../session-key.js";
 import { splitMessage } from "../stream.js";
 import { Ledger } from "./ledger.js";
@@ -680,7 +680,9 @@ async function main(): Promise<void> {
             });
             const key = (await addressOf(conversationId)) ?? String(conversationId);
             stream.register(key);
-            const paint = viewPainter(stream);
+            // One painter for both transports: the wire carries the same projection the seam
+            // hands out, so the frame rule lives in `viewFramePainter` and nowhere else.
+            const paint = viewFramePainter(stream);
             let detachView: () => void;
 
             if (config.viewMode === "stream") {
@@ -692,7 +694,7 @@ async function main(): Promise<void> {
                   conversationId,
                   ...(config.webToken ? { token: config.webToken } : {}),
                 }),
-                onView: paint,
+                onView: (view) => paint(view as ProjectedView),
                 // The painter's own tick is still the entry path, so a degraded stream
                 // costs liveness, not messages. When the tick goes (once this is the only
                 // view path), this becomes the poll.
@@ -756,23 +758,6 @@ async function main(): Promise<void> {
    * is left, and nothing said when neither changed — kept in one function so the two view
    * modes cannot drift in how they paint.
    */
-  const viewPainter = (stream: ReplyStream): ((view: unknown) => void) => {
-    let shownTool: string | undefined;
-    return (view) => {
-      const projected = projectView(view as ViewLike);
-      if (projected.liveText) stream.onSnapshot(projected.liveText);
-      const tool = activeTool(projected.tools);
-      if (tool) {
-        if (shownTool !== tool.callId) {
-          shownTool = tool.callId;
-          stream.showTool(tool.name, tool.arguments);
-        }
-      } else if (shownTool !== undefined) {
-        shownTool = undefined;
-        stream.clearTool();
-      }
-    };
-  };
 
   const shutdown = async (): Promise<void> => {
     if (ledgerTimer) clearInterval(ledgerTimer);

@@ -16,6 +16,39 @@
 import { activeTool, projectView, type ProjectedView } from "../session-host/projection.js";
 import type { SessionHost } from "../session-host/api.js";
 
+/**
+ * Frames in, stream calls out — the one place that decides what a view change means.
+ *
+ * Shared by every transport that feeds a `ReplyStream`: the in-process sink below, and any
+ * surface that reads the same frames over the wire (`GET /v1/view`). Two copies of this
+ * rule is how two view paths start painting differently, and the rule has opinions worth
+ * keeping in one place: only non-empty text is painted (so an ending run does not blank a
+ * message that `finish()` owns), and a tool line is shown once per call rather than on
+ * every frame.
+ *
+ * A frame is a `ProjectedView` on every transport: the seam hands one out, and the wire
+ * carries the same JSON. So this takes the projection and never re-projects — projecting a
+ * projection yields an empty one, which is the bug this signature exists to prevent.
+ */
+export function viewFramePainter(stream: StreamTarget): (projected: ProjectedView) => void {
+  let painted = "";
+  let shownCallId: string | undefined;
+  return (projected) => {
+    if (projected.liveText !== painted) {
+      painted = projected.liveText;
+      if (painted !== "") stream.onSnapshot(painted);
+    }
+    const tool = activeTool(projected.tools);
+    if (tool && tool.callId !== shownCallId) {
+      shownCallId = tool.callId;
+      stream.showTool(tool.name, tool.arguments);
+    } else if (!tool && shownCallId !== undefined) {
+      shownCallId = undefined;
+      stream.clearTool();
+    }
+  };
+}
+
 /** The slice of `ReplyStream` the sink drives. Structural, so tests need no Chat client. */
 export interface StreamTarget {
   onSnapshot(full: string): void;
@@ -50,35 +83,17 @@ export async function attachViewSink(options: ViewSinkOptions): Promise<ViewSink
   const { seam, conversationId, stream, onError } = options;
 
   let projected = projectView(undefined);
-  let shownCallId: string | undefined;
   let detached = false;
-  // What the placeholder currently shows. Only non-empty text is painted: the
-  // sink must not blank the message when a run ends, because `finish()` owns the
-  // final state (and deliberately handles the empty/aborted case by deleting the
-  // placeholder). Painting "" here would flash an empty message before the answer.
-  let painted = "";
-
+  // Painting is `viewFramePainter`'s job — the same function the stream transport uses, so
+  // the two cannot drift. What stays local is the *sink's* own bookkeeping: what the
+  // placeholder currently shows, and whether it is still attached.
+  const paint = viewFramePainter(stream);
   const apply = (next: ProjectedView): void => {
     if (detached) return;
     projected = next;
-    if (projected.liveText !== painted) {
-      painted = projected.liveText;
-      if (painted !== "") stream.onSnapshot(painted);
-    }
-
-    const tool = activeTool(projected.tools);
-    if (tool && tool.callId !== shownCallId) {
-      shownCallId = tool.callId;
-      stream.showTool(tool.name, tool.arguments);
-    } else if (!tool && shownCallId !== undefined) {
-      shownCallId = undefined;
-      stream.clearTool();
-    }
+    paint(next);
   };
 
-  // The seam sends the state at attach time as the first frame, so a sink
-  // attached mid-run (a reconnect, or a message that arrived while the run was
-  // already going) never starts from a blank placeholder.
   const handle = await seam.attach(conversationId, (next) => {
     try {
       apply(next);
@@ -88,8 +103,9 @@ export async function attachViewSink(options: ViewSinkOptions): Promise<ViewSink
   });
   if (!handle) throw new Error(`no such conversation: ${conversationId}`);
 
-  // Belt and braces for the ordering: if a frame somehow did not arrive first.
-  if (painted === "" && projected.liveText === "" && handle.snapshot.liveText !== "") apply(handle.snapshot);
+  // Belt and braces for the ordering: if a frame somehow did not arrive first. The painter
+  // handles "nothing changed" itself, so this is safe even when the snapshot repeats.
+  if (projected.liveText === "" && handle.snapshot.liveText !== "") apply(handle.snapshot);
 
   return {
     current: () => projected,
