@@ -206,6 +206,35 @@ async function main(): Promise<void> {
             res.end("ok");
             return;
           }
+          // GET /idle: is any turn running right now?
+          //
+          // Exists for the restart gate. "No child processes" is not the same
+          // question: an agent thinking between tool calls looks idle for a minute at
+          // a time, so a gate built on process silence fires mid-turn and kills the
+          // work it was trying to protect. Only conversations touched recently are
+          // asked, because a dormant thread cannot be mid-turn and each answer costs a
+          // view snapshot.
+          if (req.method === "GET" && url.pathname === "/idle") {
+            const busy: number[] = [];
+            const since = Date.now() - 24 * 60 * 60 * 1000;
+            try {
+              const bindings = await host.bindings();
+              for (const binding of Object.values(bindings.byChatKey)) {
+                if ((binding.updatedAt ?? binding.createdAt) < since) continue;
+                if ((await seam.snapshot(binding.conversationId))?.busy === true) {
+                  busy.push(binding.conversationId);
+                }
+              }
+            } catch (error) {
+              // Cannot tell is not idle: a restart that guesses would kill a turn.
+              res.writeHead(503, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ idle: false, error: (error as Error).message }));
+              return;
+            }
+            res.writeHead(busy.length === 0 ? 200 : 503, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ idle: busy.length === 0, busy }));
+            return;
+          }
           // POST /notify: the cron service's single write path into Chat.
           //
           // This route was collateral damage in the web-routes extraction

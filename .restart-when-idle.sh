@@ -8,10 +8,18 @@
 # five-minute build, so a deploy could take a running turn's work with it (and has:
 # two tool calls were interrupted that way).
 #
-# This waits for an *idle* bridge instead: no child process other than the long-lived
-# adapters, sustained for a quiet period. If it never gets quiet it does **not**
-# restart — a deployment that silently kills a twenty-minute build is the failure this
-# is here to prevent, so it logs and gives up instead.
+# This waits for an *idle* bridge instead, which is two questions and needs both:
+#
+#   - no turn running — asked of the bridge itself (`GET /idle`). Process silence is
+#     not the same thing: an agent thinking between tool calls is silent for a minute
+#     at a time, and a gate built on silence alone fired mid-turn the first time it
+#     was used;
+#   - no child process other than the long-lived adapters — which is what catches a
+#     build, a download, or a script the owner started.
+#
+# Sustained for a quiet period. If it never gets quiet it does **not** restart — a
+# deployment that silently kills a twenty-minute build is the failure this is here to
+# prevent, so it logs and gives up instead.
 #
 # Usage:
 #   setsid nohup ./.restart-when-idle.sh [quietSeconds] [maxWaitSeconds] &
@@ -32,6 +40,17 @@ CHECK=0
 
 log() { echo "$(date -u '+%F %T') $*" >> "$LOG"; }
 say() { [ "$CHECK" = 1 ] && echo "$*"; log "$*"; }
+
+IDLE_URL="${BRIDGE_IDLE_URL:-http://127.0.0.1:8081/idle}"
+
+# Is a turn running? Asks the bridge, because it is the only thing that knows. A
+# failure to answer counts as busy: cannot tell is not idle.
+turn_running() {
+  if curl -sf --max-time 5 "$IDLE_URL" >/dev/null 2>&1; then
+    return 1   # healthy answer = idle
+  fi
+  return 0
+}
 
 # The bridge's pid. The database lock is the authority: whichever process owns
 # `bridge.sqlite.lock` is the one serving — matching on a command line instead picks
@@ -107,6 +126,11 @@ fi
 
 if [ "$CHECK" = 1 ]; then
   echo "bridge pid: $BRIDGE"
+  if turn_running; then
+    echo "turn running: yes (GET $IDLE_URL did not report idle)"
+  else
+    echo "turn running: no"
+  fi
   # Printed with the command line, not just the pid: a misclassification here is the
   # one mistake that would let a restart land on somebody's running build, so it has
   # to be visible in the check's own output. (The grep pattern cannot match its own
@@ -132,7 +156,7 @@ while [ "$waited" -lt "$MAXWAIT" ]; do
   sleep 5
   waited=$((waited + 5))
   work=$(busy_children "$BRIDGE")
-  if [ -n "$work" ]; then
+  if [ -n "$work" ] || turn_running; then
     quiet_for=0
     continue
   fi
@@ -146,5 +170,5 @@ done
 
 # Loud on purpose: a skipped deploy is a decision somebody has to make, whereas a
 # restart that killed a running build is a loss nobody asked for.
-log "gave up after ${MAXWAIT}s: still busy ($(busy_children "$BRIDGE" | head -1)…) — NOT restarting; arm again when it is calm"
+log "gave up after ${MAXWAIT}s: still busy ($${turn_running:+turn running}${:+-}$(busy_children "$BRIDGE" | head -1)…) — NOT restarting; arm again when it is calm"
 exit 1
