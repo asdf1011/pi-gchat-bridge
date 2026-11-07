@@ -106,7 +106,7 @@ test("entries after the cursor are presented once each, in order", async () => {
 test("a second pass over the same transcript does nothing", async () => {
   const ledger = await Ledger.load(fileFor());
   ledger.adopt(1, 11, "new");
-  const transcript = { 12: [reply("one")] };
+  const transcript = { 12: [reply("one", "assistant", "webui")] };
   const first = fakeDeps(transcript);
   await runPass(ledger, first);
   assert.equal(first.presented.length, 1);
@@ -194,22 +194,40 @@ test("entries this surface already holds are stepped over, not posted back", asy
   assert.equal(ledger.get(1)?.cursor, 12, "accounted for is enough to advance the cursor");
 });
 
-test("an unclaimed user entry is left alone; an unclaimed answer is shown", async () => {
-  // Origin is missing when a stamp was lost or an entry predates the field. The rule
-  // is by role: posting somebody's own words back at them is worse than a missing
-  // signpost, but an answer nobody claims is one this bridge should probably show.
+test("an unstamped user entry is left alone, and unstamped commentary is not an answer", async () => {
+  // Two absences that look alike and mean opposite things. A user entry with no
+  // stamp came from a surface nobody recorded, so it is left alone. An assistant
+  // entry with no stamp is a turn's *intermediate* message — an agent saying
+  // "checking now" before a tool call — and only the entry the turn settles on is
+  // stamped as its answer. Painting commentary would turn a reply into a stream of
+  // little messages, which is what this pass did once, live, before the stamp existed.
   const ledger = await Ledger.load(fileFor());
   ledger.adopt(1, 10, "new");
   const deps = fakeDeps({
     11: [reply("orphaned prompt", "user")],
-    12: [reply("orphaned answer", "assistant")],
+    12: [reply("checking now", "assistant")],
+    13: [reply("and the tests", "assistant")],
   });
   const summary = await runPass(ledger, deps);
 
-  assert.deepEqual(deps.presented.map((entry) => entry.role), ["assistant"]);
-  assert.equal(summary.unknown, 2, "both were noticed, one was presented");
+  assert.deepEqual(deps.presented, [], "neither absence is something to post");
+  assert.equal(summary.unknown, 1);
+  assert.equal(summary.commentary, 2);
   assert.match(deps.lines.join("\n"), /entry 11: no origin recorded/);
-  assert.equal(ledger.get(1)?.cursor, 12);
+  assert.equal(ledger.get(1)?.cursor, 13, "both are still accounted for");
+});
+
+test("an answer of unknown provenance is presented, because it is still an answer", async () => {
+  // The host stamps every answer, with the literal origin `unknown` when the prompt's
+  // surface was never recorded. Unknown provenance is not the same as "not an
+  // answer": the entry is presented, with a line saying where it came from.
+  const ledger = await Ledger.load(fileFor());
+  ledger.adopt(1, 10, "new");
+  const deps = fakeDeps({ 11: [reply("an answer", "assistant", "unknown")] });
+  const summary = await runPass(ledger, deps);
+
+  assert.deepEqual(deps.presented.map((entry) => entry.origin), ["unknown"]);
+  assert.equal(summary.answers.length, 1, "and it counts as an answer for the check");
 });
 
 test("another surface's prompt reaches this one, with its origin attached", async () => {

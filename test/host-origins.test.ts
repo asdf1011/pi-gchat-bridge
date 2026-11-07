@@ -122,12 +122,31 @@ test("a conversation with nothing to stamp reports false rather than throwing", 
   assert.equal(await host.recordOrigin(999_999, 62, "webui"), false);
 });
 
-test("the answer stamp is skipped when the prompt had none", async () => {
+test("an answer with no recorded prompt surface is stamped, as unknown provenance", async () => {
+  // The stamp does two jobs: which surface asked, and that this entry *is an answer*.
+  // A turn's intermediate messages carry text too, so "is an answer" has to be
+  // recorded rather than inferred — which means an answer is stamped even when the
+  // prompt's surface was never recorded. The origin is then the literal `unknown`:
+  // still an answer, of unknown provenance, and a reader can say both.
   const host = await memoryHost();
   const conversationId = await withPrompt(host);
-  // No prompt origin recorded: there is nothing for the answer to inherit, and
-  // inventing "unknown" as a stamp would be worse than leaving it absent.
-  assert.equal(await host.recordAnswerOrigin(conversationId, 70, 999), false);
+  await host.writeEntry(conversationId, {
+    kind: "app.notice",
+    data: {},
+    model: [{ role: "assistant", content: [{ type: "text", text: "the build passes" }] }],
+  });
+  const answerEntryId = (await host.history(conversationId, 10, 0))?.find(
+    (message) => message.role === "assistant",
+  )?.entryId;
+  assert.ok(answerEntryId !== undefined);
+
+  assert.equal(await host.recordAnswerOrigin(conversationId, answerEntryId, 999), true);
   const history = await host.history(conversationId, 10, 0);
-  assert.equal(history?.[0]?.origin, undefined);
+  assert.deepEqual(
+    history?.map((message) => [message.role, message.origin]),
+    [
+      ["user", undefined],
+      ["assistant", "unknown"],
+    ],
+  );
 });

@@ -29,18 +29,22 @@
  * entry carries the surface that produced it (`origins-doc.ts`), and the pass skips
  * its own.
  *
- * Unknown origin is the interesting case, and it is answered by role rather than by
- * a default:
+ * A missing origin means one of two very different things, and the *role* tells them
+ * apart:
  *
- *   - a **user** entry with no origin is left alone — the only surface that can
- *     already hold it is the one that received it, and posting somebody's own words
- *     back at them is worse than a missing signpost;
- *   - an **assistant** entry with no origin is presented — an answer is only ever
- *     put on a surface by a bridge, so an answer nobody claims is one this bridge
- *     should probably show.
+ *   - a **user** entry with no stamp came from a surface nobody recorded — left
+ *     alone, because the only surface that can already hold it is the one that
+ *     received it, and posting somebody's own words back at them is worse than a
+ *     missing signpost;
+ *   - an **assistant** entry with no stamp is **not an answer**: a turn emits several
+ *     assistant entries (an agent says "checking now" and then calls a tool), and only
+ *     the one the turn settles on is stamped as its answer. Posting the rest would
+ *     paint a turn's running commentary into the thread as a series of messages —
+ *     which is exactly what this pass did once, visibly, before the stamp existed.
  *
- * Both are logged, because "unknown" means a stamp was lost or predates the field,
- * and a decision made from an absence should be visible rather than quiet.
+ * An answer whose prompt surface was never recorded carries the literal origin
+ * `unknown`: still an answer, of unknown provenance, and presented, with a line in the
+ * log saying so.
  *
  * `history` pages *backwards* from the newest message (the seam's own convention),
  * which is the right direction for this: a bridge that is nearly caught up reads
@@ -120,8 +124,10 @@ export interface PassSummary {
    * `reconcile.ts` asks it.
    */
   answers: { conversationId: number; entryId: number }[];
-  /** Entries nobody claimed: user entries skipped, assistant entries presented. */
+  /** Entries skipped for want of a stamp: unrecorded user entries, and commentary. */
   unknown: number;
+  /** Assistant entries that are a turn's running commentary, not its answer. */
+  commentary: number;
 }
 
 const SHADOW_LOG_PREFIX = "[ledger] would post";
@@ -146,6 +152,7 @@ export async function runPass(ledger: Ledger, deps: PassDeps): Promise<PassSumma
     unfinished: [],
     own: 0,
     unknown: 0,
+    commentary: 0,
     answers: [],
   };
 
@@ -233,6 +240,13 @@ async function walk(
       summary.own += 1;
       continue;
     }
+    if (verdict === "commentary") {
+      // A turn's intermediate message. Accounted for, never painted: the answer that
+      // follows it is the thing the surface shows.
+      ledger.confirm(conversationId, entry.entryId);
+      summary.commentary += 1;
+      continue;
+    }
     if (verdict === "skip-unknown") {
       ledger.confirm(conversationId, entry.entryId);
       summary.unknown += 1;
@@ -253,7 +267,11 @@ async function walk(
     });
     ledger.confirm(conversationId, entry.entryId);
     summary.presented += 1;
-    if (entry.role === "assistant") summary.answers.push({ conversationId, entryId: entry.entryId });
+    // Only a stamped assistant entry is an answer (§ the module doc): the reconciler
+    // compares these against what the mouth actually posted.
+    if (entry.role === "assistant" && entry.origin !== undefined) {
+      summary.answers.push({ conversationId, entryId: entry.entryId });
+    }
     if (entry.origin === undefined) summary.unknown += 1;
     log(
       `${SHADOW_LOG_PREFIX} conversation ${conversationId} entry ${entry.entryId} ` +
@@ -268,15 +286,17 @@ async function walk(
  * What this surface should do with one entry.
  *
  * `own` — it came from this surface, so the transport already has it.
- * `skip-unknown` — nobody recorded an origin and it is a *user* entry: the only
- * surface that can already hold it is the one that received it, so the safe error is
- * to leave it (a missing signpost) rather than post somebody's words back at them.
- * `present` — another surface's, or an unclaimed answer, which is what this pass is
- * for.
+ * `skip-unknown` — an unstamped *user* entry: the only surface that can already hold
+ * it is the one that received it, so the safe error is to leave it rather than post
+ * somebody's words back at them.
+ * `commentary` — an unstamped *assistant* entry, i.e. a turn's intermediate message
+ * rather than its answer. Accounted for, never painted.
+ * `present` — another surface's, or an answer of unknown provenance, which is what
+ * this pass is for.
  */
-function ownership(entry: EntryRef, surface: string): "own" | "skip-unknown" | "present" {
+function ownership(entry: EntryRef, surface: string): "own" | "skip-unknown" | "commentary" | "present" {
   if (entry.origin === surface) return "own";
-  if (entry.origin === undefined && entry.role === "user") return "skip-unknown";
+  if (entry.origin === undefined) return entry.role === "user" ? "skip-unknown" : "commentary";
   return "present";
 }
 

@@ -853,10 +853,21 @@ export class BridgeHost {
   async recordAnswerOrigin(conversationId: number, answerId: number, submission: number): Promise<boolean> {
     const current = await this.harness.snapshot(OriginsDoc, this.context);
     const prompt = originForSubmission(current, submission);
-    if (!prompt) return false;
     await this.harness.commit(async (tx) => {
       const doc = await tx.doc(OriginsDoc);
-      doc.byEntry = withOrigin(doc, conversationId, answerId, { ...prompt, at: Date.now() }).byEntry;
+      // Stamped *unconditionally*, because the stamp is doing two jobs: it says which
+      // surface asked, and it says that this entry **is an answer**. A turn's
+      // intermediate messages carry text as well (an agent says "checking now" before
+      // calling a tool), and they are transcript entries all the same — so "is this an
+      // answer" has to be recorded rather than inferred, or a painter would post a
+      // turn's running commentary into the thread. When the prompt's surface was never
+      // recorded the origin is the literal `unknown`: still an answer, of unknown
+      // provenance, and a reader can say both.
+      doc.byEntry = withOrigin(doc, conversationId, answerId, {
+        origin: prompt?.origin ?? "unknown",
+        ...(prompt?.submission === undefined ? { submission } : { submission: prompt.submission }),
+        at: Date.now(),
+      }).byEntry;
     }, this.context);
     return true;
   }
