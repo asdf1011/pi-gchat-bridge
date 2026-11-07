@@ -48,8 +48,51 @@ function safeHref(href: string): string | undefined {
   return trimmed;
 }
 
+/**
+ * Rendering options.
+ *
+ * `images` is opt-in and off by default, because an image tag is a *passive*
+ * request: unlike a link it fires without a click, which would hand whatever
+ * wrote the Markdown a silent way to make the reader's browser call a third
+ * party. Only the chat page turns it on, and even there a source must be a
+ * same-origin relative path — see `safeImageSrc`.
+ */
+export interface RenderOptions {
+  /** Allow inline images whose source is a same-origin relative path. */
+  images?: boolean;
+}
+
+/**
+ * An image source a browser cannot use to reach another host.
+ *
+ * Deliberately narrower than `safeHref`: a link is inert until clicked and can
+ * afford `https`, but an image renders on arrival, so the only acceptable source
+ * is one served from the page's own origin under the mount it was written in.
+ *
+ * Rejected, each for its own reason:
+ *   - any scheme (`https:`, `data:`, `file:`) — the first is an exfiltration
+ *     channel, the second can carry SVG script;
+ *   - a protocol-relative `//host/path`, which a browser reads as absolute;
+ *   - a root-absolute `/path`, which escapes the mount a proxied page lives
+ *     under and would 404 — or worse, reach a *different* app at the root;
+ *   - a `\` prefix, which some browsers normalise to `/`;
+ *   - any `..` segment, so a crafted path cannot climb out of the API prefix.
+ *
+ * What survives is what the page itself emits: `api/c/<id>/image/<e>/<i>`, and
+ * anything else relative, which simply 404s on this origin.
+ */
+function safeImageSrc(src: string): string | undefined {
+  const trimmed = src.trim();
+  if (trimmed === "") return undefined;
+  // A scheme, or protocol-relative shorthand, is never allowed.
+  if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed)) return undefined;
+  if (trimmed.startsWith("//") || trimmed.startsWith("/") || trimmed.startsWith("\\")) return undefined;
+  if (trimmed.split(/[?#]/)[0].split("/").includes("..")) return undefined;
+  return trimmed;
+}
+
 /** Replace inline constructs in one already-escaped line. */
-export function inline(raw: string): string {
+export function inline(raw: string, options: RenderOptions = {}): string {
   const codes: string[] = [];
   let out = escapeHtml(raw);
 
@@ -59,6 +102,19 @@ export function inline(raw: string): string {
     codes.push(`<code>${code}</code>`);
     return `\u0000${codes.length - 1}\u0000`;
   });
+
+  // Images before links, so the `![alt](src)` form is not first eaten by the
+  // link rule and left as a stray `!`. Like `inline`, this runs on already
+  // escaped text, so `alt` and `src` are entity-escaped by the time they reach
+  // the attribute — the tag cannot be broken out of from the source.
+  if (options.images === true) {
+    out = out.replace(/!\[([^\]]*)\]\(([^()\s]+)\)/g, (match, alt: string, src: string) => {
+      const safe = safeImageSrc(src);
+      // Not an image we will render: leave the source as the text it was, so the
+      // document shows what the agent wrote rather than silently dropping it.
+      return safe === undefined ? match : `<img src="${safe}" alt="${alt}" loading="lazy">`;
+    });
+  }
 
   out = out.replace(/\[([^\]]+)\]\(([^()\s]+)\)/g, (match, label: string, href: string) => {
     const safe = safeHref(href);
@@ -129,7 +185,7 @@ function startsBlock(lines: readonly string[], index: number): boolean {
  * Recursive because a blockquote and a list item both contain blocks; that is
  * also why the function is not a single pass with an output buffer.
  */
-function renderLines(lines: readonly string[]): string {
+function renderLines(lines: readonly string[], options: RenderOptions = {}): string {
   const out: string[] = [];
   let index = 0;
 
@@ -163,7 +219,7 @@ function renderLines(lines: readonly string[]): string {
     if (heading) {
       const level = heading[1].length;
       // Trailing closing hashes are part of the syntax, not the text.
-      out.push(`<h${level}>${inline(heading[2].replace(/\s+#+\s*$/, ""))}</h${level}>`);
+      out.push(`<h${level}>${inline(heading[2].replace(/\s+#+\s*$/, ""), options)}</h${level}>`);
       index += 1;
       continue;
     }
@@ -180,7 +236,7 @@ function renderLines(lines: readonly string[]): string {
         quoted.push(lines[index].replace(/^\s{0,3}>\s?/, ""));
         index += 1;
       }
-      out.push(`<blockquote>${renderLines(quoted)}</blockquote>`);
+      out.push(`<blockquote>${renderLines(quoted, options)}</blockquote>`);
       continue;
     }
 
@@ -191,7 +247,7 @@ function renderLines(lines: readonly string[]): string {
       const cell = (tag: string, text: string, column: number): string => {
         const align = aligns[column] ?? "";
         const style = align === "" ? "" : ` style="text-align:${align}"`;
-        return `<${tag}${style}>${inline(text.trim())}</${tag}>`;
+        return `<${tag}${style}>${inline(text.trim(), options)}</${tag}>`;
       };
       const head = header.map((text, column) => cell("th", text, column)).join("");
       index += 2;
@@ -247,7 +303,7 @@ function renderLines(lines: readonly string[]): string {
       const tag = ordered ? "ol" : "ul";
       const body = items
         .map((itemLines) => {
-          const inner = renderLines(itemLines);
+          const inner = renderLines(itemLines, options);
           // A leading paragraph is unwrapped: `<li><p>a</p></li>` renders with
           // paragraph spacing that a one-line list item should not have. Only the
           // first one — anything after it is a nested block (typically a list).
@@ -265,15 +321,21 @@ function renderLines(lines: readonly string[]): string {
       paragraph.push(lines[index].trim());
       index += 1;
     }
-    out.push(`<p>${inline(paragraph.join(" "))}</p>`);
+    out.push(`<p>${inline(paragraph.join(" "), options)}</p>`);
   }
 
   return out.join("\n");
 }
 
-/** Render one Markdown document to HTML. Output is safe to embed; it holds no scripts. */
-export function renderMarkdown(source: string): string {
-  return renderLines(source.replace(/\r\n?/g, "\n").split("\n"));
+/**
+ * Render one Markdown document to HTML. Output is safe to embed; it holds no
+ * scripts.
+ *
+ * `options` is empty by default, so every existing caller keeps the strictest
+ * behaviour — a document that renders `![a](b)` as text unless it means it.
+ */
+export function renderMarkdown(source: string, options: RenderOptions = {}): string {
+  return renderLines(source.replace(/\r\n?/g, "\n").split("\n"), options);
 }
 
 /** A self-contained document around rendered Markdown, styled for reading. */
