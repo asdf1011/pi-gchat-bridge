@@ -52,6 +52,67 @@ export function decide(facts: LadderFacts, policy: LadderPolicy): LadderAction {
   return "wait";
 }
 
+/**
+ * The protocol's implementation of `ViewSource`: SSE over HTTP against `/v1/view`.
+ *
+ * Reads the wire format it is given rather than parsing optimistically: a `data:` line
+ * that is not JSON is a frame to skip, not a stream to tear down, because a proxy that
+ * injects a comment or a keep-alive should not look like a broken server.
+ */
+export function httpViewSource(options: {
+  baseUrl: string;
+  conversationId: number;
+  token?: string;
+}): ViewSource {
+  return {
+    async open(onFrame, signal) {
+      const headers: Record<string, string> = { Accept: "text/event-stream" };
+      if (options.token) headers.Authorization = `Bearer ${options.token}`;
+      const response = await fetch(
+        `${options.baseUrl.replace(/\/$/, "")}/v1/conversations/${options.conversationId}/view`,
+        { headers, signal },
+      );
+      if (!response.ok) throw new Error(`view stream: HTTP ${response.status}`);
+      if (!response.body) throw new Error("view stream: no body");
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      // Abort is a normal ending, not a failure: the ladder's contract is that `open`
+      // resolves when the stream ends either way, and a caller that asked to stop should
+      // not receive an exception for being obeyed.
+      const aborted = (error: unknown): boolean => signal.aborted || (error as Error)?.name === "AbortError";
+      try {
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) return;
+          buffer += decoder.decode(value, { stream: true });
+          let boundary = buffer.indexOf("\n\n");
+          while (boundary !== -1) {
+            const block = buffer.slice(0, boundary);
+            buffer = buffer.slice(boundary + 2);
+            const event = /^event: (.*)$/m.exec(block)?.[1] ?? "message";
+            const data = /^data: (.*)$/m.exec(block)?.[1];
+            if (data !== undefined && (event === "view" || event === "heartbeat")) {
+              let parsed: unknown;
+              try {
+                parsed = JSON.parse(data) as unknown;
+              } catch {
+                parsed = undefined;
+              }
+              if (parsed !== undefined) onFrame(event, parsed);
+            }
+            boundary = buffer.indexOf("\n\n");
+          }
+        }
+      } catch (error) {
+        if (!aborted(error)) throw error;
+      } finally {
+        reader.cancel().catch(() => {});
+      }
+    },
+  };
+}
+
 /** A subscription as the ladder sees it: open it, get told about closes. */
 export interface ViewSource {
   /**

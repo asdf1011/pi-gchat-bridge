@@ -15,6 +15,7 @@ import http from "node:http";
 import test from "node:test";
 
 import { handleV1 } from "../src/adapter/v1-routes.js";
+import { httpViewSource } from "../src/adapter/view-client.js";
 import { decide, ViewLadder, type LadderPolicy, type ViewSource } from "../src/adapter/view-client.js";
 import type { ProjectedView } from "../src/session-host/projection.js";
 import type { SessionHost } from "../src/session-host/api.js";
@@ -207,6 +208,42 @@ test("watching a conversation that does not exist is a 404, not an open stream",
   const served = await serve(missing, 30);
   try {
     assert.equal((await fetch(`${served.url}/v1/conversations/9/view`)).status, 404);
+  } finally {
+    await served.close();
+  }
+});
+
+/* --- the client against the real stream --------------------------------------------- */
+
+test("the SSE client reads the same frames the server writes, and abort ends it", async () => {
+  const { seam, frames } = fakeSeam();
+  const served = await serve(seam, 25);
+  try {
+    const received: { kind: string; data: unknown }[] = [];
+    const controller = new AbortController();
+    const done = httpViewSource({ baseUrl: served.url, conversationId: 1 }).open((kind, data) => {
+      received.push({ kind, data });
+    }, controller.signal);
+
+    // Give the stream a moment to attach, push a change, then let heartbeats accumulate.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    frames[0]?.({ liveText: "half", busy: true, lastAssistantText: "", tools: [] });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+
+    assert.ok(received.length >= 2, `expected frames, got ${received.length}`);
+    assert.equal(received[0]?.kind, "view", "the snapshot arrives first");
+    assert.ok(
+      received.some((frame) => frame.kind === "view" && (frame.data as { liveText?: string }).liveText === "half"),
+      "the pushed change arrived",
+    );
+    assert.ok(
+      received.some((frame) => frame.kind === "heartbeat"),
+      "and the heartbeat, which is the only proof the stream is alive",
+    );
+
+    // Abort must end `open`, or the ladder would wait forever on a stream it abandoned.
+    controller.abort();
+    await done;
   } finally {
     await served.close();
   }

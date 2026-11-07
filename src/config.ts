@@ -102,6 +102,17 @@ export interface Config {
   ledgerIntervalMs: number;
   /** Ignore threads nobody has touched for this long, so dormant ones cost nothing. */
   ledgerActiveWithinMs: number;
+  /**
+   * How the painter watches a running turn: `in-process` or `stream`.
+   *
+   * `in-process` attaches through the seam (one function call). `stream` subscribes to this
+   * process's own `GET /v1/view` over HTTP — the same bytes a separate bridge would read.
+   * The switch exists to rehearse the extraction: same painter, same port, socket instead
+   * of function call, so the split becomes a change of configuration rather than a rewrite.
+   */
+  viewMode: "in-process" | "stream";
+  /** The base URL the stream mode talks to. Derived from the listen port by default. */
+  selfUrl: string;
 }
 
 function required(name: string): string {
@@ -181,5 +192,7 @@ export function loadConfig(): Config {
     ledgerPath: (process.env.BRIDGE_LEDGER_PATH ?? "").trim(),
     ledgerIntervalMs: Number(process.env.BRIDGE_LEDGER_INTERVAL_MS ?? 60_000),
     ledgerActiveWithinMs: Number(process.env.BRIDGE_LEDGER_ACTIVE_WITHIN_MS ?? 7 * 24 * 60 * 60 * 1000),
+    viewMode: (process.env.BRIDGE_VIEW ?? "").trim().toLowerCase() === "stream" ? "stream" : "in-process",
+    selfUrl: (process.env.BRIDGE_SELF_URL ?? "").trim(),
   };
 }

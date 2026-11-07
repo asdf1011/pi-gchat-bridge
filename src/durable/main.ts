@@ -33,6 +33,8 @@ import { runDurableCommand } from "../adapter/commands.js";
 import { defaultSettings } from "../adapter/commands.js";
 import { runPass } from "./delivery-pass.js";
 import { Painter } from "./painter.js";
+import { httpViewSource, ViewLadder } from "../adapter/view-client.js";
+import { activeTool, projectView, type ViewLike } from "../session-host/projection.js";
 import { chatTarget } from "../session-key.js";
 import { splitMessage } from "../stream.js";
 import { Ledger } from "./ledger.js";
@@ -678,7 +680,31 @@ async function main(): Promise<void> {
             });
             const key = (await addressOf(conversationId)) ?? String(conversationId);
             stream.register(key);
-            const sink = await attachViewSink({ seam, conversationId, stream });
+            const paint = viewPainter(stream);
+            let detachView: () => void;
+
+            if (config.viewMode === "stream") {
+              // The same bytes a separate bridge would read: this is the extraction
+              // rehearsed as configuration rather than as a rewrite.
+              const ladder = new ViewLadder({
+                source: httpViewSource({
+                  baseUrl: config.selfUrl === "" ? `http://127.0.0.1:${config.healthPort}` : config.selfUrl,
+                  conversationId,
+                  ...(config.webToken ? { token: config.webToken } : {}),
+                }),
+                onView: paint,
+                // The painter's own tick is still the entry path, so a degraded stream
+                // costs liveness, not messages. When the tick goes (once this is the only
+                // view path), this becomes the poll.
+                poll: async () => {},
+                onMode: (mode) => logger.info(`[paint] ${key}: view ${mode}`),
+              });
+              void ladder.run();
+              detachView = () => ladder.stop();
+            } else {
+              const sink = await attachViewSink({ seam, conversationId, stream });
+              detachView = () => sink.detach();
+            }
             return {
               stream: {
                 text: (full) => stream.onSnapshot(full),
@@ -694,7 +720,7 @@ async function main(): Promise<void> {
                 },
               },
               detach: () => {
-                sink.detach();
+                detachView();
                 stream.unregister(key);
               },
             };
@@ -722,6 +748,31 @@ async function main(): Promise<void> {
       void instance.tick();
     }
   }
+
+  /**
+   * Feed view frames into a stream, whichever way they arrived.
+   *
+   * The same rule the in-process sink applies — newest unfinished tool, cleared once none
+   * is left, and nothing said when neither changed — kept in one function so the two view
+   * modes cannot drift in how they paint.
+   */
+  const viewPainter = (stream: ReplyStream): ((view: unknown) => void) => {
+    let shownTool: string | undefined;
+    return (view) => {
+      const projected = projectView(view as ViewLike);
+      if (projected.liveText) stream.onSnapshot(projected.liveText);
+      const tool = activeTool(projected.tools);
+      if (tool) {
+        if (shownTool !== tool.callId) {
+          shownTool = tool.callId;
+          stream.showTool(tool.name, tool.arguments);
+        }
+      } else if (shownTool !== undefined) {
+        shownTool = undefined;
+        stream.clearTool();
+      }
+    };
+  };
 
   const shutdown = async (): Promise<void> => {
     if (ledgerTimer) clearInterval(ledgerTimer);
