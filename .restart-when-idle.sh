@@ -23,7 +23,14 @@
 #
 # Usage:
 #   setsid nohup ./.restart-when-idle.sh [quietSeconds] [maxWaitSeconds] &
+#   setsid nohup ./.restart-when-idle.sh --container [quietSeconds] [maxWaitSeconds] &
 #   ./.restart-when-idle.sh --check     # say what it sees, change nothing
+#
+# `--container` kills PID 1 instead of the bridge process, which the container's restart
+# policy turns into a *container* restart. That is the only way to reload this supervisor
+# script itself: bash parses a file once, so edits to `start-bridge.sh` are inert until PID 1
+# is replaced. It also clears the environment completely, which is what finally removes keys
+# that were deleted from `.env.durable` before the key-removal fix existed.
 #
 # Notes / why hand-rolled: this image has no pkill/pgrep, so everything here reads
 # /proc. `start-bridge.sh` is PID 1 in a `while true` loop, so killing the node
@@ -33,6 +40,11 @@ set -u
 
 PROJECT=/workspace/pi-gchat-bridge
 LOG="$PROJECT/bridge-restart.log"
+TARGET="bridge"
+if [ "${1:-}" = "--container" ]; then
+  TARGET="container"
+  shift
+fi
 QUIET="${1:-60}"
 MAXWAIT="${2:-1800}"
 CHECK=0
@@ -173,6 +185,13 @@ while [ "$waited" -lt "$MAXWAIT" ]; do
     fi
     if [ "$current" != "$BRIDGE" ]; then
       log "bridge pid changed while waiting ($BRIDGE → $current) — restarting the current one"
+    fi
+    if [ "$TARGET" = "container" ]; then
+      # Killing PID 1 makes the container restart, which re-parses `start-bridge.sh` and
+      # rebuilds the environment from scratch: the two things a bridge restart cannot do.
+      log "idle for ${QUIET}s — restarting the container (kill 1) so the supervisor reloads"
+      kill 1 2>/dev/null
+      exit 0
     fi
     log "idle for ${QUIET}s — restarting bridge pid $current"
     kill "$current" 2>/dev/null
