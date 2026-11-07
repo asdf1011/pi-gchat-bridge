@@ -102,24 +102,6 @@ export interface Config {
   ledgerIntervalMs: number;
   /** Ignore threads nobody has touched for this long, so dormant ones cost nothing. */
   ledgerActiveWithinMs: number;
-  /**
-   * Conversations whose turns the painter posts, instead of the Chat handler.
-   *
-   * The rollout unit is a *conversation*, not a bridge: there is one Chat bridge, so
-   * "one bridge at a time" would be all or nothing — while a conversation is exactly
-   * the thing whose cursor, thread and notification policy are already per-instance.
-   * Empty means the handler posts everything (today's behaviour); a list opts those
-   * threads in, one at a time.
-   */
-  paintConversations: number[];
-  /**
-   * Paint every conversation that lives in Chat, rather than an opt-in list.
-   *
-   * `BRIDGE_PAINT=all`. The list is for a trial on one thread; this is the switch that
-   * retires the handler's posting path entirely — after which the claim machinery
-   * (`claimAnswer`/`releaseAnswer`/`lastPostedAnswer`) has no caller left.
-   */
-  paintAll: boolean;
 }
 
 function required(name: string): string {
@@ -157,7 +139,6 @@ export function loadConfig(): Config {
   // is a deployment's choice to make, not something a fresh checkout should do
   // behind the operator's back.
   const artifactsDir = (process.env.BRIDGE_ARTIFACTS_DIR ?? "").trim();
-  const paintAll = (process.env.BRIDGE_PAINT ?? "").trim().toLowerCase() === "all";
 
   return {
     serviceAccountPath,
@@ -200,13 +181,5 @@ export function loadConfig(): Config {
     ledgerPath: (process.env.BRIDGE_LEDGER_PATH ?? "").trim(),
     ledgerIntervalMs: Number(process.env.BRIDGE_LEDGER_INTERVAL_MS ?? 60_000),
     ledgerActiveWithinMs: Number(process.env.BRIDGE_LEDGER_ACTIVE_WITHIN_MS ?? 7 * 24 * 60 * 60 * 1000),
-    paintAll,
-    // `all` supersedes the list: keeping both live would make the log claim one thing
-    // and the painter do another.
-    paintConversations: paintAll
-      ? []
-      : listEnv("BRIDGE_PAINT_CONVERSATIONS")
-      .map((id) => Number(id))
-      .filter((id) => Number.isFinite(id) && id > 0),
   };
 }

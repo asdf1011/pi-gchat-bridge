@@ -582,22 +582,6 @@ export interface SessionHost {
   // a claim whose whole job is to survive exactly that kind of change. The names
   // are the semantics, which is the property that matters.
 
-  /**
-   * Claim the right to post one answer into one conversation's adapter view.
-   *
-   * True for exactly one caller per (name, answerId); a later answer takes the
-   * slot, an equal or older one is refused. Entry ids come from one global
-   * sequence, so "older" is meaningful — and a stale answer can never post after
-   * a newer one, which is the ordering the guard exists for.
-   */
-  claimAnswer(name: string, answerId: number, options?: { signal?: AbortSignal }): Promise<boolean>;
-
-  /** Give a claim back after a delivery that failed outright. */
-  releaseAnswer(name: string, answerId: number, options?: { signal?: AbortSignal }): Promise<void>;
-
-  /** The answer last claimed for a name, for diagnostics. */
-  lastPostedAnswer(name: string, options?: { signal?: AbortSignal }): Promise<{ answerId: number; at: number } | undefined>;
-
   /** Record an adapter's verdict about a conversation (notification validation). */
   recordVerdict(name: string, verdict: AdapterVerdict, options?: { signal?: AbortSignal }): Promise<void>;
 

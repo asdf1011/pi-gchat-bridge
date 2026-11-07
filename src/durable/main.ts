@@ -25,7 +25,7 @@ import { logger } from "../logger.js";
 import { PubSubReceiver } from "../pubsub-receiver.js";
 import type { MessageReceiver } from "../receiver.js";
 import { StateStore } from "../state.js";
-import { markers, ReplyStream } from "../stream.js";
+import { ReplyStream } from "../stream.js";
 import type { IncomingMessage } from "../types.js";
 import { attachViewSink } from "../adapter/view-sink.js";
 import { DurableRouter } from "../adapter/router.js";
@@ -35,7 +35,6 @@ import { runPass } from "./delivery-pass.js";
 import { Painter } from "./painter.js";
 import { chatTarget } from "../session-key.js";
 import { splitMessage } from "../stream.js";
-import { reconcile, type ReconcileState } from "./reconcile.js";
 import { Ledger } from "./ledger.js";
 import { BridgeHost } from "./host.js";
 import { BridgeLockedError } from "./lock.js";
@@ -111,22 +110,8 @@ async function main(): Promise<void> {
   // Conversations whose turns the painter posts (see the painter block below). Read
   // by the handler *and* the painter, from one value, so the two cannot disagree about
   // who owns a thread.
-  // Which conversations the painter posts for. `all` means every conversation that lives
-  // in Chat; a list opts individual threads in (the trial shape). One predicate object,
-  // read by the handler and the painter, so they cannot disagree about who owns a thread.
-  const paintAll = config.paintAll;
-  const painted = new Set(config.paintConversations);
   /** Set once the painter is created, below. The handler pokes it; nothing else does. */
   let painter: Painter | undefined;
-  /** Conversations the painter owns right now: the list, or everything bound to Chat. */
-  const painterOwns = async (conversationId: number): Promise<boolean> => {
-    if (painted.has(conversationId)) return true;
-    if (!paintAll) return false;
-    const bindings = await host.bindings().catch(() => ({ byChatKey: {} }));
-    return Object.entries(bindings.byChatKey).some(
-      ([chatKey, binding]) => binding.conversationId === conversationId && chatKey.startsWith("spaces/"),
-    );
-  };
 
   // Created lazily, on the first turn of a conversation, rather than up front:
   // most conversations never write an artifact, and an empty repository per
@@ -473,11 +458,11 @@ async function main(): Promise<void> {
       logger.info(`[chat] ${display}: attachments present but no image could be downloaded`);
     }
 
-    // A conversation the painter owns has exactly one mouth. The handler still
-    // submits, still waits (waiting is what stamps the answer's origin) and still
-    // reports a failure — it just does not paint, so nothing can be posted twice.
-    let stream: ReplyStream | undefined;
-    let sink: Awaited<ReturnType<typeof attachViewSink>> | undefined;
+    // The painter is the mouth for every Chat conversation, so this handler's job is
+    // narrower than it was: submit, wait (waiting is what stamps the answer's origin),
+    // poke the painter, and say why a turn produced nothing. It never posts an answer,
+    // which is why the claim machinery that arbitrated between two posters is gone
+    // rather than merely idle.
     try {
       // The delivery is idempotent on the Chat message name, so a Pub/Sub
       // redelivery after a crash finds the same submission instead of asking the
@@ -488,36 +473,18 @@ async function main(): Promise<void> {
         text,
         images,
       });
-      const paintedHere = await painterOwns(delivered.conversationId);
-      if (!paintedHere) {
-        stream = new ReplyStream(client, spaceName, threadName, display, {
-          replaceOnFinish: config.replaceOnFinish,
-        });
-        stream.register(chatKey);
-      } else {
-        // The painter owns this thread, and it is in this process, so say what just
-        // happened instead of letting it find out on a timer: a placeholder should
-        // appear when the turn starts, not at the next tick.
-        painter?.wake();
-      }
-
-      // Attach the sink *before* waiting: the answer may already be streaming.
-      if (stream) sink = await attachViewSink({ seam, conversationId: delivered.conversationId, stream });
+      // The painter is in this process, so say what just happened instead of letting it
+      // find out on a timer: a placeholder should appear when the turn starts.
+      painter?.wake();
 
       const turnStarted = Date.now();
       const settled = await seam.awaitSubmission(delivered.submissionId);
-      // Same on the way out: the answer entry exists now, so the painter can finish it
-      // in place immediately rather than a tick later.
-      if (paintedHere) painter?.wake();
+      // On the way out too: the answer entry exists now, so the painter can finish the
+      // placeholder in place immediately rather than a tick later.
+      painter?.wake();
       const turnMs = Date.now() - turnStarted;
-      await sink?.detach();
-      sink = undefined;
 
-      // The host resolves the answer's text; the adapter never sees an entry.
-      const answerId = settled.status === "done" ? settled.answerId : undefined;
-      const final = settled.status === "done" ? settled.text : "";
-
-      if (!final) {
+      if (settled.status !== "done" || settled.text === "") {
         // A failure here used to log only the status, so "unanswered after 9s"
         // and "unanswered after 154s" were indistinguishable, and the reason
         // pi-durable records (aborted / provider error / ...) was thrown away.
@@ -531,41 +498,12 @@ async function main(): Promise<void> {
             ` after ${turnMs}ms conversation=${delivered.conversationId}` +
             (detail === undefined ? "" : ` detail=${JSON.stringify(detail).slice(0, 300)}`),
         );
-        await stream?.abandon();
+        // The notice is the handler's because the handler is what knows *why*: the
+        // painter only ever sees that no answer entry arrived.
         await client
           .sendMessage(spaceName, failureNotice(settled.status, reason, turnMs), threadName)
           .catch((error) => logger.error("[chat] empty-reply notice failed:", (error as Error).message));
         return "ok";
-      }
-
-      // One answer, one Chat message. A single run can answer several Chat
-      // messages — a message that arrives mid-run is a steer and joins the run,
-      // and messages queued behind a stuck tool are all answered when it
-      // finishes. Every one of those submissions settles with the SAME answer
-      // entry, so posting here per submission is what produced the duplicate
-      // replies (four queued messages → four identical 2533-char posts).
-      //
-      // The claim is on the answer, not on the message: `requestId` dedupe is
-      // already correct and cannot see this, because those really are different
-      // Chat messages. It is durable, so a redelivery after a crash (posted,
-      // then died before acking) does not post the same answer twice either.
-      const answerKey = Number(answerId);
-      if (!(await seam.claimAnswer(chatKey, answerKey))) {
-        logger.info(
-          `[chat] ${display}: answer ${answerKey} already delivered in this thread — not posting it again ` +
-            `(conversation=${delivered.conversationId})`,
-        );
-        await stream?.abandon();
-        return "ok";
-      }
-      try {
-        if (stream) await stream.finish(final);
-      } catch (error) {
-        // The reply was not delivered after all: hand the claim back so another
-        // handler for this answer (or a Pub/Sub redelivery) still delivers it.
-        // Losing a reply is worse than posting one twice.
-        await seam.releaseAnswer(chatKey, answerKey).catch(() => {});
-        throw error;
       }
 
       // Detached: a CPU titler can take minutes, and the reply is already
@@ -590,12 +528,9 @@ async function main(): Promise<void> {
     } catch (error) {
       const aborted = (error as Error)?.name === "AbortError";
       logger.error(`[chat] ${display}: handler ${aborted ? "interrupted" : "error"}:`, (error as Error).message);
-      await stream?.onError(aborted);
+      // Nothing to clean up here any more: the placeholder belongs to the painter, which
+      // abandons it when it sees a settled turn with no answer entry.
       return "ok";
-    } finally {
-      await sink?.detach().catch(() => {});
-      stream?.unregister(chatKey);
-      markers.delete(chatKey);
     }
   };
 
@@ -636,9 +571,6 @@ async function main(): Promise<void> {
     logger.info(
       `[ledger] shadow mode, positions in ${ledgerFile}${ledger.recovered ? " (adopting afresh: the file was unreadable)" : ""}`,
     );
-    // Carried between passes: a disagreement that clears on its own is latency, and
-    // one that persists is a fault. Only the second is worth a line.
-    let reconcileState: ReconcileState = { pending: {} };
     const pass = async (): Promise<void> => {
       const summary = await runPass(ledger, {
         // This process is the Chat bridge, so entries stamped `gchat` are already in
@@ -661,41 +593,11 @@ async function main(): Promise<void> {
         owns: (name) => name.startsWith("spaces/"),
         activeWithinMs: config.ledgerActiveWithinMs,
       });
-      // --- The invariant check (§16): does the cursor agree with the mouth? ---
-      //
-      // While the legacy path is still the thing that posts, the cursor is a claim
-      // about somebody else's work. Comparing them is what turns "the cursor looks
-      // right" into evidence, and it is the one check that would catch a mistake in
-      // the painter before the painter exists.
-      const posts = await host.bindings().catch(() => ({ byChatKey: {} }));
-      const chatKeyFor = new Map(
-        Object.entries(posts.byChatKey).map(([chatKey, binding]) => [binding.conversationId, chatKey]),
-      );
-      const checked = await reconcile(
-        reconcileState,
-        {
-          confirmed: summary.answers,
-          cursors: ledger
-            .conversations()
-            .filter(({ conversationId }) => chatKeyFor.has(conversationId))
-            .map(({ conversationId, cursor }) => ({ conversationId, cursor: cursor.cursor })),
-        },
-        {
-          lastPosted: async (conversationId) => {
-            const chatKey = chatKeyFor.get(conversationId);
-            if (chatKey === undefined) return undefined;
-            // `undefined` means "no claim recorded", which the reconciler treats as
-            // nothing posted — and a thrown lookup (an unknown name) as no answer at
-            // all, because not knowing must never read as a fault.
-            const claimed = await seam.lastPostedAnswer(chatKey);
-            return claimed?.answerId;
-          },
-          graceMs: config.ledgerIntervalMs * 3,
-        },
-      );
-      reconcileState = checked.state;
-      if (checked.recovered > 0) logger.info(`[ledger] ${checked.recovered} disagreement(s) cleared`);
-
+      // The reconciliation that used to live here is gone with the claims it compared
+      // against. It is not missed, because the invariant is now *structural* rather than
+      // observed: the painter confirms an entry only after the post that carries it
+      // returns, so a failed post leaves the cursor behind it and the next tick retries.
+      // There is no window in which the cursor can claim something the mouth never did.
       // Silent when nothing happened: a pass every minute must not fill the log.
       if (summary.adopted > 0 || summary.presented > 0 || summary.unfinished.length > 0) {
         logger.info(
@@ -717,12 +619,8 @@ async function main(): Promise<void> {
     // unit whose cursor, thread and notification policy are already its own. Opted-in
     // threads get their turns posted here and the handler keeps its hands off them
     // (same predicate, same process, so the two cannot disagree).
-    if (painted.size > 0 || paintAll) {
-      logger.info(
-        paintAll
-          ? "[paint] posting for every Chat conversation — the handler will not"
-          : `[paint] posting for conversation(s) ${[...painted].join(", ")} — the handler will not`,
-      );
+    {
+      logger.info("[paint] posting for every Chat conversation — the handler will not");
       // The address a conversation lives at. Read per use rather than cached: bindings
       // are rewritten on every message, and a stale key here would post into the wrong
       // thread — the failure this whole arrangement exists to make impossible.
@@ -733,17 +631,14 @@ async function main(): Promise<void> {
       painter = new Painter({
         surface: "gchat",
         ledger,
-        owns: (conversationId) => painted.has(conversationId) || paintAll,
+        // Every conversation that lives in Chat, and nothing else: a web-only
+        // conversation has no thread for this bridge to keep up.
+        owns: () => true,
         conversations: async () => {
           const bindings = await host.bindings().catch(() => ({ byChatKey: {} }));
-          const chatBound = Object.entries(bindings.byChatKey)
+          return Object.entries(bindings.byChatKey)
             .filter(([chatKey]) => chatKey.startsWith("spaces/"))
             .map(([, binding]) => ({ conversationId: binding.conversationId }));
-          const listed = [...painted].map((conversationId) => ({ conversationId }));
-          const seen = new Set<number>();
-          return [...chatBound, ...listed].filter(({ conversationId }) =>
-            seen.has(conversationId) ? false : (seen.add(conversationId), true),
-          );
         },
         history: (conversationId, limit, offset) => seam.history(conversationId, { limit, offset }),
         busy: async (conversationId) => (await seam.snapshot(conversationId))?.busy === true,

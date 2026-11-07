@@ -510,18 +510,6 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
       return host.writeEntry(conversationId, entry);
     },
 
-    async claimAnswer(name: string, answerId: number): Promise<boolean> {
-      return host.claimAnswer(name, answerId);
-    },
-
-    async releaseAnswer(name: string, answerId: number): Promise<void> {
-      return host.releaseAnswer(name, answerId);
-    },
-
-    async lastPostedAnswer(name: string): Promise<{ answerId: number; at: number } | undefined> {
-      return host.lastPostedAnswer(name);
-    },
-
     async recordVerdict(name: string, verdict: AdapterVerdict): Promise<void> {
       return host.recordVerdict(name, verdict);
     },

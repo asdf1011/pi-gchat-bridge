@@ -766,33 +766,6 @@ export class BridgeHost {
   // generic key/value store. That keeps live claims across the move and keeps
   // the semantics in the name: "claim the last answer" is not "set a key".
 
-  /** Claim the right to post one answer. See `SessionHost.claimAnswer`. */
-  async claimAnswer(chatKey: string, answerId: number): Promise<boolean> {
-    if (!Number.isFinite(answerId)) return true; // nothing to key on: better twice than never
-    return this.harness.commit(async (tx) => {
-      const doc = await tx.doc(PostedAnswersDoc);
-      const last = doc.byChatKey[chatKey];
-      if (last && answerId <= last.answerId) return false;
-      doc.byChatKey[chatKey] = { answerId, at: Date.now() };
-      return true;
-    }, this.context);
-  }
-
-  /** Give a claim back, if it is still this answer's. */
-  async releaseAnswer(chatKey: string, answerId: number): Promise<void> {
-    if (!Number.isFinite(answerId)) return;
-    await this.harness.commit(async (tx) => {
-      const doc = await tx.doc(PostedAnswersDoc);
-      if (doc.byChatKey[chatKey]?.answerId !== answerId) return;
-      delete doc.byChatKey[chatKey];
-    }, this.context);
-  }
-
-  /** The answer last claimed for a name. */
-  async lastPostedAnswer(chatKey: string): Promise<{ answerId: number; at: number } | undefined> {
-    return (await this.harness.snapshot(PostedAnswersDoc, this.context))?.byChatKey[chatKey];
-  }
-
   /** Record a validation verdict for a name. */
   async recordVerdict(chatKey: string, verdict: VerdictEntry): Promise<void> {
     await this.harness.commit(async (tx) => {
@@ -1041,15 +1014,10 @@ export function totalUsage(usageDoc: unknown): UsageTotals | undefined {
 }
 
 /** Chat answers already delivered, keyed by conversation name. */
-export type PostedAnswersValue = { byChatKey: Record<string, { answerId: number; at: number }> };
-
-const PostedAnswersDoc = defineDoc<PostedAnswersValue>({
-  kind: "gchat.posted-answers",
-  version: 1,
-  scope: "session",
-  initial: () => ({ byChatKey: {} }),
-  checkpointWhen: () => true,
-});
+// `gchat.posted-answers` is gone: the painter is the only poster, so "has this answer
+// been posted" is answered by the bridge's own cursor rather than by a durable claim.
+// Existing documents are left in place and simply never read again — deleting them
+// would be a migration, and a document nobody reads costs nothing.
 
 /** One notification verdict, as `notify.ts` writes it. */
 export type VerdictEntry = {

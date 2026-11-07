@@ -127,6 +127,26 @@ test("a turn's commentary is never painted", async () => {
   assert.equal(ledger.get(1)?.cursor, 13);
 });
 
+test("several submissions that share one answer produce exactly one post", async () => {
+  // The production bug this replaces a whole claim mechanism to prevent: four messages
+  // queued behind a stuck tool all settled on one assistant entry, and the bridge posted
+  // that entry once per submission — four identical 2.5k-character replies. The painter
+  // cannot reproduce it, because it posts *entries* and there is one of those.
+  const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
+  ledger.adopt(1, 10, "new");
+  const { painter, posted } = painterFor(ledger, {
+    11: [prompt("first", "gchat")],
+    12: [prompt("second", "gchat")],
+    13: [prompt("third", "gchat")],
+    14: [prompt("fourth", "gchat")],
+    15: [answer("the one answer")],
+  });
+
+  await painter.tick();
+  assert.deepEqual(posted, [{ conversationId: 1, text: "the one answer" }]);
+  assert.equal(ledger.get(1)?.cursor, 15);
+});
+
 test("a running turn streams into the placeholder instead of posting", async () => {
   const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
   ledger.adopt(1, 10, "new");

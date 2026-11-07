@@ -457,15 +457,6 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
     write: (_id: number, _entry: AdapterEntry): Promise<number> => {
       throw notImplemented("write");
     },
-    claimAnswer: () => {
-      throw notImplemented("claimAnswer");
-    },
-    releaseAnswer: () => {
-      throw notImplemented("releaseAnswer");
-    },
-    lastPostedAnswer: () => {
-      throw notImplemented("lastPostedAnswer");
-    },
     recordVerdict: (_name: string, _verdict: AdapterVerdict) => {
       throw notImplemented("recordVerdict");
     },
