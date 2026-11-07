@@ -101,7 +101,7 @@ export interface PainterDeps {
   owns(conversationId: number): boolean;
   /** The surface's address for a conversation, for logs. */
   address?(conversationId: number): string | undefined;
-  conversations(): Promise<readonly { conversationId: number }[]>;
+  conversations(): Promise<readonly { conversationId: number; lastActivityAt?: number }[]>;
   history(conversationId: number, limit: number, offset: number): Promise<readonly MessageLike[] | undefined>;
   /** Is a turn running in this conversation right now? */
   busy(conversationId: number): Promise<boolean>;
@@ -125,6 +125,15 @@ export interface PainterDeps {
       settled(): void;
     },
   ): { detach(): void } | undefined;
+  /**
+   * Hold a subscription only for conversations touched within this window.
+   *
+   * A subscription per conversation is cheap individually and not cheap 127 times, and a
+   * conversation nobody has touched for a day cannot be mid-turn. Dormant threads are still
+   * *discovered* — by the tick — they just are not held open, which is the difference between
+   * "watched" and "known".
+   */
+  watchWithinMs?: number;
   /** How much history one look may read before calling the position unreachable. */
   pageSize?: number;
   maxPages?: number;
@@ -152,6 +161,16 @@ export class Painter {
   private open = new Map<number, Open>();
   /** One subscription per conversation, held across turns — the push half of the design. */
   private watching = new Map<number, { detach(): void }>();
+  /**
+   * Opens in progress, by conversation.
+   *
+   * A view frame arrives in bursts — the snapshot on attach, then deltas — so two `frame`
+   * callbacks can reach the open path in the same millisecond and both see "no stream yet".
+   * Without this they each created a placeholder, which is two "Thinking…" messages and two
+   * notifications for one turn (observed at 23:07:34.594Z, in this very thread). Single-flight
+   * is the fix: the second caller waits for the first stream rather than making another.
+   */
+  private opening = new Map<number, Promise<Open | undefined>>();
   private summary: PaintSummary = { painted: 0, streamed: 0, posted: 0, failed: 0, adopted: 0 };
   /** Serialises ticks. Two at once could both see one unposted answer and post it twice. */
   private chain: Promise<unknown> = Promise.resolve();
@@ -231,7 +250,7 @@ export class Painter {
   /** One tick over every conversation this painter owns. Never throws. */
   private async tickAll(): Promise<PaintSummary> {
     const summary: PaintSummary = { painted: 0, streamed: 0, posted: 0, failed: 0, adopted: 0 };
-    let conversations: readonly { conversationId: number }[];
+    let conversations: readonly { conversationId: number; lastActivityAt?: number }[];
     try {
       conversations = await this.deps.conversations();
     } catch (error) {
@@ -239,9 +258,15 @@ export class Painter {
       return summary;
     }
 
-    for (const { conversationId } of conversations) {
+    const active = new Set<number>();
+    for (const { conversationId, lastActivityAt } of conversations) {
       if (!this.deps.owns(conversationId)) continue;
-      this.ensureWatching(conversationId);
+      const within = this.deps.watchWithinMs;
+      const recently = lastActivityAt !== undefined && (within === undefined || Date.now() - lastActivityAt <= within);
+      if (recently) {
+        active.add(conversationId);
+        this.ensureWatching(conversationId);
+      }
       const position = this.deps.ledger.get(conversationId);
       if (!position) {
         // No position yet. The painter adopts for itself rather than deferring to the
@@ -269,6 +294,13 @@ export class Painter {
         summary.failed += 1;
         this.log(`[paint] conversation ${conversationId}: ${(error as Error).message}`);
       }
+    }
+    // Anything no longer active loses its subscription: held open for a conversation nobody
+    // is talking in is a connection doing nothing, and 127 of them is a reason not to.
+    for (const [conversationId, watcher] of this.watching) {
+      if (active.has(conversationId)) continue;
+      watcher.detach();
+      this.watching.delete(conversationId);
     }
     this.summary = summary;
     return summary;
@@ -316,17 +348,44 @@ export class Painter {
   private async paintFrame(conversationId: number, projected: unknown): Promise<void> {
     const busy = (projected as { busy?: unknown }).busy === true;
     if (!busy) return; // the settle edge is reported separately, and finishes the stream
-    let open = this.open.get(conversationId);
-    if (!open) {
+    const open = await this.ensureStream(conversationId, "pushed");
+    open?.paint(projected);
+  }
+
+  /**
+   * The one stream for a conversation's running turn, opened at most once.
+   *
+   * Single-flight in both directions: a stream that exists is returned, and a stream being
+   * opened is awaited rather than duplicated. This is the fix for a real duplicate — two frames
+   * of the same burst opened two placeholders, so the thread got two "Thinking…" messages and
+   * two notifications for one turn.
+   */
+  private async ensureStream(conversationId: number, why: "pushed" | "polled" | "fallback"): Promise<Open | undefined> {
+    const existing = this.open.get(conversationId);
+    if (existing) return existing;
+    const inFlight = this.opening.get(conversationId);
+    if (inFlight) return inFlight;
+
+    const opening = (async (): Promise<Open | undefined> => {
       const opened = await this.deps.surfaceClient.open(conversationId);
-      if (!opened) return;
-      open = { stream: opened.stream, detach: () => opened.detach(), paint: (projected) => opened.paint(projected) };
-      this.open.set(conversationId, open);
+      if (!opened) return undefined;
+      const record: Open = {
+        stream: opened.stream,
+        detach: () => opened.detach(),
+        paint: (projected) => opened.paint(projected),
+      };
+      this.open.set(conversationId, record);
       this.log(
-        `[paint] ${this.deps.address?.(conversationId) ?? `conversation ${conversationId}`}: streaming a turn (pushed)`,
+        `[paint] ${this.deps.address?.(conversationId) ?? `conversation ${conversationId}`}: streaming a turn (${why})`,
       );
+      return record;
+    })();
+    this.opening.set(conversationId, opening);
+    try {
+      return await opening;
+    } finally {
+      this.opening.delete(conversationId);
     }
-    open.paint(projected);
   }
 
   private async tickOne(conversationId: number, cursor: number, summary: PaintSummary): Promise<void> {
@@ -395,21 +454,10 @@ export class Painter {
         this.deps.ledger.confirm(conversationId, last.entryId);
         await this.deps.ledger.save();
       }
-      if (!this.open.has(conversationId)) {
-        // Only when nobody is watching: a held subscription has already opened the stream and
-        // is painting into it, and opening a second one would be a second placeholder.
-        const opened = await this.deps.surfaceClient.open(conversationId);
-        if (opened) {
-          this.open.set(conversationId, {
-            stream: opened.stream,
-            detach: () => opened.detach(),
-            paint: (projected) => opened.paint(projected),
-          });
-          this.log(
-            `[paint] ${this.deps.address?.(conversationId) ?? `conversation ${conversationId}`}: streaming a turn (polled)`,
-          );
-        }
-      }
+      // Only when nobody is watching: a held subscription has already opened the stream and is
+      // painting into it, and going through the same single-flight path means the two can never
+      // race into two placeholders.
+      if (this.deps.watch === undefined) await this.ensureStream(conversationId, "polled");
       return;
     }
 

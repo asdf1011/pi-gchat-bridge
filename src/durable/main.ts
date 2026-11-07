@@ -658,6 +658,10 @@ async function main(): Promise<void> {
       painter = new Painter({
         surface: "gchat",
         ledger,
+        // Hold a subscription only for threads that have been touched recently: one connection
+        // per conversation is cheap, 127 of them is a choice not to make. Dormant threads are
+        // still discovered by the tick, which is the difference between watched and known.
+        watchWithinMs: config.ledgerActiveWithinMs,
         // Every conversation that lives in Chat, and nothing else: a web-only
         // conversation has no thread for this bridge to keep up.
         owns: () => true,
@@ -665,7 +669,10 @@ async function main(): Promise<void> {
           const bindings = await host.bindings().catch(() => ({ byChatKey: {} }));
           return Object.entries(bindings.byChatKey)
             .filter(([chatKey]) => chatKey.startsWith("spaces/"))
-            .map(([, binding]) => ({ conversationId: binding.conversationId }));
+            .map(([, binding]) => ({
+              conversationId: binding.conversationId,
+              lastActivityAt: binding.updatedAt ?? binding.createdAt,
+            }));
         },
         history: (conversationId, limit, offset) => seam.history(conversationId, { limit, offset }),
         busy: async (conversationId) => (await seam.snapshot(conversationId))?.busy === true,

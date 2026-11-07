@@ -375,6 +375,42 @@ test("a poke does nothing for a conversation this painter does not own, or has n
   assert.equal(fresh.get(1), undefined, "adoption stays the tick's job");
 });
 
+test("two frames arriving together open one stream, not two", async () => {
+  // The regression: a view attach sends a snapshot and then deltas, so two `frame` callbacks
+  // reached the open path in the same millisecond, both saw "no stream yet", and both created a
+  // placeholder — two "Thinking…" messages and two notifications for one turn. Observed live,
+  // twice in the same timestamp. Single-flight is what prevents it.
+  const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
+  ledger.adopt(1, 10, "new");
+  const fake = fakeSurface();
+  type Handler = { frame(p: unknown): void; settled(): void };
+  let handlers: Handler | undefined;
+  const painter = new Painter({
+    surface: "gchat",
+    ledger,
+    owns: () => true,
+    conversations: async () => [{ conversationId: 1, lastActivityAt: Date.now() }],
+    history: async () => [],
+    busy: async () => true,
+    surfaceClient: fake.surface,
+    watch: (_id, h) => {
+      handlers = h;
+      return { detach() {} };
+    },
+    log: () => {},
+  });
+
+  await painter.tick(); // establishes the subscription
+  // Both frames land before either open has resolved.
+  handlers!.frame({ busy: true, liveText: "a", tools: [] });
+  handlers!.frame({ busy: true, liveText: "ab", tools: [] });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(fake.streams.length, 1, "one placeholder for one turn");
+  await painter.close();
+});
+
 test("a held subscription paints a turn as it starts, and the tick does not open a second stream", async () => {
   // The point of holding a subscription per conversation: a turn that starts is *pushed*, so
   // the placeholder appears without waiting for a tick. The tick must then stay out of the
@@ -389,7 +425,7 @@ test("a held subscription paints a turn as it starts, and the tick does not open
     surface: "gchat",
     ledger,
     owns: () => true,
-    conversations: async () => [{ conversationId: 1 }],
+    conversations: async () => [{ conversationId: 1, lastActivityAt: Date.now() }],
     history: async (_id, limit, offset) => {
       const end = Math.max(0, messages.length - offset);
       return messages.slice(Math.max(0, end - limit), end);
