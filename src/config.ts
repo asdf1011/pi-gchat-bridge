@@ -112,6 +112,14 @@ export interface Config {
    * threads in, one at a time.
    */
   paintConversations: number[];
+  /**
+   * Paint every conversation that lives in Chat, rather than an opt-in list.
+   *
+   * `BRIDGE_PAINT=all`. The list is for a trial on one thread; this is the switch that
+   * retires the handler's posting path entirely — after which the claim machinery
+   * (`claimAnswer`/`releaseAnswer`/`lastPostedAnswer`) has no caller left.
+   */
+  paintAll: boolean;
 }
 
 function required(name: string): string {
@@ -191,6 +199,7 @@ export function loadConfig(): Config {
     ledgerPath: (process.env.BRIDGE_LEDGER_PATH ?? "").trim(),
     ledgerIntervalMs: Number(process.env.BRIDGE_LEDGER_INTERVAL_MS ?? 60_000),
     ledgerActiveWithinMs: Number(process.env.BRIDGE_LEDGER_ACTIVE_WITHIN_MS ?? 7 * 24 * 60 * 60 * 1000),
+    paintAll: (process.env.BRIDGE_PAINT ?? "").trim().toLowerCase() === "all",
     paintConversations: listEnv("BRIDGE_PAINT_CONVERSATIONS")
       .map((id) => Number(id))
       .filter((id) => Number.isFinite(id) && id > 0),

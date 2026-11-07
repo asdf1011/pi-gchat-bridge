@@ -163,7 +163,22 @@ export class Painter {
     for (const { conversationId } of conversations) {
       if (!this.deps.owns(conversationId)) continue;
       const position = this.deps.ledger.get(conversationId);
-      if (!position) continue; // no cursor: adoption belongs to the pass, not the painter
+      if (!position) {
+        // No position yet. The painter adopts for itself rather than deferring to the
+        // shadow pass: once it owns a conversation the pass stays out of it entirely
+        // (a pass that advanced the cursor past an answer would silently stop the
+        // painter from ever painting it), so there is nobody else to take the position.
+        // Adopting at the head is the same rule the pass uses — never at zero, or a
+        // captured conversation would be replayed.
+        const window = await entriesAfter(this.deps, conversationId, 0, {});
+        this.deps.ledger.adopt(conversationId, window.newest, "new");
+        await this.deps.ledger.save();
+        this.log(
+          `[paint] ${this.deps.address?.(conversationId) ?? `conversation ${conversationId}`}: ` +
+            `adopted at entry ${window.newest} (nothing before this painter's first look is repainted)`,
+        );
+        continue;
+      }
       try {
         await this.tickOne(conversationId, position.cursor, summary);
       } catch (error) {

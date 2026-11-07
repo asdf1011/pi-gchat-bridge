@@ -112,9 +112,22 @@ async function main(): Promise<void> {
   // Conversations whose turns the painter posts (see the painter block below). Read
   // by the handler *and* the painter, from one value, so the two cannot disagree about
   // who owns a thread.
+  // Which conversations the painter posts for. `all` means every conversation that lives
+  // in Chat; a list opts individual threads in (the trial shape). One predicate object,
+  // read by the handler and the painter, so they cannot disagree about who owns a thread.
+  const paintAll = config.paintAll;
   const painted = new Set(config.paintConversations);
   /** Set once the painter is created, below. The handler pokes it; nothing else does. */
   let painter: Painter | undefined;
+  /** Conversations the painter owns right now: the list, or everything bound to Chat. */
+  const painterOwns = async (conversationId: number): Promise<boolean> => {
+    if (painted.has(conversationId)) return true;
+    if (!paintAll) return false;
+    const bindings = await host.bindings().catch(() => ({ byChatKey: {} }));
+    return Object.entries(bindings.byChatKey).some(
+      ([chatKey, binding]) => binding.conversationId === conversationId && chatKey.startsWith("spaces/"),
+    );
+  };
 
   const mirrorTurnIntoChat = (
     conversationId: number,
@@ -504,7 +517,8 @@ async function main(): Promise<void> {
         text,
         images,
       });
-      if (!painted.has(delivered.conversationId)) {
+      const paintedHere = await painterOwns(delivered.conversationId);
+      if (!paintedHere) {
         stream = new ReplyStream(client, spaceName, threadName, display, {
           replaceOnFinish: config.replaceOnFinish,
         });
@@ -523,7 +537,7 @@ async function main(): Promise<void> {
       const settled = await seam.awaitSubmission(delivered.submissionId);
       // Same on the way out: the answer entry exists now, so the painter can finish it
       // in place immediately rather than a tick later.
-      if (painted.has(delivered.conversationId)) painter?.wake();
+      if (paintedHere) painter?.wake();
       const turnMs = Date.now() - turnStarted;
       await sink?.detach();
       sink = undefined;
@@ -660,7 +674,10 @@ async function main(): Promise<void> {
         // the thread and must not be painted back into it.
         surface: "gchat",
         // Only conversations that live in Chat: a web-only conversation has no
-        // surface for this bridge to fall behind on.
+        // surface for this bridge to fall behind on. And never a conversation the
+        // painter owns: the pass only *observes*, but observing means advancing the
+        // cursor, which would take an answer out from under the painter and leave the
+        // thread missing a reply that was never posted.
         conversations: async () => host.bindings().then((bindings) =>
           Object.entries(bindings.byChatKey).map(([chatKey, binding]) => ({
             conversationId: binding.conversationId,
@@ -729,7 +746,7 @@ async function main(): Promise<void> {
     // unit whose cursor, thread and notification policy are already its own. Opted-in
     // threads get their turns posted here and the handler keeps its hands off them
     // (same predicate, same process, so the two cannot disagree).
-    if (painted.size > 0) {
+    if (painted.size > 0 || paintAll) {
       logger.info(`[paint] posting for conversation(s) ${[...painted].join(", ")} — the handler will not`);
       // The address a conversation lives at. Read per use rather than cached: bindings
       // are rewritten on every message, and a stale key here would post into the wrong
@@ -741,8 +758,18 @@ async function main(): Promise<void> {
       painter = new Painter({
         surface: "gchat",
         ledger,
-        owns: (conversationId) => painted.has(conversationId),
-        conversations: async () => [...painted].map((conversationId) => ({ conversationId })),
+        owns: (conversationId) => painted.has(conversationId) || paintAll,
+        conversations: async () => {
+          const bindings = await host.bindings().catch(() => ({ byChatKey: {} }));
+          const chatBound = Object.entries(bindings.byChatKey)
+            .filter(([chatKey]) => chatKey.startsWith("spaces/"))
+            .map(([, binding]) => ({ conversationId: binding.conversationId }));
+          const listed = [...painted].map((conversationId) => ({ conversationId }));
+          const seen = new Set<number>();
+          return [...chatBound, ...listed].filter(({ conversationId }) =>
+            seen.has(conversationId) ? false : (seen.add(conversationId), true),
+          );
+        },
         history: (conversationId, limit, offset) => seam.history(conversationId, { limit, offset }),
         busy: async (conversationId) => (await seam.snapshot(conversationId))?.busy === true,
         surfaceClient: {

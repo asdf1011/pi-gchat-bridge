@@ -263,9 +263,17 @@ test("two ticks cannot both post the same answer", async () => {
   assert.deepEqual(posted, [{ conversationId: 1, text: "the answer" }]);
 });
 
-test("a conversation with no cursor is not painted until the pass adopts it", async () => {
+test("a conversation with no position is adopted at the head, not replayed", async () => {
+  // The painter owns its conversations outright, so nobody else is going to take a
+  // position for it. Adopting at the head is the same rule the shadow pass uses: the
+  // history that predates this bridge is not repainted, and the first thing said after
+  // it is.
   const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
-  const { painter, posted } = painterFor(ledger, { 11: [answer("x")] });
-  await painter.tick();
-  assert.deepEqual(posted, [], "adoption is the pass's job; painting before it would replay history");
+  const { painter, posted } = painterFor(ledger, { 11: [answer("x"), { role: "user", text: "hi", origin: "gchat", at: 1 }] });
+
+  const first = await painter.tick();
+  assert.equal(first.painted, 0, "adoption is not painting");
+  assert.deepEqual(posted, [], "nothing that already happened is repainted");
+  assert.equal(ledger.get(1)?.cursor, 11);
+  assert.equal(ledger.get(1)?.adoptedReason, "new");
 });
