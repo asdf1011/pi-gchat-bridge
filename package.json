@@ -7,6 +7,7 @@
   "scripts": {
     "start": "tsx src/durable/main.ts",
     "start:sdk": "tsx src/index.ts",
+    "bridge-cli": "tsx src/scripts/bridge-cli.ts",
     "dev": "tsx watch src/index.ts",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.e2e.json",
     "build": "tsc",

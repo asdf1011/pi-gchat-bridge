@@ -76,6 +76,7 @@ test("every adapter file is one of the surfaces we know about", () => {
     "markdown.ts",
     "queries.ts",
     "router.ts",
+    "v1-routes.ts",
     "view-sink.ts",
     "web.ts",
     "web-routes.ts",

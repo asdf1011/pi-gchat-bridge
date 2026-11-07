@@ -39,6 +39,7 @@ import { Ledger } from "./ledger.js";
 import { BridgeHost } from "./host.js";
 import { BridgeLockedError } from "./lock.js";
 import { handleDurableNotify } from "./notify.js";
+import { handleV1 } from "../adapter/v1-routes.js";
 import { handleWebRequest, readBody } from "../adapter/web-routes.js";
 import { startArtifactsServer } from "../adapter/artifacts-server.js";
 import { artifactRoots } from "./artifacts.js";
@@ -180,6 +181,26 @@ async function main(): Promise<void> {
           logger.warn(`[web] identity header from untrusted peer ${req.socket.remoteAddress} — ignored`);
         }
         try {
+          // /v1: the conversation protocol a second surface reads (§17). Its own module
+          // so the shapes are testable without a bridge, and mounted here because this is
+          // already the process that owns the store.
+          if (
+            await handleV1(req, res, url, {
+              seam,
+              conversations: async () => {
+                const bindings = await host.bindings();
+                return Object.entries(bindings.byChatKey).map(([chatKey, binding]) => ({
+                  conversationId: binding.conversationId,
+                  address: chatKey,
+                  ...(binding.name === undefined ? {} : { name: binding.name }),
+                  lastActivityAt: binding.updatedAt ?? binding.createdAt,
+                }));
+              },
+              ...(config.webToken ? { token: config.webToken } : {}),
+            })
+          ) {
+            return;
+          }
           if (req.method === "GET" && url.pathname === "/healthz") {
             res.writeHead(200, { "Content-Type": "text/plain" });
             res.end("ok");

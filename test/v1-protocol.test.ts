@@ -1,0 +1,227 @@
+/**
+ * The protocol, and the second bridge that proves it.
+ *
+ * Two halves, tested against each other: the `/v1` handlers over a fake seam, and the CLI
+ * client over a real HTTP server wrapping those handlers. That pairing is the point — the
+ * claim being checked is not "the CLI works" but "a new surface needs no server changes",
+ * and a conformance test is the only way to know whether the two ends agree.
+ *
+ * The cursor rule gets the most attention, because it is the one that decides whether a
+ * bridge can be closed for a week: a first read adopts at the head (nothing replays), and
+ * a second read resumes from the CLI's own file (nothing repeats).
+ */
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import http from "node:http";
+import os from "node:os";
+import path from "node:path";
+import test, { after } from "node:test";
+
+import { handleV1, type ConversationAddress } from "../src/adapter/v1-routes.js";
+import { runCli, loadState, say, tail } from "../src/scripts/bridge-cli.js";
+import type { SessionHost, TranscriptMessage } from "../src/session-host/api.js";
+
+const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "v1-"));
+after(() => fs.rmSync(scratch, { recursive: true, force: true }));
+
+let counter = 0;
+const statePath = (): string => path.join(scratch, `state-${++counter}.json`);
+
+/** A conversation as the protocol sees it: entries with origins, and a submit that appends. */
+function fakeSeam(
+  messages: { entryId: number; role: "user" | "assistant"; text: string; origin?: string }[],
+  options: { conversations?: number[] } = {},
+) {
+  const known = new Set(options.conversations ?? [1]);
+  const submitted: { conversationId: number; text: string; origin?: string }[] = [];
+  const seam = {
+    history: async (conversationId: number, page?: { limit?: number; offset?: number }) => {
+      if (!known.has(conversationId)) return undefined;
+      const limit = page?.limit ?? 20;
+      const offset = page?.offset ?? 0;
+      const end = Math.max(0, messages.length - offset);
+      return messages.slice(Math.max(0, end - limit), end) as readonly TranscriptMessage[];
+    },
+    submit: async (conversationId: number, request: { content: string; origin?: string }) => {
+      submitted.push({ conversationId, text: request.content, ...(request.origin ? { origin: request.origin } : {}) });
+      return { submissionId: 99 };
+    },
+  } as unknown as SessionHost;
+  return { seam, submitted, messages };
+}
+
+/** The `/v1` routes behind a real socket, so the CLI is exercised over HTTP. */
+async function serve(
+  seam: SessionHost,
+  addresses: ConversationAddress[] = [{ conversationId: 1, address: "spaces/S/threads/T", name: "test" }],
+  token?: string,
+): Promise<{ baseUrl: string; close(): Promise<void> }> {
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    void handleV1(req, res, url, { seam, conversations: async () => addresses, ...(token ? { token } : {}) });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  return {
+    baseUrl: `http://127.0.0.1:${port}`,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}
+
+test("entries are grouped by entry and carry their origin", async () => {
+  const { seam } = fakeSeam([
+    { entryId: 4, role: "user", text: "from the browser", origin: "webui" },
+    { entryId: 5, role: "assistant", text: "checking", },
+    { entryId: 6, role: "assistant", text: "the answer", origin: "webui" },
+  ]);
+  const served = await serve(seam);
+  try {
+    const body = (await (await fetch(`${served.baseUrl}/v1/conversations/1/entries?since=3`)).json()) as {
+      entries: { entryId: number; role: string; origin?: string }[];
+      newest: number;
+    };
+    assert.deepEqual(
+      body.entries.map((entry) => [entry.entryId, entry.origin]),
+      [
+        [4, "webui"],
+        [5, undefined],
+        [6, "webui"],
+      ],
+      "an unstamped entry is commentary, and absence is reported as absence",
+    );
+    assert.equal(body.newest, 6);
+  } finally {
+    await served.close();
+  }
+});
+
+test("`since` is a filter, not a page offset", async () => {
+  const { seam } = fakeSeam([
+    { entryId: 10, role: "user", text: "old" },
+    { entryId: 11, role: "assistant", text: "older answer" },
+  ]);
+  const served = await serve(seam);
+  try {
+    const body = (await (await fetch(`${served.baseUrl}/v1/conversations/1/entries?since=10`)).json()) as {
+      entries: { entryId: number }[];
+    };
+    assert.deepEqual(body.entries.map((entry) => entry.entryId), [11], "strictly after the cursor");
+  } finally {
+    await served.close();
+  }
+});
+
+test("an unknown conversation is 404, not an empty page", async () => {
+  const { seam } = fakeSeam([], { conversations: [] });
+  const served = await serve(seam);
+  try {
+    // A reader must be able to tell "nothing new" from "gone": both would otherwise look
+    // like an empty list, and a bridge would keep adopting a conversation that is not there.
+    assert.equal((await fetch(`${served.baseUrl}/v1/conversations/7/entries?since=0`)).status, 404);
+  } finally {
+    await served.close();
+  }
+});
+
+test("a submission carries an origin, so it is a first-class message", async () => {
+  const { seam, submitted } = fakeSeam([]);
+  const served = await serve(seam);
+  try {
+    const response = await fetch(`${served.baseUrl}/v1/conversations/1/submissions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "hello from a terminal", origin: "cli" }),
+    });
+    assert.equal(response.status, 202);
+    assert.deepEqual(submitted, [{ conversationId: 1, text: "hello from a terminal", origin: "cli" }]);
+  } finally {
+    await served.close();
+  }
+});
+
+test("writes need the token when one is configured; reads do not", async () => {
+  const { seam, submitted } = fakeSeam([{ entryId: 1, role: "user", text: "hi" }]);
+  const served = await serve(seam, [{ conversationId: 1, address: "spaces/S" }], "s3cret");
+  try {
+    assert.equal((await fetch(`${served.baseUrl}/v1/conversations`)).status, 200);
+    const denied = await fetch(`${served.baseUrl}/v1/conversations/1/submissions`, {
+      method: "POST",
+      body: JSON.stringify({ text: "nope" }),
+    });
+    assert.equal(denied.status, 401);
+    assert.deepEqual(submitted, []);
+  } finally {
+    await served.close();
+  }
+});
+
+test("the CLI adopts at the head on a first read, then resumes from its own file", async () => {
+  const { seam } = fakeSeam([{ entryId: 7, role: "user", text: "already happened" }]);
+  const served = await serve(seam);
+  const file = statePath();
+  const lines: string[] = [];
+  const deps = { baseUrl: served.baseUrl, statePath: file, out: (line: string) => lines.push(line) };
+  try {
+    // First run: a captured conversation is not replayed at a person's terminal.
+    await tail(deps, { conversationId: 1 });
+    assert.match(lines.join("\n"), /adopted at entry 7/);
+    assert.equal((await loadState(file)).conversations["1"]?.cursor, 7);
+
+    // A new entry arrives; the second run prints it — and only it.
+    seam.history = async (_id: number, page?: { limit?: number }) =>
+      (page?.limit ?? 20) >= 2
+        ? ([
+            { entryId: 7, role: "user", text: "already happened" },
+            { entryId: 8, role: "assistant", text: "and then this", origin: "gchat" },
+          ] as readonly TranscriptMessage[])
+        : ([{ entryId: 8, role: "assistant", text: "and then this", origin: "gchat" }] as readonly TranscriptMessage[]);
+    lines.length = 0;
+    await tail(deps, { conversationId: 1 });
+    assert.deepEqual(lines, ["[8] assistant:gchat: and then this"]);
+
+    // And a third run has nothing to say.
+    lines.length = 0;
+    await tail(deps, { conversationId: 1 });
+    assert.deepEqual(lines, []);
+  } finally {
+    await served.close();
+  }
+});
+
+test("the CLI speaks into the conversation, and names itself", async () => {
+  const { seam, submitted } = fakeSeam([]);
+  const served = await serve(seam);
+  try {
+    const lines: string[] = [];
+    await say({ baseUrl: served.baseUrl, out: (line: string) => lines.push(line) }, 1, "say this");
+    assert.deepEqual(submitted, [{ conversationId: 1, text: "say this", origin: "cli" }]);
+    assert.match(lines[0] ?? "", /origin cli/);
+  } finally {
+    await served.close();
+  }
+});
+
+test("the command line behaves like a person would expect", async () => {
+  const { seam } = fakeSeam([{ entryId: 3, role: "user", text: "hi" }]);
+  const served = await serve(seam);
+  const lines: string[] = [];
+  const deps = {
+    baseUrl: served.baseUrl,
+    statePath: statePath(),
+    out: (line: string) => lines.push(line),
+  };
+  try {
+    assert.equal(await runCli(["list"], deps), 0);
+    assert.match(lines.join("\n"), /spaces\/S\/threads\/T/);
+
+    lines.length = 0;
+    assert.equal(await runCli(["tail"], deps), 2, "tail without a conversation is a usage error");
+    assert.match(lines[0] ?? "", /needs --conversation/);
+
+    lines.length = 0;
+    assert.equal(await runCli(["say", "--conversation", "1"], deps), 2, "say without words is a usage error");
+  } finally {
+    await served.close();
+  }
+});
