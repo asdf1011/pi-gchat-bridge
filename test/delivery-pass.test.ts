@@ -31,7 +31,7 @@ type Transcript = Record<number, MessageLike[]>;
 /** Build fake deps over one conversation, paging the way the seam pages. */
 function fakeDeps(
   transcript: Transcript,
-  options: { conversationId?: number; name?: string; owns?: (name: string) => boolean } = {},
+  options: { conversationId?: number; name?: string; surface?: string; owns?: (name: string) => boolean } = {},
 ): PassDeps & { presented: EntryRef[]; lines: string[] } {
   const conversationId = options.conversationId ?? 1;
   const messages: MessageLike[] = [];
@@ -41,6 +41,7 @@ function fakeDeps(
   const presented: EntryRef[] = [];
   const lines: string[] = [];
   return {
+    surface: options.surface ?? "gchat",
     presented,
     lines,
     conversations: async () => [
@@ -60,7 +61,11 @@ function fakeDeps(
   };
 }
 
-const reply = (text: string, role: "user" | "assistant" = "assistant"): MessageLike => ({ role, text, at: 1 });
+const reply = (
+  text: string,
+  role: "user" | "assistant" = "assistant",
+  origin?: string,
+): MessageLike => ({ role, text, at: 1, ...(origin === undefined ? {} : { origin }) });
 
 test("a first pass adopts at the head and presents nothing", async () => {
   const ledger = await Ledger.load(fileFor());
@@ -76,7 +81,11 @@ test("a first pass adopts at the head and presents nothing", async () => {
 test("entries after the cursor are presented once each, in order", async () => {
   const ledger = await Ledger.load(fileFor());
   ledger.adopt(1, 11, "new");
-  const deps = fakeDeps({ 11: [reply("old answer")], 12: [reply("next", "user")], 13: [reply("new answer")] });
+  const deps = fakeDeps({
+    11: [reply("old answer")],
+    12: [reply("next", "user", "webui")],
+    13: [reply("new answer", "assistant", "webui")],
+  });
   const summary = await runPass(ledger, deps);
 
   assert.deepEqual(
@@ -90,7 +99,7 @@ test("entries after the cursor are presented once each, in order", async () => {
   assert.equal(ledger.get(1)?.cursor, 13);
 
   // Shadow mode: it said what it would do, and sent nothing.
-  assert.match(deps.lines.join("\n"), /would post conversation 1 entry 13 \(assistant, 10 chars\)/);
+  assert.match(deps.lines.join("\n"), /would post conversation 1 entry 13 \(assistant, 10 chars, origin webui\)/);
   assert.match(deps.lines.join("\n"), /shadow mode, nothing was sent/);
 });
 
@@ -118,8 +127,8 @@ test("one entry with several messages is presented once", async () => {
   // a surface posts an *entry*, not a message.
   const deps = fakeDeps({
     6: [
-      { role: "user", text: "look", at: 1 },
-      { role: "user", text: "", at: 2 },
+      { role: "user", text: "look", at: 1, origin: "webui" },
+      { role: "user", text: "", at: 2, origin: "webui" },
     ],
   });
   await runPass(ledger, deps);
@@ -151,7 +160,7 @@ test("an empty conversation is adopted at zero, which is a real position", async
 
   // And the first thing said in it is presented, because zero is a position and not
   // "unknown".
-  const later = fakeDeps({ 1: [reply("first words", "user")] });
+  const later = fakeDeps({ 1: [reply("first words", "user", "webui")] });
   await runPass(ledger, later);
   assert.deepEqual(later.presented.map((entry) => entry.text), ["first words"]);
 });
@@ -165,6 +174,53 @@ test("an unconfirmed post from an earlier run is reported", async () => {
 
   assert.deepEqual(summary.unfinished, [1]);
   assert.match(deps.lines.join("\n"), /may be on the surface twice/);
+});
+
+test("entries this surface already holds are stepped over, not posted back", async () => {
+  const ledger = await Ledger.load(fileFor());
+  ledger.adopt(1, 10, "new");
+  // A message typed in Chat is already in Chat. Posting it as the bot is the
+  // assistant answering itself, so the pass counts it, advances past it, and sends
+  // nothing.
+  const deps = fakeDeps({
+    11: [reply("typed in chat", "user", "gchat")],
+    12: [reply("the answer", "assistant", "gchat")],
+  });
+  const summary = await runPass(ledger, deps);
+
+  assert.deepEqual(deps.presented, []);
+  assert.equal(summary.own, 2);
+  assert.equal(summary.presented, 0);
+  assert.equal(ledger.get(1)?.cursor, 12, "accounted for is enough to advance the cursor");
+});
+
+test("an unclaimed user entry is left alone; an unclaimed answer is shown", async () => {
+  // Origin is missing when a stamp was lost or an entry predates the field. The rule
+  // is by role: posting somebody's own words back at them is worse than a missing
+  // signpost, but an answer nobody claims is one this bridge should probably show.
+  const ledger = await Ledger.load(fileFor());
+  ledger.adopt(1, 10, "new");
+  const deps = fakeDeps({
+    11: [reply("orphaned prompt", "user")],
+    12: [reply("orphaned answer", "assistant")],
+  });
+  const summary = await runPass(ledger, deps);
+
+  assert.deepEqual(deps.presented.map((entry) => entry.role), ["assistant"]);
+  assert.equal(summary.unknown, 2, "both were noticed, one was presented");
+  assert.match(deps.lines.join("\n"), /entry 11: no origin recorded/);
+  assert.equal(ledger.get(1)?.cursor, 12);
+});
+
+test("another surface's prompt reaches this one, with its origin attached", async () => {
+  const ledger = await Ledger.load(fileFor());
+  ledger.adopt(1, 10, "new");
+  const deps = fakeDeps({ 11: [reply("typed in the browser", "user", "webui")] });
+  await runPass(ledger, deps);
+
+  // The origin travels to the surface so its policy can decide how to show it
+  // (quoted above the answer, or as its own message).
+  assert.deepEqual(deps.presented.map((entry) => [entry.role, entry.origin]), [["user", "webui"]]);
 });
 
 test("conversations this bridge does not own are left alone", async () => {

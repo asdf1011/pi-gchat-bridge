@@ -213,7 +213,9 @@ export async function webSubmit(
           ...(text ? [{ type: "text" as const, text }] : []),
           ...images.map((image) => ({ type: "image" as const, data: image.data, mimeType: image.mimeType })),
         ];
-  const result = await options.seam.submit(conversationId, { content, whenBusy });
+  // Stamped so a surface painting this conversation can tell a web message from one
+  // its own transport already holds.
+  const result = await options.seam.submit(conversationId, { content, whenBusy, origin: "webui" });
   return "error" in result
     ? { ok: false, error: result.error }
     : // Rendered here so the pane can show your message the moment it is sent,

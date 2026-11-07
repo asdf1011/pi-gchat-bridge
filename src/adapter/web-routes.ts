@@ -560,6 +560,8 @@ export async function handleWebRequest(
     const result = await seam.submit(conversationId, {
       content: message,
       whenBusy: "steer",
+      // A review comment is words from the browser, whoever typed them.
+      origin: "webui",
       // One comment, one turn: a double-click or a retry must not start two.
       requestId: `comment:${stored.id}`,
     });
@@ -625,7 +627,11 @@ export async function handleWebRequest(
     // belongs to — the model sees the address again and knows what it is about.
     const path = options.artifactPath?.(conversationId, stored.file) ?? stored.file;
     const reply = `${modelText(stored, { path })}\n\n(reply from ${(who.email ?? "someone").split("@")[0]})\n\n${text.trim()}`;
-    const result = await seam.submit(conversationId, { content: reply, whenBusy: "followUp" });
+    const result = await seam.submit(conversationId, {
+      content: reply,
+      whenBusy: "followUp",
+      origin: "webui",
+    });
     if ("error" in result) {
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: false, error: result.error }));

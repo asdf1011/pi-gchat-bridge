@@ -599,6 +599,9 @@ async function main(): Promise<void> {
     );
     const pass = async (): Promise<void> => {
       const summary = await runPass(ledger, {
+        // This process is the Chat bridge, so entries stamped `gchat` are already in
+        // the thread and must not be painted back into it.
+        surface: "gchat",
         // Only conversations that live in Chat: a web-only conversation has no
         // surface for this bridge to fall behind on.
         conversations: async () => host.bindings().then((bindings) =>
@@ -617,7 +620,8 @@ async function main(): Promise<void> {
       if (summary.adopted > 0 || summary.presented > 0 || summary.unfinished.length > 0) {
         logger.info(
           `[ledger] pass: ${summary.looked} thread(s), adopted ${summary.adopted}, ` +
-            `would post ${summary.presented}, gaps ${summary.gaps}` +
+            `would post ${summary.presented}, already here ${summary.own}, unclaimed ${summary.unknown}, ` +
+            `gaps ${summary.gaps}` +
             (summary.unfinished.length === 0 ? "" : `, unfinished ${summary.unfinished.join(",")}`),
         );
       }

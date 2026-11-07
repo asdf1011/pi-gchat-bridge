@@ -85,6 +85,7 @@ export class DurableRouter {
     const conversation = await this.conversationFor(message.chatKey, { create: true });
     const result = await this.seam.submit(conversation.conversationId, {
       requestId: message.messageName,
+      origin: "gchat",
       content: buildContent(message.text, message.images),
       // Unconditional on purpose: when the conversation is idle this simply
       // starts a run, so there is no separate "is it busy?" decision to get

@@ -576,6 +576,15 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
         },
         host.context,
       );
+      // Which surface this came from, stamped against the entry the submission
+      // created. `recordOrigin` finds that entry itself (it is the newest user entry
+      // with no stamp), so the rule about how a submission becomes an entry stays in
+      // the host instead of being re-derived by every adapter.
+      if (request.origin) {
+        await host
+          .recordOrigin(conversationId, submission.id as unknown as number, request.origin)
+          .catch(() => {});
+      }
       // Remember that the conversation was used, and what it opened with, for the
       // recent list: a title is a model call away, and the list needs a name now.
       await host.touch(conversationId).catch(() => {});

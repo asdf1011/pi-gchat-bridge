@@ -174,6 +174,9 @@ export const ConversationContract = remote("pi-bridge.conversation", {
             requestId: Type.Optional(Type.String()),
             content: ContentPartSchema,
             whenBusy: Type.Optional(Type.String()),
+            // The surface that submitted: `gchat`, `webui`, `cron`. Recorded so a
+            // painter can tell its own messages from another surface's.
+            origin: Type.Optional(Type.String()),
           }),
           SubmitResultSchema,
         ),

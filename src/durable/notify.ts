@@ -220,6 +220,7 @@ async function validatedNotify(
     const submitted = await deps.seam.submit(conversation.conversationId, {
       content: prompt,
       requestId: `notify:${chatKey}:${Date.now()}`,
+      origin: "cron",
     });
     if ("error" in submitted) throw new Error(submitted.error);
     const settled = await deps.seam.awaitSubmission(submitted.submissionId);

@@ -235,6 +235,17 @@ export interface SubmitRequest {
   content: MessageContent;
   /** Defaults to `"steer"`: join the running turn rather than queue behind it. */
   whenBusy?: WhenBusy;
+  /**
+   * The surface this came from: `gchat`, `webui`, `cron`.
+   *
+   * Recorded against the user entry, and inherited by the turn's answer, so a
+   * surface painting the conversation can tell *its own* messages from another
+   * surface's. Without it, a bridge that reads the log and posts it back would
+   * repeat messages its transport already holds — the bot answering itself.
+   *
+   * A name, not an enum: the set of surfaces is a deployment fact.
+   */
+  origin?: string;
 }
 
 export type SubmitResult = { submissionId: number } | { error: string };
@@ -259,6 +270,14 @@ export interface TranscriptMessage {
   entryId?: number;
   /** Images attached to this message, in order. Bytes are not inlined. */
   images?: TranscriptImage[];
+  /**
+   * Surface that produced the entry, when it was stamped at submit time.
+   *
+   * Absent means unknown — older than the stamp, or a submission that failed to
+   * record one. Readers must treat unknown conservatively (see
+   * `durable/delivery-pass.ts`), never as "this surface already has it".
+   */
+  origin?: string;
 }
 
 /**

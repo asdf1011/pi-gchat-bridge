@@ -22,12 +22,25 @@
  *     one message may already be on the surface. The pass reports it instead of
  *     quietly re-posting or quietly advancing past it.
  *
- * One prerequisite this pass does **not** yet have: an entry does not record which
- * surface produced it. So in shadow mode the log line below says "would post" for
- * entries this surface already holds (a Chat-typed message is already in Chat), and
- * a real painter must not post those. That is the origin annotation the design calls
- * for, and it is the first thing step two needs — until it exists, this pass can
- * prove the cursor arithmetic but not decide what to paint.
+ * The first question a pass asks about an entry is not "what does it say" but "is
+ * that mine". A surface that paints a conversation into its own transport must leave
+ * alone what that transport already holds: a message typed in Chat is already in
+ * Chat, and posting it back as the bot is the assistant replying to itself. So each
+ * entry carries the surface that produced it (`origins-doc.ts`), and the pass skips
+ * its own.
+ *
+ * Unknown origin is the interesting case, and it is answered by role rather than by
+ * a default:
+ *
+ *   - a **user** entry with no origin is left alone — the only surface that can
+ *     already hold it is the one that received it, and posting somebody's own words
+ *     back at them is worse than a missing signpost;
+ *   - an **assistant** entry with no origin is presented — an answer is only ever
+ *     put on a surface by a bridge, so an answer nobody claims is one this bridge
+ *     should probably show.
+ *
+ * Both are logged, because "unknown" means a stamp was lost or predates the field,
+ * and a decision made from an absence should be visible rather than quiet.
  *
  * `history` pages *backwards* from the newest message (the seam's own convention),
  * which is the right direction for this: a bridge that is nearly caught up reads
@@ -42,6 +55,8 @@ export interface MessageLike {
   text: string;
   at?: number;
   entryId?: number;
+  /** The surface that produced it, when stamped at submit time. */
+  origin?: string;
 }
 
 /** One entry, ready to hand to a surface. */
@@ -52,9 +67,18 @@ export interface EntryRef {
   role: "user" | "assistant";
   text: string;
   at?: number;
+  /** Who produced it: this surface, another one, or nobody knows. */
+  origin?: string;
 }
 
 export interface PassDeps {
+  /**
+   * The surface this bridge speaks for — `gchat`, `webui`.
+   *
+   * Entries stamped with this name are already on the surface and are skipped;
+   * entries stamped with another one are the reason the pass exists.
+   */
+  surface: string;
   /** Conversations this bridge might own. `name` is the address, e.g. `spaces/S/threads/T`. */
   conversations(): Promise<readonly { conversationId: number; name: string; lastActivityAt?: number }[]>;
   /** A page of messages, newest last; `offset` counts back from the newest. */
@@ -86,6 +110,10 @@ export interface PassSummary {
   gaps: number;
   /** Conversations with an unconfirmed post from an earlier run. */
   unfinished: number[];
+  /** Entries this surface already had, and so were skipped. */
+  own: number;
+  /** Entries nobody claimed: user entries skipped, assistant entries presented. */
+  unknown: number;
 }
 
 const SHADOW_LOG_PREFIX = "[ledger] would post";
@@ -102,7 +130,7 @@ export async function runPass(ledger: Ledger, deps: PassDeps): Promise<PassSumma
   const now = deps.now ?? (() => Date.now());
   const pageSize = deps.pageSize ?? 50;
   const maxPages = deps.maxPages ?? 10;
-  const summary: PassSummary = { looked: 0, adopted: 0, presented: 0, gaps: 0, unfinished: [] };
+  const summary: PassSummary = { looked: 0, adopted: 0, presented: 0, gaps: 0, unfinished: [], own: 0, unknown: 0 };
 
   let conversations: Awaited<ReturnType<PassDeps["conversations"]>>;
   try {
@@ -180,6 +208,23 @@ async function walk(
   if (pending.length === 0) return { changed: false };
 
   for (const entry of pending) {
+    const verdict = ownership(entry, deps.surface);
+    if (verdict === "own") {
+      // Already on this surface. Advancing past it is the whole point: the cursor
+      // records that it was accounted for, not that a message was sent.
+      ledger.confirm(conversationId, entry.entryId);
+      summary.own += 1;
+      continue;
+    }
+    if (verdict === "skip-unknown") {
+      ledger.confirm(conversationId, entry.entryId);
+      summary.unknown += 1;
+      log(
+        `[ledger] conversation ${conversationId} entry ${entry.entryId}: no origin recorded — ` +
+          "a user entry, so it is left alone rather than posted back at its author",
+      );
+      continue;
+    }
     ledger.begin(conversationId, entry.entryId, at);
     await deps.present({
       conversationId,
@@ -187,15 +232,34 @@ async function walk(
       role: entry.role,
       text: entry.text,
       ...(entry.at === undefined ? {} : { at: entry.at }),
+      ...(entry.origin === undefined ? {} : { origin: entry.origin }),
     });
     ledger.confirm(conversationId, entry.entryId);
     summary.presented += 1;
+    if (entry.origin === undefined) summary.unknown += 1;
     log(
       `${SHADOW_LOG_PREFIX} conversation ${conversationId} entry ${entry.entryId} ` +
-        `(${entry.role}, ${entry.text.length} chars) — shadow mode, nothing was sent`,
+        `(${entry.role}, ${entry.text.length} chars, origin ${entry.origin ?? "unknown"}) — ` +
+        "shadow mode, nothing was sent",
     );
   }
   return { changed: true };
+}
+
+/**
+ * What this surface should do with one entry.
+ *
+ * `own` — it came from this surface, so the transport already has it.
+ * `skip-unknown` — nobody recorded an origin and it is a *user* entry: the only
+ * surface that can already hold it is the one that received it, so the safe error is
+ * to leave it (a missing signpost) rather than post somebody's words back at them.
+ * `present` — another surface's, or an unclaimed answer, which is what this pass is
+ * for.
+ */
+function ownership(entry: EntryRef, surface: string): "own" | "skip-unknown" | "present" {
+  if (entry.origin === surface) return "own";
+  if (entry.origin === undefined && entry.role === "user") return "skip-unknown";
+  return "present";
 }
 
 interface Window {
@@ -241,6 +305,7 @@ async function readWindow(
         role: message.role,
         text: message.text,
         ...(message.at === undefined ? {} : { at: message.at }),
+        ...(message.origin === undefined ? {} : { origin: message.origin }),
       });
     }
     if (reachedCursor) break;

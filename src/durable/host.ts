@@ -48,6 +48,7 @@ import type {
 import { BindingsDoc, type BindingsValue, type ConversationBinding } from "./bindings-doc.js";
 import { mergeObserved, type ObservedFile } from "./observed-files.js";
 import { mergeRevisions, type ArtifactRevision } from "./artifact-revisions.js";
+import { originForSubmission, OriginsDoc, withOrigin, type EntryOrigin } from "./origins-doc.js";
 import {
   addComment as addCommentTo,
   appendReply,
@@ -680,7 +681,12 @@ export class BridgeHost {
       };
     }
     const answerId = settled.answer as unknown as number;
-    const text = await this.answerText(settled.conversationId as unknown as number, answerId);
+    const conversationId = settled.conversationId as unknown as number;
+    // The answer inherits the prompt's surface. Best-effort: an unstamped answer is
+    // an unknown origin, which readers already handle, and this must never delay a
+    // turn's completion.
+    await this.recordAnswerOrigin(conversationId, answerId, submissionId).catch(() => {});
+    const text = await this.answerText(conversationId, answerId);
     return { status: "done", answerId, text };
   }
 
@@ -801,6 +807,81 @@ export class BridgeHost {
   }
 
   /**
+   * Stamp which surface produced a submission's user entry.
+   *
+   * Called after `submit` returns, and it finds the entry rather than being told:
+   * the submission that was just made is the newest user entry with no stamp yet.
+   * That keeps the knowledge of *how a submission becomes an entry* in one place
+   * (this one) instead of in every adapter, and it self-heals — a stamp missed on a
+   * restart is picked up by the next submission in that conversation rather than
+   * leaving a permanent hole.
+   *
+   * Best-effort by design: a conversation whose entry cannot be found is logged and
+   * left unstamped, because an unknown origin is handled conservatively by every
+   * reader and a lost stamp must never fail a turn.
+   */
+  async recordOrigin(conversationId: number, submission: number, origin: string): Promise<boolean> {
+    const ids = await this.userEntryIds(conversationId);
+    if (ids.length === 0) {
+      logger.warn(`[origins] conversation ${conversationId}: no user entry to stamp (submission ${submission})`);
+      return false;
+    }
+    const current = (await this.harness.snapshot(OriginsDoc, this.context)) ?? { byEntry: {} };
+    const entryId = [...ids].reverse().find((id) => current.byEntry[`${conversationId}:${id}`] === undefined);
+    if (entryId === undefined) {
+      logger.warn(`[origins] conversation ${conversationId}: every user entry is stamped (submission ${submission})`);
+      return false;
+    }
+    const stamp: EntryOrigin = { origin, submission, at: Date.now() };
+    await this.harness.commit(async (tx) => {
+      // The draft is mutated in place, like every other document write here; the
+      // pure `withOrigin` is what decides the new map (and the pruning), so the
+      // rule is testable without a store.
+      const doc = await tx.doc(OriginsDoc);
+      doc.byEntry = withOrigin(doc, conversationId, entryId, stamp).byEntry;
+    }, this.context);
+    return true;
+  }
+
+  /**
+   * Stamp the answer of a settled submission with the surface that asked for it.
+   *
+   * The answer belongs to whoever started the turn, which is not the same question
+   * as "which surface is reading" — a browser turn's answer is still the browser's,
+   * even when Chat is the thing that displays it.
+   */
+  async recordAnswerOrigin(conversationId: number, answerId: number, submission: number): Promise<boolean> {
+    const current = await this.harness.snapshot(OriginsDoc, this.context);
+    const prompt = originForSubmission(current, submission);
+    if (!prompt) return false;
+    await this.harness.commit(async (tx) => {
+      const doc = await tx.doc(OriginsDoc);
+      doc.byEntry = withOrigin(doc, conversationId, answerId, { ...prompt, at: Date.now() }).byEntry;
+    }, this.context);
+    return true;
+  }
+
+  /** Entry ids of the user messages in a conversation, oldest first. */
+  private async userEntryIds(conversationId: number): Promise<number[]> {
+    const conversation = await this.harness.conversation(conversationId as ConversationId, this.context);
+    if (!conversation) return [];
+    const view = await conversation.viewState(this.context);
+    try {
+      const entries = (view.value as { entries?: readonly unknown[] }).entries ?? [];
+      const ids: number[] = [];
+      for (const raw of entries) {
+        const id = (raw as { id?: unknown }).id;
+        if (typeof id !== "number") continue;
+        const model = (raw as { model?: readonly { role?: string }[] }).model ?? [];
+        if (model.some((message) => message.role === "user")) ids.push(id);
+      }
+      return ids;
+    } finally {
+      view.dispose();
+    }
+  }
+
+  /**
    * A window of the transcript, newest last. See `SessionHost.history`.
    *
    * `offset` counts back from the newest message, so "the page before this one"
@@ -818,6 +899,7 @@ export class BridgeHost {
     const entries = (view.value as { entries?: readonly unknown[] }).entries ?? [];
     view.dispose();
 
+    const origins = (await this.harness.snapshot(OriginsDoc, this.context))?.byEntry;
     const messages: TranscriptMessage[] = [];
     for (const raw of entries) {
       const model = (raw as { model?: readonly { role?: string; content?: unknown }[] }).model ?? [];
@@ -830,11 +912,17 @@ export class BridgeHost {
         if (!text && images.length === 0) continue;
         const at = (message as { timestamp?: unknown }).timestamp;
         const entryId = (raw as { id?: unknown }).id;
+        // The surface that produced the entry, when it was stamped at submit time.
+        // Absent for anything older than the stamp, which readers must treat as
+        // unknown rather than as "mine".
+        const stamped =
+          typeof entryId === "number" ? origins?.[`${conversationId}:${entryId}`]?.origin : undefined;
         messages.push({
           role: message.role,
           text: text.slice(0, TRANSCRIPT_MESSAGE_CHARS),
           ...(typeof at === "number" && Number.isFinite(at) ? { at } : {}),
           ...(typeof entryId === "number" ? { entryId } : {}),
+          ...(stamped === undefined ? {} : { origin: stamped }),
           ...(images.length === 0 ? {} : { images }),
         });
       }
