@@ -157,6 +157,7 @@ export function loadConfig(): Config {
   // is a deployment's choice to make, not something a fresh checkout should do
   // behind the operator's back.
   const artifactsDir = (process.env.BRIDGE_ARTIFACTS_DIR ?? "").trim();
+  const paintAll = (process.env.BRIDGE_PAINT ?? "").trim().toLowerCase() === "all";
 
   return {
     serviceAccountPath,
@@ -199,8 +200,12 @@ export function loadConfig(): Config {
     ledgerPath: (process.env.BRIDGE_LEDGER_PATH ?? "").trim(),
     ledgerIntervalMs: Number(process.env.BRIDGE_LEDGER_INTERVAL_MS ?? 60_000),
     ledgerActiveWithinMs: Number(process.env.BRIDGE_LEDGER_ACTIVE_WITHIN_MS ?? 7 * 24 * 60 * 60 * 1000),
-    paintAll: (process.env.BRIDGE_PAINT ?? "").trim().toLowerCase() === "all",
-    paintConversations: listEnv("BRIDGE_PAINT_CONVERSATIONS")
+    paintAll,
+    // `all` supersedes the list: keeping both live would make the log claim one thing
+    // and the painter do another.
+    paintConversations: paintAll
+      ? []
+      : listEnv("BRIDGE_PAINT_CONVERSATIONS")
       .map((id) => Number(id))
       .filter((id) => Number.isFinite(id) && id > 0),
   };

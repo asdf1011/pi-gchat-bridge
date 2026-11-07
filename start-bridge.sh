@@ -187,10 +187,12 @@ fi
 # Deploying BRIDGE_ARTIFACTS_PORT made that concrete — the file was correct,
 # `.restart-bridge.sh` restarted node, and the new listener never started.
 #
-# One limit worth knowing before relying on it: sourcing can add or change a
-# variable but cannot remove one, so a line *deleted* from the file stays in the
-# environment until the container is recreated. Adding or changing a setting is
-# now a bridge restart; removing one is still a container restart.
+# Sourcing can add or change a variable but cannot remove one, so the keys the file
+# defined *last* time are remembered in `.env.durable.keys` and any that are no longer
+# in the file are unset before sourcing. Without that, deleting a line and restarting
+# does nothing: the old value survives in this shell's environment and every child
+# inherits it — which is precisely the operation a rollback needs (turn the painter
+# off, delete the key, restart).
 load_durable_env() {
   if [ "$ENGINE" != "durable" ]; then
     return 0
@@ -200,10 +202,18 @@ load_durable_env() {
     return 0
   fi
   log "loading .env.durable"
+  local keys="$PROJECT_DIR/.env.durable.keys"
+  if [ -f "$keys" ]; then
+    while read -r key; do
+      [ -n "$key" ] || continue
+      grep -q "^${key}=" "$file" || unset "$key"
+    done < "$keys"
+  fi
   set -a
   # shellcheck disable=SC1091
   . "$file"
   set +a
+  grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' "$file" | tr -d '=' > "$keys"
 }
 
 load_durable_env
