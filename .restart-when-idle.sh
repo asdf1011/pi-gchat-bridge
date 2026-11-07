@@ -162,8 +162,20 @@ while [ "$waited" -lt "$MAXWAIT" ]; do
   fi
   quiet_for=$(( ${quiet_for:-0} + 5 ))
   if [ "$quiet_for" -ge "$QUIET" ]; then
-    log "idle for ${QUIET}s — restarting bridge pid $BRIDGE"
-    kill "$BRIDGE" 2>/dev/null
+    # Re-read the owner *now*: a daemon armed earlier may be holding a pid that has since
+    # been replaced by another restart, and killing a dead pid logs a restart that never
+    # happened (observed: two armed daemons, the second one logged "restarting pid 14849"
+    # forty seconds after 14849 was gone).
+    current=$(bridge_pid)
+    if [ -z "$current" ] || ! kill -0 "$current" 2>/dev/null; then
+      log "no live bridge owns the database lock now — nothing to restart"
+      exit 0
+    fi
+    if [ "$current" != "$BRIDGE" ]; then
+      log "bridge pid changed while waiting ($BRIDGE → $current) — restarting the current one"
+    fi
+    log "idle for ${QUIET}s — restarting bridge pid $current"
+    kill "$current" 2>/dev/null
     exit 0
   fi
 done

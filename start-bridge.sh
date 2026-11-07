@@ -181,6 +181,12 @@ fi
 # Load the durable engine's own environment. Called at startup AND before every
 # restart of the bridge.
 #
+# Note which edits this applies to: values in `.env.durable` are re-read per restart, but
+# edits to *this script* are not — bash parses a file once, so a change here is inert until
+# the container restarts and PID 1 re-parses it. Found the hard way: the key-removal fix
+# below was written, committed and believed for an hour while the running supervisor kept
+# executing the old copy, so a deleted key stayed in the environment.
+#
 # Sourcing this once, before the loop, meant an edit to `.env.durable` needed a
 # *container* restart to take effect: the loop re-executes node, node inherits
 # this shell's environment, and this shell had already exported the old values.
