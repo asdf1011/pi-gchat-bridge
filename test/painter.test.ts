@@ -251,6 +251,18 @@ test("a turn that produced no answer leaves no placeholder and no message", asyn
   assert.equal(ledger.get(1)?.cursor, 12, "the commentary is accounted for so it is not re-read");
 });
 
+test("two ticks cannot both post the same answer", async () => {
+  // A wake on the way into a turn and a wake on the way out can land together, and the
+  // interval can fire at the same moment. Two ticks reading one unposted answer would
+  // each post it — the duplication this component exists to prevent, so ticks queue.
+  const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
+  ledger.adopt(1, 10, "new");
+  const { painter, posted } = painterFor(ledger, { 11: [answer("the answer")] });
+
+  await Promise.all([painter.tick(), painter.tick(), painter.tick()]);
+  assert.deepEqual(posted, [{ conversationId: 1, text: "the answer" }]);
+});
+
 test("a conversation with no cursor is not painted until the pass adopts it", async () => {
   const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
   const { painter, posted } = painterFor(ledger, { 11: [answer("x")] });

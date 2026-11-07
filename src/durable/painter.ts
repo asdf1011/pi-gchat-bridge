@@ -101,15 +101,56 @@ interface Open {
 export class Painter {
   private open = new Map<number, Open>();
   private summary: PaintSummary = { painted: 0, streamed: 0, posted: 0, failed: 0 };
+  /** Serialises ticks. Two at once could both see one unposted answer and post it twice. */
+  private chain: Promise<unknown> = Promise.resolve();
+  private wakeTimer: NodeJS.Timeout | undefined;
 
   constructor(private deps: PainterDeps) {}
+
+  /**
+   * Ask for a tick soon, because something just happened.
+   *
+   * The timer is not the only way a turn is noticed — it is the *fallback*. Whoever
+   * knows that a turn started or settled (the adapter that submitted it, in this
+   * process) says so, and the painter looks immediately instead of at the next tick.
+   * Polling alone would put up to a tick of latency on both edges: a placeholder that
+   * appears fifteen seconds after the message, and a finished answer that sits on the
+   * cursor for the same again.
+   *
+   * Coalesced on a short timer rather than run inline, so a burst of events is one
+   * pass over the conversations, and so a caller never waits on painting.
+   */
+  wake(delayMs = 250): void {
+    if (this.wakeTimer) return;
+    this.wakeTimer = setTimeout(() => {
+      this.wakeTimer = undefined;
+      void this.tick();
+    }, delayMs);
+    this.wakeTimer.unref?.();
+  }
+
+  /**
+   * Run one tick, serialised against any other.
+   *
+   * Two ticks for one conversation would each read the same unposted answer and each
+   * post it, which is precisely the duplication this component exists to prevent — so
+   * ticks queue rather than race.
+   */
+  async tick(): Promise<PaintSummary> {
+    const run = this.chain.then(() => this.tickAll());
+    this.chain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
 
   private log(message: string): void {
     (this.deps.log ?? ((line: string) => logger.info(line)))(message);
   }
 
   /** One tick over every conversation this painter owns. Never throws. */
-  async tick(): Promise<PaintSummary> {
+  private async tickAll(): Promise<PaintSummary> {
     const summary: PaintSummary = { painted: 0, streamed: 0, posted: 0, failed: 0 };
     let conversations: readonly { conversationId: number }[];
     try {
@@ -230,6 +271,8 @@ export class Painter {
 
   /** Detach everything; called on shutdown so a restart leaves no half-open view. */
   async close(): Promise<void> {
+    if (this.wakeTimer) clearTimeout(this.wakeTimer);
+    this.wakeTimer = undefined;
     for (const [, open] of this.open) {
       open.detach();
     }

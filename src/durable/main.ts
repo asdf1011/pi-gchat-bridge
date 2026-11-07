@@ -113,6 +113,8 @@ async function main(): Promise<void> {
   // by the handler *and* the painter, from one value, so the two cannot disagree about
   // who owns a thread.
   const painted = new Set(config.paintConversations);
+  /** Set once the painter is created, below. The handler pokes it; nothing else does. */
+  let painter: Painter | undefined;
 
   const mirrorTurnIntoChat = (
     conversationId: number,
@@ -507,6 +509,11 @@ async function main(): Promise<void> {
           replaceOnFinish: config.replaceOnFinish,
         });
         stream.register(chatKey);
+      } else {
+        // The painter owns this thread, and it is in this process, so say what just
+        // happened instead of letting it find out on a timer: a placeholder should
+        // appear when the turn starts, not at the next tick.
+        painter?.wake();
       }
 
       // Attach the sink *before* waiting: the answer may already be streaming.
@@ -514,6 +521,9 @@ async function main(): Promise<void> {
 
       const turnStarted = Date.now();
       const settled = await seam.awaitSubmission(delivered.submissionId);
+      // Same on the way out: the answer entry exists now, so the painter can finish it
+      // in place immediately rather than a tick later.
+      if (painted.has(delivered.conversationId)) painter?.wake();
       const turnMs = Date.now() - turnStarted;
       await sink?.detach();
       sink = undefined;
@@ -728,7 +738,7 @@ async function main(): Promise<void> {
         const bindings = await host.bindings().catch(() => ({ byChatKey: {} }));
         return Object.entries(bindings.byChatKey).find(([, b]) => b.conversationId === conversationId)?.[0];
       };
-      const painter = new Painter({
+      painter = new Painter({
         surface: "gchat",
         ledger,
         owns: (conversationId) => painted.has(conversationId),
@@ -781,9 +791,13 @@ async function main(): Promise<void> {
           },
         },
       });
-      paintTimer = setInterval(() => void painter.tick(), Math.min(config.ledgerIntervalMs, 15_000));
+      // The interval is the *fallback*: it catches a turn this process did not hear
+      // about (a web message, a resume after a restart). Anything the handler knows
+      // about arrives via `wake()` and is painted immediately.
+      const instance = painter;
+      paintTimer = setInterval(() => void instance.tick(), Math.min(config.ledgerIntervalMs, 15_000));
       paintTimer.unref();
-      void painter.tick();
+      void instance.tick();
     }
   }
 
