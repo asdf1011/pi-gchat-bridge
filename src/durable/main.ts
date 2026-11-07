@@ -32,6 +32,7 @@ import { DurableRouter } from "../adapter/router.js";
 import { runDurableCommand } from "../adapter/commands.js";
 import { defaultSettings } from "../adapter/commands.js";
 import { runPass } from "./delivery-pass.js";
+import { ActivityFeed } from "./activity.js";
 import { Painter } from "./painter.js";
 import { httpViewSource, ViewLadder } from "../adapter/view-client.js";
 import type { ProjectedView } from "../session-host/projection.js";
@@ -115,6 +116,10 @@ async function main(): Promise<void> {
   // who owns a thread.
   /** Set once the painter is created, below. The handler pokes it; nothing else does. */
   let painter: Painter | undefined;
+  // The server's own account of what it is doing. Subscribers are connections (§17), and the
+  // per-turn watching is one attachment per running turn — not per reader. Late-bound because
+  // the seam is built below, and this object is only used once requests start arriving.
+  const activity = new ActivityFeed({ seam: { attach: (id, frame) => seam.attach(id, frame) } });
 
   // Created lazily, on the first turn of a conversation, rather than up front:
   // most conversations never write an artifact, and an empty repository per
@@ -193,6 +198,7 @@ async function main(): Promise<void> {
           if (
             await handleV1(req, res, url, {
               seam,
+              activity,
               conversations: async () => {
                 const bindings = await host.bindings();
                 return Object.entries(bindings.byChatKey).map(([chatKey, binding]) => ({
@@ -500,6 +506,7 @@ async function main(): Promise<void> {
         text,
         images,
       });
+      activity.started(delivered.conversationId);
       // The painter is in this process, so say what just happened instead of letting it
       // find out on a timer: a placeholder should appear when the turn starts.
       painter?.wake();

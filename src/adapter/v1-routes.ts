@@ -49,6 +49,15 @@ export interface V1Deps {
   /** Bearer token required for writes. Empty disables the check (tailnet-only). */
   token?: string;
   /**
+   * Where activity comes from, when the deployment has it.
+   *
+   * Absent means the route is not served, which is how a deployment (or a test) says "no
+   * activity stream here" without a flag.
+   */
+  activity?: {
+    subscribe(listener: (event: { conversationId: number; kind: string; at: number }) => void): () => void;
+  };
+  /**
    * Cadence of the view stream's heartbeat, in ms.
    *
    * Fixed, and independent of activity, on purpose (§18): the *absence* of frames is the
@@ -135,6 +144,53 @@ export async function handleV1(
         }),
       );
     json(res, 200, { conversationId, since, newest: window.newest, entries: after });
+    return true;
+  }
+
+  // --- Activity: what the server is doing, to whoever is listening ----------------
+  //
+  // `?conversation=<id>` is optional on purpose, because the two consumers want opposite
+  // things: the chat bridge serves every thread it is bound to and wants all of them, while a
+  // browser showing one conversation should not be woken for the rest. An unfiltered stream is
+  // also the cheap one to serve — one fan-out, no per-conversation bookkeeping.
+  //
+  // Events are hints, never data: losing one costs latency, because the transcript and the
+  // reader's own cursor are the record. That is what keeps this compatible with "the server has
+  // no memory of its readers" — a subscriber is a connection, not a position.
+  const activity = url.pathname === "/v1/activity";
+  if (activity && req.method === "GET") {
+    if (!deps.activity) {
+      json(res, 404, { ok: false, error: "activity is not served here" });
+      return true;
+    }
+    const only = url.searchParams.get("conversation");
+    const filter = only === null ? undefined : Number(only);
+    if (filter !== undefined && !Number.isFinite(filter)) {
+      json(res, 400, { ok: false, error: "conversation must be a number" });
+      return true;
+    }
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+    const send = (event: string, data: unknown): void => {
+      if (res.writableEnded) return;
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+    const unsubscribe = deps.activity.subscribe((event) => {
+      if (filter !== undefined && event.conversationId !== filter) return;
+      send("activity", event);
+    });
+    const beat = setInterval(() => send("heartbeat", { at: Date.now() }), deps.heartbeatMs ?? 15_000);
+    beat.unref?.();
+    const stop = (): void => {
+      clearInterval(beat);
+      unsubscribe();
+    };
+    req.on("close", stop);
+    res.on("close", stop);
     return true;
   }
 
