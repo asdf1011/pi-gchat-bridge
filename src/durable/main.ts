@@ -34,7 +34,7 @@ import { defaultSettings } from "../adapter/commands.js";
 import { runPass } from "./delivery-pass.js";
 import { ActivityFeed } from "./activity.js";
 import { Painter } from "./painter.js";
-import { httpViewSource, ViewLadder } from "../adapter/view-client.js";
+import { httpActivitySource, httpViewSource, ViewLadder } from "../adapter/view-client.js";
 import type { ProjectedView } from "../session-host/projection.js";
 import { chatTarget } from "../session-key.js";
 import { splitMessage } from "../stream.js";
@@ -507,15 +507,11 @@ async function main(): Promise<void> {
         images,
       });
       activity.started(delivered.conversationId);
-      // The painter is in this process, so say what just happened instead of letting it
-      // find out on a timer: a placeholder should appear when the turn starts.
-      painter?.wake();
+      // No wake: activity carries this now, and the painter hears it from the server like any
+      // other subscriber.
 
       const turnStarted = Date.now();
       const settled = await seam.awaitSubmission(delivered.submissionId);
-      // On the way out too: the answer entry exists now, so the painter can finish the
-      // placeholder in place immediately rather than a tick later.
-      painter?.wake();
       const turnMs = Date.now() - turnStarted;
 
       if (settled.status !== "done" || settled.text === "") {
@@ -665,10 +661,6 @@ async function main(): Promise<void> {
       painter = new Painter({
         surface: "gchat",
         ledger,
-        // Hold a subscription only for threads that have been touched recently: one connection
-        // per conversation is cheap, 127 of them is a choice not to make. Dormant threads are
-        // still discovered by the tick, which is the difference between watched and known.
-        watchWithinMs: config.ledgerActiveWithinMs,
         // Every conversation that lives in Chat, and nothing else: a web-only
         // conversation has no thread for this bridge to keep up.
         owns: () => true,
@@ -687,6 +679,32 @@ async function main(): Promise<void> {
         // rather than polled, and it is the shape the extracted bridge will have.
         ...(config.viewMode === "stream"
           ? {
+              // One activity stream for every conversation this bridge serves — the chat bridge's
+              // shape. It is what tells the painter a turn started in a thread it is not watching,
+              // which is the job the sweep used to do.
+              activity: (handlers: { started(id: number): void; settled(id: number): void }) => {
+                const ladder = new ViewLadder({
+                  source: httpActivitySource({
+                    baseUrl: config.selfUrl === "" ? `http://127.0.0.1:${config.healthPort}` : config.selfUrl,
+                    ...(config.webToken ? { token: config.webToken } : {}),
+                  }),
+                  onView: (event) => {
+                    const activity = event as { conversationId?: unknown; kind?: unknown };
+                    if (typeof activity.conversationId !== "number") return;
+                    if (activity.kind === "started") handlers.started(activity.conversationId);
+                    else if (activity.kind === "settled") handlers.settled(activity.conversationId);
+                  },
+                  // Degraded: the sweep comes back, which is §18's fallback and the only polling
+                  // left in the healthy path's absence.
+                  poll: async () => {
+                    await painter?.tick();
+                  },
+                  heartbeatMs: 15_000,
+                  onMode: (mode) => logger.info(`[paint] activity ${mode}`),
+                });
+                void ladder.run();
+                return { detach: () => ladder.stop() };
+              },
               watch: (
                 conversationId: number,
                 handlers: { frame(projected: unknown): void; settled(): void },
@@ -798,17 +816,17 @@ async function main(): Promise<void> {
           },
         },
       });
-      // The interval is the *fallback*: it catches a turn this process did not hear
-      // about (a web message, a resume after a restart). Anything the handler knows
-      // about arrives via `wake()` and is painted immediately.
+      // The interval is the fallback for a deployment with no activity stream: it catches a
+      // turn nothing announced (a web message, a resume after a restart).
       const instance = painter;
-      // The interval is the *sweep*, not the delivery path: with a subscription in place a
-      // conversation's turns are pushed and its answers posted on the settle edge, so the sweep
-      // only reads threads nobody is watching. Slow is right; in-process mode, which has no
-      // subscriptions, keeps the faster cadence because the sweep is its mechanism.
-      const sweepMs = config.viewMode === "stream" ? 60_000 : Math.min(config.ledgerIntervalMs, 15_000);
-      paintTimer = setInterval(() => void instance.tick(), sweepMs);
-      paintTimer.unref();
+      // With an activity stream there is no timer at all: turns are announced, and the ladder
+      // polls the sweep only while the stream is degraded. In-process mode has no stream to
+      // degrade, so there the sweep is the mechanism and keeps its interval.
+      if (config.viewMode !== "stream") {
+        paintTimer = setInterval(() => void instance.tick(), Math.min(config.ledgerIntervalMs, 15_000));
+        paintTimer.unref();
+      }
+      instance.start();
       void instance.tick();
     }
   }

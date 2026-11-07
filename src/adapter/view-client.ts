@@ -64,14 +64,28 @@ export function httpViewSource(options: {
   conversationId: number;
   token?: string;
 }): ViewSource {
+  return sseSource(`${options.baseUrl.replace(/\/$/, "")}/v1/conversations/${options.conversationId}/view`, options.token);
+}
+
+/**
+ * Activity: the server's account of turns starting and settling.
+ *
+ * Unfiltered on purpose for the chat bridge — it serves every thread it is bound to and wants to
+ * hear about all of them. The `events` it yields are hints, so a caller does not repaint from
+ * them; it goes and reads.
+ */
+export function httpActivitySource(options: { baseUrl: string; token?: string; conversationId?: number }): ViewSource {
+  const suffix = options.conversationId === undefined ? "" : `?conversation=${options.conversationId}`;
+  return sseSource(`${options.baseUrl.replace(/\/$/, "")}/v1/activity${suffix}`, options.token);
+}
+
+/** The SSE reader both sources share: frames and heartbeats, nothing else. */
+function sseSource(url: string, token: string | undefined): ViewSource {
   return {
     async open(onFrame, signal) {
       const headers: Record<string, string> = { Accept: "text/event-stream" };
-      if (options.token) headers.Authorization = `Bearer ${options.token}`;
-      const response = await fetch(
-        `${options.baseUrl.replace(/\/$/, "")}/v1/conversations/${options.conversationId}/view`,
-        { headers, signal },
-      );
+      if (token) headers.Authorization = `Bearer ${token}`;
+      const response = await fetch(url, { headers, signal });
       if (!response.ok) throw new Error(`view stream: HTTP ${response.status}`);
       if (!response.body) throw new Error("view stream: no body");
       const reader = response.body.getReader();
@@ -92,7 +106,7 @@ export function httpViewSource(options: {
             buffer = buffer.slice(boundary + 2);
             const event = /^event: (.*)$/m.exec(block)?.[1] ?? "message";
             const data = /^data: (.*)$/m.exec(block)?.[1];
-            if (data !== undefined && (event === "view" || event === "heartbeat")) {
+            if (data !== undefined && (event === "view" || event === "heartbeat" || event === "activity")) {
               let parsed: unknown;
               try {
                 parsed = JSON.parse(data) as unknown;
@@ -114,6 +128,9 @@ export function httpViewSource(options: {
 }
 
 /** A subscription as the ladder sees it: open it, get told about closes. */
+/** What an SSE stream can carry: the view of a turn, the server's activity, or proof of life. */
+export type StreamKind = "view" | "activity" | "heartbeat";
+
 export interface ViewSource {
   /**
    * Subscribe and call `onFrame` for every frame.
@@ -122,7 +139,7 @@ export interface ViewSource {
    * ignores the abort would make `stop()` wait for a connection that may never speak
    * again, which is the exact failure the ladder exists to recover from.
    */
-  open(onFrame: (kind: "view" | "heartbeat", data: unknown) => void, signal: AbortSignal): Promise<void>;
+  open(onFrame: (kind: StreamKind, data: unknown) => void, signal: AbortSignal): Promise<void>;
 }
 
 export interface LadderDeps {

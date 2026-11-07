@@ -119,7 +119,17 @@ export interface PainterDeps {
   busy(conversationId: number): Promise<boolean>;
   surfaceClient: PaintSurface;
   /**
-   * Hold a live subscription for this conversation and report what the view says.
+   * Subscribe to the server's activity, for every conversation this painter owns.
+   *
+   * This is what replaces "ask every minute": the server says when a turn starts and settles, so
+   * the painter opens a view for the *turn* rather than holding one per conversation. Optional —
+   * a deployment without it falls back to the sweep, which is what in-process mode does.
+   */
+  activity?(handlers: { started(conversationId: number): void; settled(conversationId: number): void }):
+    | { detach(): void }
+    | undefined;
+  /**
+   * Open a live view for one turn, and report what it says.
    *
    * This is what makes the tick a *fallback* rather than the mechanism: with a subscription
    * the start of a turn is pushed too (a browser message starts one with no local hint), and
@@ -137,15 +147,6 @@ export interface PainterDeps {
       settled(): void;
     },
   ): { detach(): void } | undefined;
-  /**
-   * Hold a subscription only for conversations touched within this window.
-   *
-   * A subscription per conversation is cheap individually and not cheap 127 times, and a
-   * conversation nobody has touched for a day cannot be mid-turn. Dormant threads are still
-   * *discovered* — by the tick — they just are not held open, which is the difference between
-   * "watched" and "known".
-   */
-  watchWithinMs?: number;
   /** How much history one look may read before calling the position unreachable. */
   pageSize?: number;
   maxPages?: number;
@@ -171,8 +172,9 @@ interface Open {
 
 export class Painter {
   private open = new Map<number, Open>();
-  /** One subscription per conversation, held across turns — the push half of the design. */
+  /** Open views, one per *running turn* — never held between turns. */
   private watching = new Map<number, { detach(): void }>();
+  private activity: { detach(): void } | undefined;
   /**
    * Opens in progress, by conversation.
    *
@@ -186,31 +188,8 @@ export class Painter {
   private summary: PaintSummary = { painted: 0, streamed: 0, posted: 0, failed: 0, adopted: 0 };
   /** Serialises ticks. Two at once could both see one unposted answer and post it twice. */
   private chain: Promise<unknown> = Promise.resolve();
-  private wakeTimer: NodeJS.Timeout | undefined;
 
   constructor(private deps: PainterDeps) {}
-
-  /**
-   * Ask for a tick soon, because something just happened.
-   *
-   * The timer is not the only way a turn is noticed — it is the *fallback*. Whoever
-   * knows that a turn started or settled (the adapter that submitted it, in this
-   * process) says so, and the painter looks immediately instead of at the next tick.
-   * Polling alone would put up to a tick of latency on both edges: a placeholder that
-   * appears fifteen seconds after the message, and a finished answer that sits on the
-   * cursor for the same again.
-   *
-   * Coalesced on a short timer rather than run inline, so a burst of events is one
-   * pass over the conversations, and so a caller never waits on painting.
-   */
-  wake(delayMs = 250): void {
-    if (this.wakeTimer) return;
-    this.wakeTimer = setTimeout(() => {
-      this.wakeTimer = undefined;
-      void this.tick();
-    }, delayMs);
-    this.wakeTimer.unref?.();
-  }
 
   /**
    * Look at one conversation now.
@@ -270,20 +249,12 @@ export class Painter {
       return summary;
     }
 
-    const active = new Set<number>();
-    for (const { conversationId, lastActivityAt } of conversations) {
+    for (const { conversationId } of conversations) {
       if (!this.deps.owns(conversationId)) continue;
-      const within = this.deps.watchWithinMs;
-      const recently = lastActivityAt !== undefined && (within === undefined || Date.now() - lastActivityAt <= within);
-      if (recently) {
-        active.add(conversationId);
-        if (await this.ensureWatching(conversationId)) {
-          // Subscribed: its turns are pushed and its answers posted on the settle edge, so the
-          // sweep has nothing to discover here. This is the reduction the whole subscription
-          // work was for — the tick now only reads what nobody is watching.
-          continue;
-        }
-      }
+      // With activity, a turn is announced and a live conversation needs nothing from the sweep.
+      // Without it — in-process mode, or a degraded stream — the sweep *is* the mechanism, and
+      // this loop is how a dormant thread gets noticed at all.
+      if (this.deps.activity !== undefined && this.deps.watch !== undefined) continue;
       const position = this.deps.ledger.get(conversationId);
       if (!position) {
         // No position yet. The painter adopts for itself rather than deferring to the
@@ -312,13 +283,6 @@ export class Painter {
         this.log(`[paint] conversation ${conversationId}: ${(error as Error).message}`);
       }
     }
-    // Anything no longer active loses its subscription: held open for a conversation nobody
-    // is talking in is a connection doing nothing, and 127 of them is a reason not to.
-    for (const [conversationId, watcher] of this.watching) {
-      if (active.has(conversationId)) continue;
-      watcher.detach();
-      this.watching.delete(conversationId);
-    }
     this.summary = summary;
     return summary;
   }
@@ -337,6 +301,73 @@ export class Painter {
    * Idempotent and cheap to call every tick: a watcher that is already there is left alone,
    * so this is "make sure", not "open another".
    */
+  /**
+   * Subscribe to activity, once.
+   *
+   * The painter's push half: `started` opens a view for that turn, `settled` reads its answer.
+   * Idempotent, so a caller cannot end up with two subscriptions.
+   */
+  start(): void {
+    if (this.activity !== undefined || !this.deps.activity) return;
+    const handle = this.deps.activity({
+      started: (conversationId) => void this.beginTurn(conversationId),
+      settled: (conversationId) => {
+        // Read the answer, then let the view go: the subscription exists for one turn.
+        void this.poke(conversationId).finally(() => this.endTurn(conversationId));
+      },
+    });
+    if (handle) this.activity = handle;
+  }
+
+  /**
+   * A turn started: make sure there is a position, and open the view that paints it.
+   *
+   * Adoption happens here rather than on a sweep because a view can arrive with the first frame
+   * of a turn in a thread this bridge has never seen — and painting without a position would
+   * leave the answer unpostable.
+   */
+  private async beginTurn(conversationId: number): Promise<void> {
+    if (!this.deps.owns(conversationId)) return;
+    await this.ensurePosition(conversationId);
+    if (this.watching.has(conversationId)) return;
+    const watch = this.deps.watch;
+    if (!watch) {
+      // No per-turn view available: the stream is opened lazily by the sweep's fallback path.
+      return;
+    }
+    const handle = watch(conversationId, {
+      frame: (projected) => {
+        void this.paintFrame(conversationId, projected);
+      },
+      settled: () => {
+        void this.poke(conversationId).finally(() => this.endTurn(conversationId));
+      },
+    });
+    if (handle) this.watching.set(conversationId, handle);
+  }
+
+  /** The turn is over: no view, and no stream waiting to be finished. */
+  private endTurn(conversationId: number): void {
+    const watcher = this.watching.get(conversationId);
+    if (watcher) {
+      watcher.detach();
+      this.watching.delete(conversationId);
+    }
+  }
+
+  /** Take a position at the head if this conversation has none. */
+  private async ensurePosition(conversationId: number): Promise<void> {
+    if (this.deps.ledger.get(conversationId)) return;
+    const window = await entriesAfter(this.deps, conversationId, 0, this.pages);
+    this.deps.ledger.adopt(conversationId, window.newest, this.deps.ledger.recovered ? "lost-position" : "new");
+    await this.deps.ledger.save();
+    this.log(
+      `[paint] ${this.deps.address?.(conversationId) ?? `conversation ${conversationId}`}: ` +
+        `adopted at entry ${window.newest} when the turn started`,
+    );
+  }
+
+  /** The old name, kept for the sweep's in-process fallback: open a view if the surface can. */
   private async ensureWatching(conversationId: number): Promise<boolean> {
     if (this.watching.has(conversationId)) return true;
     const watch = this.deps.watch;
@@ -532,10 +563,8 @@ export class Painter {
 
   /** Detach everything; called on shutdown so a restart leaves no half-open view. */
   async close(): Promise<void> {
-    if (this.wakeTimer) clearTimeout(this.wakeTimer);
     for (const [, watcher] of this.watching) watcher.detach();
     this.watching.clear();
-    this.wakeTimer = undefined;
     for (const [, open] of this.open) {
       open.detach();
     }
