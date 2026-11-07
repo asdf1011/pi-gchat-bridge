@@ -45,7 +45,9 @@ import {
   selectionFromOffsets,
 } from "../durable/comments.js";
 import { filesChangedSince } from "../durable/observed-files.js";
+import { armSteerWatch } from "../durable/steer-watch.js";
 import type { BridgeHost } from "../durable/host.js";
+import { logger } from "../logger.js";
 import { projectView, type ProjectedView, type ViewLike } from "./projection.js";
 import type {
   AdapterEntry,
@@ -74,6 +76,14 @@ export interface InProcessOptions {
   roots: readonly string[];
   /** Chord context for host calls; defaults to the host's. */
   context?: Context;
+  /**
+   * How long a queued steer may wait behind a running tool before the tool is
+   * aborted so the steer can land, in ms. See `durable/steer-watch.ts` for why the
+   * harness cannot answer this itself. 0 disables the watch, which is the right
+   * default for a caller with its own bound; the bridge passes
+   * `BRIDGE_STEER_WAIT_MS` (10s unless set).
+   */
+  steerWaitMs?: number;
   /** Told when a filesystem observation fails. Observing is best-effort. */
   onObserveError?: (error: unknown) => void;
   /**
@@ -108,6 +118,9 @@ function toUserInput(content: MessageContent): UserInput {
 
 export function inProcessSessionHost(options: InProcessOptions): SessionHost {
   const { host } = options;
+  // 0 = no cap: whoever built the seam decided unbounded tool runs are their
+  // problem. The bridge passes `config.steerWaitMs`, so the cap is on there.
+  const steerWaitMs = options.steerWaitMs ?? 0;
 
   // The seam takes an `AbortSignal`; the harness takes a chord context. Until
   // the harness accepts a signal, it is accepted at the boundary and unused here,
@@ -543,15 +556,45 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
       // Before the turn, not after: the walk looks for files newer than this, so
       // the clock has to be read before the first command can touch anything.
       const startedAt = Date.now();
+      const whenBusy = request.whenBusy ?? "steer";
       const submission = await conversation.submit(
         {
           type: "input",
           content: toUserInput(request.content),
-          whenBusy: request.whenBusy ?? "steer",
+          whenBusy,
           ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
         },
         host.context,
       );
+      // A steer is placed at the next boundary, and the boundary waits for the
+      // round's tools. Arm the cap here, at admission, so a tool that never returns
+      // costs ten seconds of waiting rather than a wedged conversation. Read the
+      // status first, off the reply path: a message that was placed at once (an
+      // idle conversation, or one that was already idle) has nothing to watch.
+      if (whenBusy === "steer" && steerWaitMs > 0) {
+        const target = { conversationId, submissionId: submission.id as unknown as number };
+        void submission
+          .status(host.context)
+          .then((record) => {
+            if (record.status !== "queued") return;
+            armSteerWatch(
+              {
+                steerWaitMs,
+                isWaiting: async () => (await submission.status(host.context)).status === "queued",
+                runningTools: (id) => host.runningToolTasks(id),
+                abortTask: (taskId) => host.abortTask(taskId),
+                log: (message) => logger.info(message),
+              },
+              target,
+            );
+          })
+          .catch((error: unknown) => {
+            logger.warn(
+              `[steer] could not arm the watch for submission ${target.submissionId}: ` +
+                `${(error as Error).message}`,
+            );
+          });
+      }
       // Which surface this came from, stamped against the entry the submission
       // created. `recordOrigin` finds that entry itself (it is the newest user entry
       // with no stamp), so the rule about how a submission becomes an entry stays in

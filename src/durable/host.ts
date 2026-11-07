@@ -21,12 +21,14 @@ import {
   configure,
   createRegistry,
   Harness,
+  LiveDoc,
   type AgentChange,
   type AgentState,
   type Conversation,
   type ConversationId,
   type ModelRef,
   type Settings,
+  type TaskId,
 } from "@earendil-works/pi-durable";
 
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
@@ -749,6 +751,44 @@ export class BridgeHost {
     if (!conversation) return false;
     await conversation.abort(this.context);
     return true;
+  }
+
+  /**
+   * Tool tasks of a conversation's current tool round that are still running.
+   *
+   * Read from `pi.live`, which is the round's presentation: a slot with a `taskId`
+   * and a status other than `done` is a call the round is still waiting for, and
+   * `finishToolRound` waits for all of them. Nested calls are not listed — they
+   * belong to their parent, so ending the parent ends them.
+   *
+   * A `snapshot` rather than a view mount: this is one committed read on a timer's
+   * path, and a mount that was opened and forgotten is the leak the session host's
+   * notes warn about.
+   */
+  async runningToolTasks(conversationId: number): Promise<number[]> {
+    const live = await this.harness.snapshot(
+      LiveDoc,
+      conversationId as ConversationId,
+      this.context,
+    );
+    return (live?.tools ?? []).flatMap((slot) =>
+      slot.taskId !== undefined && slot.status !== "done"
+        ? [slot.taskId as unknown as number]
+        : [],
+    );
+  }
+
+  /**
+   * Abort one tool task, leaving the conversation's queued input alone.
+   *
+   * `abort()` above stops the whole conversation, and a stop withdraws queued
+   * inputs and settles them `unanswered`. A caller that only wants a stuck tool to
+   * end — a steer waiting behind it, say — must not take the message down with it.
+   * The tool settles as `aborted`, which the model reads as an ordinary result, and
+   * the round's boundary then places what was queued.
+   */
+  async abortTask(taskId: number): Promise<"marked" | "terminal"> {
+    return this.harness.abortTask(taskId as unknown as TaskId, this.context);
   }
 
   /** Store-wide token and cost totals. */

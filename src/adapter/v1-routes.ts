@@ -48,6 +48,14 @@ export interface V1Deps {
   conversations(): Promise<readonly ConversationAddress[]>;
   /** Bearer token required for writes. Empty disables the check (tailnet-only). */
   token?: string;
+  /**
+   * Cadence of the view stream's heartbeat, in ms.
+   *
+   * Fixed, and independent of activity, on purpose (§18): the *absence* of frames is the
+   * signal that a stream has died, so a heartbeat that only fires when things are quiet
+   * cannot be told apart from a busy conversation on a dead connection.
+   */
+  heartbeatMs?: number;
 }
 
 export interface EntryView {
@@ -127,6 +135,56 @@ export async function handleV1(
         }),
       );
     json(res, 200, { conversationId, since, newest: window.newest, entries: after });
+    return true;
+  }
+
+  // --- The live view: what a running turn looks like, pushed --------------------
+  //
+  // Server-Sent Events rather than a socket: the pane already speaks it, a bridge needs
+  // nothing more, and the whole state of a subscription is one HTTP response.
+  //
+  // Two event kinds and no more. `view` is the whole projection (a dropped frame is
+  // harmless because the next one is complete). `heartbeat` is the fixed-cadence proof of
+  // life — a client that stops seeing *either* should assume the stream is gone, which is
+  // why the client's silence timer resets on any frame rather than only on heartbeats.
+  const view = /^\/v1\/conversations\/(\d+)\/view$/.exec(url.pathname);
+  if (view && req.method === "GET") {
+    const conversationId = Number(view[1]);
+    const probe = await deps.seam.history(conversationId, { limit: 1, offset: 0 });
+    if (probe === undefined) {
+      json(res, 404, { ok: false, error: `no such conversation: ${conversationId}` });
+      return true;
+    }
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      // Proxies that buffer would turn "live" into "at the end of the turn".
+      "X-Accel-Buffering": "no",
+    });
+    const send = (event: string, data: unknown): void => {
+      if (res.writableEnded) return;
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+
+    // The snapshot first, so a client that attaches mid-turn paints immediately rather
+    // than waiting for the next change.
+    const handle = await deps.seam.attach(conversationId, (projected) => send("view", projected));
+    if (!handle) {
+      send("error", { error: `no such conversation: ${conversationId}` });
+      res.end();
+      return true;
+    }
+    send("view", handle.snapshot);
+
+    const beat = setInterval(() => send("heartbeat", { at: Date.now() }), deps.heartbeatMs ?? 15_000);
+    beat.unref?.();
+    const stop = (): void => {
+      clearInterval(beat);
+      handle.detach();
+    };
+    req.on("close", stop);
+    res.on("close", stop);
     return true;
   }
 

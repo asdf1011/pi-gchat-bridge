@@ -148,6 +148,10 @@ async function main(): Promise<void> {
         // point at.
         artifactRoots(config.cwd, getAgentDir(), [config.artifactsDir]),
     artifactRepoFor,
+    // A steer is placed at the round's boundary, so a tool that never returns holds
+    // it forever. This is the cap the SDK bridge had as `redirect()`; see
+    // `durable/steer-watch.ts`. `BRIDGE_STEER_WAIT_MS`, 10s unless set.
+    steerWaitMs: config.steerWaitMs,
     onObserveError: (error) => logger.warn(`[artifacts] observation failed: ${String(error)}`),
   });
 
