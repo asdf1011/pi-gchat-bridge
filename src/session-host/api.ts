@@ -615,25 +615,6 @@ export interface SessionHost {
     options?: { signal?: AbortSignal },
   ): Promise<{ userText: string; assistantText: string } | undefined>;
 
-  /**
-   * Show a turn that started on another surface in the Chat side of the
-   * conversation, so neither surface is missing part of the conversation.
-   *
-   * `prompt` is what the person typed (`henry (webui): …`, or a review comment),
-   * quoted above the answer in the same message: a separate message about the
-   * reader's own words would notify them about what they just typed, and a silent
-   * one cannot be posted into an existing thread (see `durable/mirror.ts`).
-   *
-   * False when there is nothing to do, which is not an error: no Chat side at all
-   * (a web-only conversation), or a Chat stream already posting this turn.
-   */
-  mirrorTurn(
-    conversationId: number,
-    submissionId: number,
-    prompt: string,
-    options?: { signal?: AbortSignal },
-  ): Promise<boolean>;
-
   /** Compact the conversation's context now. Instructions are free text. */
   compact(conversationId: number, instructions?: string, options?: { signal?: AbortSignal }): Promise<void>;
 

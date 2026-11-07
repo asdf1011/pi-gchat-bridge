@@ -35,8 +35,24 @@
 import type { EntryRef, MessageLike } from "./delivery-pass.js";
 import { entriesAfter } from "./delivery-pass.js";
 import type { Ledger } from "./ledger.js";
-import { quotePrompt } from "./mirror.js";
+
 import { logger } from "../logger.js";
+
+/**
+ * The prompt as a Chat block quote, so the answer reads as a reply to it.
+ *
+ * Quote markers on every line, because Chat's Markdown ends a block quote at the first
+ * unmarked line — a two-paragraph paste would otherwise have its second paragraph read
+ * like the start of the answer.
+ */
+export function quotePrompt(prompt: string): string {
+  const trimmed = prompt.trim();
+  if (!trimmed) return "";
+  return trimmed
+    .split("\n")
+    .map((line) => (line.trim() === "" ? ">" : `> ${line}`))
+    .join("\n");
+}
 
 /**
  * What the painter needs from a surface: a live stream per conversation, and a poster.

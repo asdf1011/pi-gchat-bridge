@@ -89,15 +89,6 @@ export function serveSessionHost(seam: SessionHost): Host {
     resolve: async ({ name }) => (await seam.resolve(name)) ?? null,
     getOrCreate: async ({ name, agent }) => seam.getOrCreate(name, agent),
     has: async ({ conversation }) => (await seam.snapshot(conversation)) !== undefined,
-    mirrorTurn: async ({
-      conversation,
-      submission,
-      prompt,
-    }: {
-      conversation: number;
-      submission: number;
-      prompt: string;
-    }) => seam.mirrorTurn(conversation, submission, prompt),
   }));
 
   // The factory is synchronous by contract; the wiring it needs is asynchronous,
@@ -332,13 +323,6 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
       } finally {
         ref.release();
       }
-    },
-
-    mirrorTurn: async (conversationId: number, submissionId: number, prompt: string) => {
-      const root = await session();
-      return host.root((ctx) =>
-        root.mirrorTurn({ conversation: conversationId, submission: submissionId, prompt }, ctx),
-      );
     },
 
     image: async (conversationId: number, entryId: number, index: number) => {

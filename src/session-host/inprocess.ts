@@ -70,13 +70,6 @@ import type {
 
 export interface InProcessOptions {
   host: BridgeHost;
-  /**
-   * Show a turn started on another surface in the Chat side of a conversation.
-   *
-   * Injected rather than implemented here: the Chat client is the session host's
-   * business, and an adapter must never hold those credentials.
-   */
-  mirrorTurn?: (conversationId: number, submissionId: number, prompt: string) => Promise<boolean>;
   /** Directories an artifact path may resolve under. */
   roots: readonly string[];
   /** Chord context for host calls; defaults to the host's. */
@@ -539,11 +532,6 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
 
     async firstTurn(conversationId: number): Promise<{ userText: string; assistantText: string } | undefined> {
       return host.firstTurn(conversationId);
-    },
-
-    async mirrorTurn(conversationId: number, submissionId: number, prompt: string): Promise<boolean> {
-      if (!options.mirrorTurn) return false;
-      return options.mirrorTurn(conversationId, submissionId, prompt);
     },
 
     async compact(conversationId: number, instructions?: string): Promise<void> {

@@ -26,7 +26,7 @@ import {
   type PastedImage,
 } from "./web.js";
 import { renderMarkdown } from "./markdown.js";
-import { anchorAddress, chatReplyText, chatText, MAX_COMMENT_CHARS, modelText } from "../durable/comments.js";
+import { anchorAddress, MAX_COMMENT_CHARS, modelText } from "../durable/comments.js";
 import type { SessionHost } from "../session-host/api.js";
 import { logger } from "../logger.js";
 
@@ -415,23 +415,11 @@ export async function handleWebRequest(
     }
     const result = await webSubmit(handleOptions, Number(send[1]), text, "steer", images);
     if (result.ok) {
-      // Chat cannot show this as the person who typed it, but the conversation
-      // has to read the same on both surfaces: the prompt rides into Chat with
-      // the answer, quoted above it, so there is no message missing from the
-      // thread and no notification about words the person typed themselves
-      // (`durable/mirror.ts`). Failure is logged and ignored — a missing mirror
-      // must never fail the submission.
-      const speaker = (who.email ?? "someone").split("@")[0];
-      // Truncated: a long paste would be a Chat API error, and the notice is a
-      // signpost to the conversation, not a copy of it. "attached", not
-      // "pasted": the image may have come from a file picker or a drop.
-      const attachment = images.length === 0 ? "" : ` [${images.length} image${images.length === 1 ? "" : "s"} attached]`;
-      const notice = (text.length > 1200 ? `${text.slice(0, 1200)}…` : text) + attachment;
-      void seam
-        .mirrorTurn(Number(send[1]), result.submissionId, `${speaker} (webui): ${notice}`)
-        .catch((error: unknown) => log.info(`[web] mirror failed: ${(error as Error).message}`));
-      // Who asked, and which conversation: this bridge can run shell commands,
-      // so "who submitted this" belongs in the log.
+      // Nothing is posted here any more. Chat learns about this turn the way it learns
+      // about every turn: the painter reads the entry past its cursor and posts the
+      // answer, quoting this prompt because the entry carries another surface's origin.
+      // A second poster would be a second message, and "who submitted this" belongs in
+      // the log either way.
       log.info(
         `[web] ${who.email ?? "anonymous"}: submitted to conversation ${send[1]} (submission ${result.submissionId})`,
       );
@@ -575,13 +563,9 @@ export async function handleWebRequest(
     // A Chat reader cannot see the web pane, so the thread is told what is being
     // reviewed — with the address as a link into the viewer — and then the answer
     // follows it, in one message (see the submit path above).
-    void seam
-      .mirrorTurn(
-        conversationId,
-        result.submissionId,
-        chatText({ ...stored, author: speaker }, { url: viewerUrl(options, conversationId, stored), speaker }),
-      )
-      .catch((error: unknown) => log.info(`[web] mirror failed: ${(error as Error).message}`));
+    // Chat learns about this comment the same way it learns about any other turn: the
+    // painter reads the entry and posts the answer, quoting the address this prompt
+    // carries. There is no separate "tell Chat" step any more.
     log.info(`[web] ${who.email ?? "anonymous"}: commented on ${parsed.file} (submission ${result.submissionId})`);
 
     res.writeHead(201, { "Content-Type": "application/json" });
@@ -638,17 +622,8 @@ export async function handleWebRequest(
       return true;
     }
     await seam.noteCommentSubmission(conversationId, commentId, result.submissionId).catch(() => {});
-    // Mirrored like every other submission. It used to be missing here, which made
-    // a review reply the one kind of message Chat never saw: the thread showed the
-    // agent answering a reply that was only in the drawer.
-    const speaker = (who.email ?? "someone").split("@")[0]!;
-    void seam
-      .mirrorTurn(
-        conversationId,
-        result.submissionId,
-        chatReplyText(stored, text.trim(), { url: viewerUrl(options, conversationId, stored), speaker }),
-      )
-      .catch((error: unknown) => log.info(`[web] mirror failed: ${(error as Error).message}`));
+    // Mirrored by the painter like any other turn. It used to be the one kind of message
+    // Chat never saw, because it was the one submission nobody remembered to mirror.
     res.writeHead(202, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true, submissionId: result.submissionId }));
     return true;
@@ -706,27 +681,6 @@ export async function handleWebRequest(
   }
 
   return false;
-}
-
-/**
- * A link into the viewer for one comment's address.
- *
- * Empty when `artifactsBaseUrl` is unset — the side-panel deployment has no origin
- * to link to, and a plain label still says which line is being discussed. The
- * anchor suffix is the address's own tail (`#L3C126-L3C131`), sliced rather than
- * rebuilt so a person reading Chat links to exactly what a person reading the
- * drawer sees.
- */
-function viewerUrl(
-  options: { artifactsBaseUrl?: string },
-  conversationId: number,
-  comment: { file: string; anchors: readonly { originalLine: number }[]; charStart?: number; charEnd?: number },
-): string {
-  const base = (options.artifactsBaseUrl ?? "").replace(/\/$/, "");
-  if (base === "") return "";
-  const suffix = anchorAddress(comment).slice(comment.file.length);
-  const framePath = comment.file.split("/").map(encodeURIComponent).join("/");
-  return `${base}/c/${conversationId}/${framePath}?view=source${suffix}`;
 }
 
 /** Read a request body up to `maxBytes`; returns null when the cap is exceeded. */

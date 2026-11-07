@@ -19,7 +19,6 @@ import type { ProjectedView } from "../src/session-host/projection.js";
 
 const view: ProjectedView = { liveText: "", busy: false, lastAssistantText: "", tools: [] };
 
-const mirrored: { submissionId: number; prompt: string }[] = [];
 const submitted: unknown[] = [];
 
 function fakeSeam(
@@ -31,10 +30,6 @@ function fakeSeam(
       id === 1 && entryId === 5 && index === 0
         ? { mimeType: "image/png", data: Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString("base64") }
         : undefined,
-    mirrorTurn: async (_id: number, submissionId: number, prompt: string) => {
-      mirrored.push({ submissionId, prompt });
-      return true;
-    },
     list: async () => options.conversations ?? [],
     resolve: async () => undefined,
     snapshot: async () => view,
@@ -262,7 +257,6 @@ test("an attached image reaches the host as a content part", async () => {
   const served = await serve(fakeSeam());
   try {
     submitted.length = 0;
-    mirrored.length = 0;
     const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString("base64");
     const response = await fetch(`${served.base}/web/api/c/1/message`, {
       method: "POST",
@@ -278,11 +272,8 @@ test("an attached image reaches the host as a content part", async () => {
       { type: "text", text: "look" },
       { type: "image", data: png, mimeType: "image/png" },
     ]);
-    // And the prompt that goes into the Chat thread says an image came with it,
-    // paired with the submission whose answer follows it there.
-    assert.deepEqual(mirrored, [
-      { submissionId: 7, prompt: "someone (webui): look [1 image attached]" },
-    ]);
+    // And nothing is posted from here: the painter reads the entry past its cursor and
+    // posts the answer, quoting the prompt. A second poster would be a second message.
   } finally {
     await served.close();
   }
@@ -292,7 +283,6 @@ test("a message may carry several images, and the notice counts them", async () 
   const served = await serve(fakeSeam());
   try {
     submitted.length = 0;
-    mirrored.length = 0;
     const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString("base64");
     const response = await fetch(`${served.base}/web/api/c/1/message`, {
       method: "POST",
@@ -307,7 +297,8 @@ test("a message may carry several images, and the notice counts them", async () 
     });
     assert.equal(response.status, 202);
     assert.equal((submitted[0] as unknown[]).length, 3);
-    assert.equal(mirrored[0]?.prompt, "someone (webui): two shots [2 images attached]");
+    // The count of images is the model's business, not Chat's: the route submits, and the
+    // painter quotes whatever the entry carries when it posts the answer.
   } finally {
     await served.close();
   }
@@ -443,7 +434,6 @@ test("the conversation list and a submit still answer as before", async () => {
     assert.deepEqual(page.items.map((row) => row.chatKey), ["threads/A"]);
     assert.equal(page.more, false);
 
-    mirrored.length = 0;
     const sent = await fetch(`${served.base}/web/api/c/1/message`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -454,9 +444,7 @@ test("the conversation list and a submit still answer as before", async () => {
     // before the transcript comes back.
     assert.deepEqual(await sent.json(), { ok: true, submissionId: 7, html: "<p>hello</p>" });
 
-    // The Chat thread learns who spoke and what they said — carried with the
-    // submission, so the answer is posted under it rather than alongside.
-    assert.deepEqual(mirrored, [{ submissionId: 7, prompt: "someone (webui): hello" }]);
+    // The route's whole job is the submission; Chat learns the rest from the entry.
 
     const missing = await fetch(`${served.base}/web/api/c/9/message`, {
       method: "POST",
@@ -564,7 +552,6 @@ test("a superseded comment travels with the place it moved to", async () => {
 
 test("posting a comment becomes one turn and one Chat prompt", async () => {
   submitted.length = 0;
-  mirrored.length = 0;
   // The comment comes back from the store, because the anchors are the host's
   // business: the route sends a selection, never an anchor.
   const seam = fakeSeam({ comments: [storedComment] });
@@ -593,22 +580,16 @@ test("posting a comment becomes one turn and one Chat prompt", async () => {
     assert.match(sent, /> pumpkin/);
     assert.match(sent, /can we use vegetable stock\?|can we change the soup/);
 
-    // And the prompt reaches Chat with the submission, with the address linked
-    // into the viewer.
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    assert.equal(mirrored.length, 1);
-    assert.equal(typeof mirrored[0]!.submissionId, "number");
-    assert.match(mirrored[0]!.prompt, /\*\*someone\*\* commented on/);
+    // Chat is not told separately: the painter reads the entry and quotes the address.
   } finally {
     await served.close();
   }
 });
 
-test("a reply in a comment thread is mirrored, so Chat is not missing a turn", async () => {
+test("a reply in a comment thread becomes one queued turn, and no second post", async () => {
   // Review replies used to submit a turn and tell nobody in Chat: the thread
   // showed the agent answering something that only existed in the drawer.
   submitted.length = 0;
-  mirrored.length = 0;
   const served = await serve(fakeSeam({ comments: [storedComment] }));
   try {
     const response = await fetch(`${served.base}/api/c/1/comments/c1/reply`, {
@@ -618,15 +599,11 @@ test("a reply in a comment thread is mirrored, so Chat is not missing a turn", a
     });
     assert.equal(response.status, 202);
 
-    // One turn, queued behind whatever is running rather than steering it.
+    // One turn, queued behind whatever is running rather than steering it. Mirroring is
+    // the painter's job now, so this asserts the submission and nothing else.
     assert.equal(submitted.length, 1);
     assert.match(String(submitted[0]), /vegetable stock|can we change the soup/);
-
-    assert.equal(mirrored.length, 1);
-    assert.equal(typeof mirrored[0]!.submissionId, "number");
-    // Worded as a reply on the same address, not as a second review note.
-    assert.match(mirrored[0]!.prompt, /\*\*someone\*\* replied on soup\.mjs#L2C15-L2C21/);
-    assert.match(mirrored[0]!.prompt, /it is reachable from the cron path$/);
+    assert.match(String(submitted[0]), /it is reachable from the cron path/);
   } finally {
     await served.close();
   }

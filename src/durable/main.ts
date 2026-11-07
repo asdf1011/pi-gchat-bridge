@@ -31,10 +31,9 @@ import { attachViewSink } from "../adapter/view-sink.js";
 import { DurableRouter } from "../adapter/router.js";
 import { runDurableCommand } from "../adapter/commands.js";
 import { defaultSettings } from "../adapter/commands.js";
-import { mirrorTurn } from "./mirror.js";
 import { runPass } from "./delivery-pass.js";
 import { Painter } from "./painter.js";
-import { chatTarget } from "./mirror.js";
+import { chatTarget } from "../session-key.js";
 import { splitMessage } from "../stream.js";
 import { reconcile, type ReconcileState } from "./reconcile.js";
 import { Ledger } from "./ledger.js";
@@ -129,33 +128,6 @@ async function main(): Promise<void> {
     );
   };
 
-  const mirrorTurnIntoChat = (
-    conversationId: number,
-    submissionId: number,
-    prompt: string,
-  ): Promise<boolean> =>
-    mirrorTurn(
-      {
-        client,
-        chatKeyFor: async (id) => {
-          const bindings = await host.bindings();
-          return Object.entries(bindings.byChatKey).find(([, binding]) => binding.conversationId === id)?.[0];
-        },
-        awaitSubmission: (id) => seam.awaitSubmission(id),
-        claimAnswer: (key, answerId) => seam.claimAnswer(key, answerId),
-        releaseAnswer: (key, answerId) => seam.releaseAnswer(key, answerId),
-        // A Chat message steered from the browser is watched from both sides; the
-        // handler's stream posts the answer, so there is nothing left to mirror.
-        isPainting: (key) => markers.has(key),
-        // The same relocation the Chat steer path does: the reply now covers the
-        // steering message too, so its placeholder has to move below it.
-        relocate: async (key) => markers.get(key)?.relocate(),
-      },
-      conversationId,
-      submissionId,
-      prompt,
-    );
-
   // Created lazily, on the first turn of a conversation, rather than up front:
   // most conversations never write an artifact, and an empty repository per
   // conversation is a directory tree nobody asked for. `initArtifactRepo` is
@@ -189,7 +161,6 @@ async function main(): Promise<void> {
         // written there are unservable and the comment feature has nothing to
         // point at.
         artifactRoots(config.cwd, getAgentDir(), [config.artifactsDir]),
-    mirrorTurn: mirrorTurnIntoChat,
     artifactRepoFor,
     onObserveError: (error) => logger.warn(`[artifacts] observation failed: ${String(error)}`),
   });

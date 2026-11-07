@@ -153,16 +153,18 @@ answers with `awaitSubmission` instead of copying the transcript.
 
 **The agent's replies are plumbing, and that is enforced by construction.** The
 agent has one tool, `comment_reply(commentId, text)`, and it writes a `replies[]`
-entry on the comment document — not a submission, not a transcript entry, and never
-a `mirrorTurn`. So its reply shows in the drawer and nowhere else: it does not
+entry on the comment document — not a submission, not a transcript entry, and never a
+transcript message. So its reply shows in the drawer and nowhere else: it does not
 reach Chat, and it cannot come back to the model as context on a later turn and
 read like something the user said.
 
 A *reviewer's* reply is the other half of that asymmetry, and it is an ordinary
-submission (`whenBusy: "followUp"`, mirrored into Chat like any other turn) because
-a person speaking is a message, not an annotation. Replies were once left unmirrored
-here, which made them the one kind of message Chat never saw: the thread showed the
-agent answering something only the drawer held. The conversation sees only the turn's own answer,
+submission (`whenBusy: "followUp"`) because a person speaking is a message, not an
+annotation. Nothing in this route posts to Chat: the painter reads the entry past its
+cursor and posts the answer, quoting the prompt, because the entry carries the browser
+as its origin. Replies were once left unmirrored, which made them the one kind of
+message Chat never saw — the thread showed the agent answering something only the
+drawer held. The conversation sees only the turn's own answer,
 which is what makes a Chat thread read as "here is the change, and here is why".
 
 That is why the model is told the comment id — `[comment a123dcee]` on the
