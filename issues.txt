@@ -41,6 +41,27 @@ Response: `403` (silent unsupported with `messageReplyOption`).
 | messageReplyOption, NO silent | 200, correct thread, but notifies |
 | `PATCH ...?updateMask=thread` to move a message into a thread | 400 "Unsupported path name in message field mask" — thread placement is not patchable |
 
+**Re-verified Nov 6, 2026** (another attempt, same DM space), because a web-UI
+notice was pinging the user about their own message:
+
+| Variation | Result |
+|---|---|
+| silent + `messageReplyOption=REPLY_MESSAGE_OR_FAIL` + `thread.name` | 403, same as the fallback option |
+| silent + `thread.threadKey` for a key that does **not** exist yet | 200 and silent — the thread is being *created*, so this is the top-level case in disguise |
+| silent + `thread.name` + no `messageReplyOption` | 200, but a new thread again (confirmed, not a fluke) |
+
+So the rule is narrower than "threaded": silent is refused for an *existing*
+thread, which includes joining one by `threadKey`, and any silent message opens a
+thread of its own.
+
+Consequence for the bridge (see `src/durable/mirror.ts`): a silent message always
+opens a thread, and in a DM the thread *is* the conversation key — so posting the
+prompt separately would either notify (in-thread) or capture the person's next
+message into a new thread and a new conversation (silent). Neither is acceptable,
+so the prompt is not posted separately at all: it is quoted above the answer in
+the turn's own message, which is threaded where the conversation lives and costs
+exactly one notification — the answer's, as a Chat-started turn would.
+
 **Expected:** `NOTIFICATION_TYPE_SILENT` honored for threaded messages, or an
 alternative way to create a message in a thread without notifying.
 
