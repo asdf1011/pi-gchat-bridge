@@ -26,7 +26,7 @@ import {
   type PastedImage,
 } from "./web.js";
 import { renderMarkdown } from "./markdown.js";
-import { anchorAddress, MAX_COMMENT_CHARS, modelText } from "../durable/comments.js";
+import { currentAddress, MAX_COMMENT_CHARS, modelText } from "../durable/comments.js";
 import type { SessionHost } from "../session-host/api.js";
 import { logger } from "../logger.js";
 
@@ -449,9 +449,11 @@ export async function handleWebRequest(
         comments.map((comment) => ({
           id: comment.id,
           file: comment.file,
-          // The address is formatted here, so the page and the Chat message can
-          // never disagree about how a comment is cited.
-          address: anchorAddress(comment),
+          // Formatted here, so the page and the Chat message can never disagree about how a
+          // comment is cited — and pointed at where the comment *is now*: a comment that moved
+          // three sections down was still cited as `#L121`, so its link highlighted a line nobody
+          // had commented on.
+          address: currentAddress(comment, comment.positions),
           anchors: comment.anchors,
           ...(comment.quote === undefined ? {} : { quote: comment.quote }),
           text: comment.text,

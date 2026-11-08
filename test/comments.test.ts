@@ -17,6 +17,7 @@ import {
   anchorsForSelection,
   canonicalize,
   chatReplyText,
+  currentAddress,
   chatText,
   deriveQuoteSelection,
   selectionFromOffsets,
@@ -295,4 +296,17 @@ test("canonicalisation keeps a map back to every source character", () => {
   assert.equal(text, "a b c");
   assert.equal("a **b** c"[map[2]!], "b", "the third canonical character is the b in the source");
   assert.equal(map.length, text.length);
+});
+
+test("a comment that has moved is cited where it is now", () => {
+  // The defect this fixes: a comment on line 121 of a document that grew by a section was still
+  // cited as `#L121`, so tapping its link highlighted a line nobody had commented on — while the
+  // drawer, which uses resolved positions, drew it correctly. Two answers to "where is it".
+  const anchors = [{ originalLine: 121 }];
+  const moved = { file: "notes.md", anchors, charStart: 10, charEnd: 48 };
+  assert.equal(currentAddress(moved, [142]), "notes.md#L142C10-L142C48");
+  assert.equal(currentAddress(moved, [142, 143]), "notes.md#L142-L143");
+  // Nothing resolved: fall back to where it was written rather than inventing a place.
+  assert.equal(currentAddress(moved, []), anchorAddress(moved));
+  assert.equal(currentAddress(moved, []), "notes.md#L121C10-L121C48");
 });

@@ -130,6 +130,30 @@ export function anchorAddress(comment: Pick<Printable, "file" | "anchors" | "cha
   return `${comment.file}${anchorSuffix(comment)}`;
 }
 
+/**
+ * An address that points where the comment *is now*, not where it started.
+ *
+ * `anchorAddress` is written against the line numbers the comment was made on, which is right at
+ * creation and wrong the moment a later edit shifts the file: a comment on line 121 that now sits
+ * on 142 was still cited as `#L121`, so the link a person tapped highlighted a line nobody had
+ * commented on. The resolved positions are already known at read time (`classifyComments`), so the
+ * citation follows them — and falls back to the original when nothing resolved.
+ */
+export function currentAddress(
+  comment: Pick<Printable, "file" | "anchors" | "charStart" | "charEnd">,
+  positions: readonly number[],
+): string {
+  if (positions.length === 0) return anchorAddress(comment);
+  const first = positions[0] as number;
+  const last = positions[positions.length - 1] as number;
+  const single = positions.length === 1;
+  if (single && comment.charStart !== undefined && comment.charEnd !== undefined) {
+    return `${comment.file}#L${first}C${comment.charStart}-L${last}C${comment.charEnd}`;
+  }
+  if (single) return `${comment.file}#L${first}`;
+  return `${comment.file}#L${first}-L${last}`;
+}
+
 export interface ParsedAnchor {
   lines: [number, number];
   chars?: [number, number];
