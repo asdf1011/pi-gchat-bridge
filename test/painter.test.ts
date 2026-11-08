@@ -525,3 +525,54 @@ test("a turn in a conversation never seen adopts at the head when it is announce
   assert.equal(ledger.get(1)?.adoptedReason, "new");
   await painter.close();
 });
+
+test("with activity, the periodic check reads only turns that never settled", async () => {
+  // The answer to "why any periodic work at all": not to find turns (events do that) and not to
+  // duplicate a liveness check (the heartbeat does that) — but to notice an event that arrived and
+  // was mishandled, which no heartbeat can see. In the normal case the set is empty and this costs
+  // no reads at all.
+  const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
+  ledger.adopt(1, 10, "new");
+  let reads = 0;
+  type Handlers = { started(id: number): void; settled(id: number): void };
+  let handlers: Handlers | undefined;
+  const painter = new Painter({
+    surface: "gchat",
+    ledger,
+    owns: () => true,
+    conversations: async () => [{ conversationId: 1, lastActivityAt: Date.now() }],
+    history: async () => {
+      reads += 1;
+      return [];
+    },
+    busy: async () => true,
+    surfaceClient: fakeSurface().surface,
+    activity: (h) => {
+      handlers = h;
+      return { detach() {} };
+    },
+    watch: () => ({ detach() {} }),
+    stuckAfterMs: 10,
+    log: () => {},
+  });
+
+  painter.start();
+  await painter.checkStuck();
+  assert.equal(reads, 0, "nothing in flight, so nothing to check");
+
+  handlers!.started(1);
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  const quiet = await painter.checkStuck();
+  assert.deepEqual(quiet.checked, [1], "the turn that claimed to start is checked");
+  assert.ok(reads > 0, "and checking it means reading its entries, once");
+
+  // Settling clears it, so the next check is empty again.
+  handlers!.settled(1);
+  await new Promise((resolve) => setImmediate(resolve));
+  reads = 0;
+  await painter.checkStuck();
+  assert.equal(reads, 0, "a turn that ends is not checked again");
+  await painter.close();
+});

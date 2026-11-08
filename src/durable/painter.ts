@@ -147,6 +147,13 @@ export interface PainterDeps {
       settled(): void;
     },
   ): { detach(): void } | undefined;
+  /**
+   * How long a turn may claim to be running before it is checked on.
+   *
+   * A turn normally settles in seconds; this is the threshold at which "still in flight" stops
+   * being plausible and becomes something to verify.
+   */
+  stuckAfterMs?: number;
   /** How much history one look may read before calling the position unreachable. */
   pageSize?: number;
   maxPages?: number;
@@ -174,6 +181,16 @@ export class Painter {
   private open = new Map<number, Open>();
   /** Open views, one per *running turn* — never held between turns. */
   private watching = new Map<number, { detach(): void }>();
+  /**
+   * Turns that announced themselves and have not finished.
+   *
+   * This is what makes a periodic check *targeted* rather than blanket. A heartbeat cannot see a
+   * handler that receives an event and mishandles it — the stream is healthy, the frame arrives,
+   * the code does the wrong thing — and that is the failure that lost two replies. So the painter
+   * remembers what it believes is in flight, and periodically checks only *that*, which is empty
+   * in the normal case and therefore costs nothing.
+   */
+  private inFlight = new Map<number, number>();
   private activity: { detach(): void } | undefined;
   /**
    * Opens in progress, by conversation.
@@ -216,6 +233,32 @@ export class Painter {
       () => undefined,
     );
     return run;
+  }
+
+  /**
+   * Check on turns that announced themselves and never finished.
+   *
+   * With activity healthy this is the *only* periodic work, and in the normal case it reads
+   * nothing at all: the set is empty because every turn ended when it said it did. What it
+   * catches is the class of failure a heartbeat cannot — an event that arrived and was
+   * mishandled — which is exactly what lost two replies an hour ago.
+   */
+  async checkStuck(): Promise<{ checked: number[] }> {
+    const stuckAfter = this.deps.stuckAfterMs ?? 120_000;
+    const now = Date.now();
+    const stale = [...this.inFlight.entries()]
+      .filter(([, startedAt]) => now - startedAt >= stuckAfter)
+      .map(([conversationId]) => conversationId);
+    for (const conversationId of stale) {
+      this.log(
+        `[paint] conversation ${conversationId}: a turn claimed to start and has not settled — checking it`,
+      );
+      await this.poke(conversationId);
+      // Looked at once; if it is still unsettled next time, the log says so again. Clearing it
+      // here would hide a turn that genuinely never ends.
+      this.inFlight.set(conversationId, now);
+    }
+    return { checked: stale };
   }
 
   /**
@@ -331,6 +374,7 @@ export class Painter {
   private async beginTurn(conversationId: number): Promise<void> {
     if (!this.deps.owns(conversationId)) return;
     await this.ensurePosition(conversationId);
+    this.inFlight.set(conversationId, Date.now());
     if (this.watching.has(conversationId)) return;
     const watch = this.deps.watch;
     if (!watch) {
@@ -350,6 +394,7 @@ export class Painter {
 
   /** The turn is over: no view, and no stream waiting to be finished. */
   private endTurn(conversationId: number): void {
+    this.inFlight.delete(conversationId);
     const watcher = this.watching.get(conversationId);
     if (watcher) {
       watcher.detach();

@@ -822,12 +822,19 @@ async function main(): Promise<void> {
       // The interval is the fallback for a deployment with no activity stream: it catches a
       // turn nothing announced (a web message, a resume after a restart).
       const instance = painter;
-      // Always a sweep. Shorter where there is no activity stream, because there it *is* the
-      // mechanism; slower where turns are also pushed, because there it is the safety net. An
-      // hour ago this timer was conditional, on the theory that a pushed turn needs no sweep —
-      // and two replies went missing while everything looked healthy.
-      const sweepMs = config.viewMode === "stream" ? 60_000 : Math.min(config.ledgerIntervalMs, 15_000);
-      paintTimer = setInterval(() => void instance.tick(), sweepMs);
+      // Periodic work, and *what* it is depends on whether there is a push path:
+      //
+      //   - no activity stream (in-process): the sweep is the mechanism, so it walks every
+      //     conversation, on the shorter interval it has always used;
+      //   - activity stream: the mechanism is the event, and all that is left to check is turns
+      //     that claimed to start and never finished — normally an empty set, so normally no
+      //     reads. A blanket sweep here would be a second mechanism doing nothing until something
+      //     broke, which is a fair thing to refuse.
+      const streamed = config.viewMode === "stream";
+      paintTimer = setInterval(
+        () => void (streamed ? instance.checkStuck() : instance.tick()),
+        streamed ? 60_000 : Math.min(config.ledgerIntervalMs, 15_000),
+      );
       paintTimer.unref();
       instance.start();
       void instance.tick();
