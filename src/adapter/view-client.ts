@@ -63,7 +63,7 @@ export function httpViewSource(options: {
   baseUrl: string;
   conversationId: number;
   token?: string;
-}): ViewSource {
+}): StreamSource {
   return sseSource(`${options.baseUrl.replace(/\/$/, "")}/v1/conversations/${options.conversationId}/view`, options.token);
 }
 
@@ -74,8 +74,27 @@ export function httpViewSource(options: {
  * hear about all of them. The `events` it yields are hints, so a caller does not repaint from
  * them; it goes and reads.
  */
-export function httpActivitySource(options: { baseUrl: string; token?: string }): ViewSource {
+export function httpActivitySource(options: { baseUrl: string; token?: string }): StreamSource {
   return sseSource(`${options.baseUrl.replace(/\/$/, "")}/v1/activity`, options.token);
+}
+
+/**
+ * The log as a stream: replay from a cursor, then follow.
+ *
+ * Unfiltered — the chat bridge's shape — or filtered to one conversation. `live=1` is passed through
+ * only when the caller asks for it, because live text needs a conversation to be about.
+ */
+export function httpEventsSource(options: {
+  baseUrl: string;
+  since: number;
+  conversationId?: number;
+  live?: boolean;
+  token?: string;
+}): StreamSource {
+  const query = new URLSearchParams({ since: String(options.since) });
+  if (options.conversationId !== undefined) query.set("conversation", String(options.conversationId));
+  if (options.live) query.set("live", "1");
+  return sseSource(`${options.baseUrl.replace(/\/$/, "")}/v1/events?${query.toString()}`, options.token);
 }
 
 /**
@@ -88,7 +107,7 @@ export function httpConversationEventsSource(options: {
   baseUrl: string;
   conversationId: number;
   token?: string;
-}): ViewSource {
+}): StreamSource {
   return sseSource(
     `${options.baseUrl.replace(/\/$/, "")}/v1/conversations/${options.conversationId}/events`,
     options.token,
@@ -96,7 +115,7 @@ export function httpConversationEventsSource(options: {
 }
 
 /** The SSE reader both sources share: frames and heartbeats, nothing else. */
-function sseSource(url: string, token: string | undefined): ViewSource {
+function sseSource(url: string, token: string | undefined): StreamSource {
   return {
     async open(onFrame, signal) {
       const headers: Record<string, string> = { Accept: "text/event-stream" };
@@ -122,14 +141,16 @@ function sseSource(url: string, token: string | undefined): ViewSource {
             buffer = buffer.slice(boundary + 2);
             const event = /^event: (.*)$/m.exec(block)?.[1] ?? "message";
             const data = /^data: (.*)$/m.exec(block)?.[1];
-            if (data !== undefined && (event === "view" || event === "heartbeat" || event === "activity")) {
+            // Every event the protocol defines, passed through untouched: which ones matter is the
+            // caller's business, and a ladder that filtered them would need updating per stream.
+            if (data !== undefined) {
               let parsed: unknown;
               try {
                 parsed = JSON.parse(data) as unknown;
               } catch {
                 parsed = undefined;
               }
-              if (parsed !== undefined) onFrame(event, parsed);
+              if (parsed !== undefined) onFrame(event as StreamKind, parsed);
             }
             boundary = buffer.indexOf("\n\n");
           }
@@ -145,9 +166,9 @@ function sseSource(url: string, token: string | undefined): ViewSource {
 
 /** A subscription as the ladder sees it: open it, get told about closes. */
 /** What an SSE stream can carry: the view of a turn, the server's activity, or proof of life. */
-export type StreamKind = "view" | "activity" | "heartbeat";
+export type StreamKind = "view" | "activity" | "heartbeat" | "entry" | "ready" | "resync";
 
-export interface ViewSource {
+export interface StreamSource {
   /**
    * Subscribe and call `onFrame` for every frame.
    *
@@ -159,9 +180,14 @@ export interface ViewSource {
 }
 
 export interface LadderDeps {
-  source: ViewSource;
-  /** Called with each view frame, in order, whichever way it arrived. */
-  onView(view: unknown): void;
+  source: StreamSource;
+  /**
+   * Called with every frame, in order, whichever way it arrived.
+   *
+   * The kind matters to the caller — a `view` is live state, an `entry` is content, `ready`/`resync`
+   * are positions — so this is a stream ladder rather than a view one.
+   */
+  onEvent(kind: StreamKind, data: unknown): void;
   /** Poll while degraded. Resolves when one poll is done. */
   poll(): Promise<void>;
   /** Base cadence of the server's heartbeat, for computing `suspectAfterMs`. */
@@ -186,7 +212,7 @@ export interface LadderDeps {
  * `run()` never resolves while healthy; stop it by calling `stop()`, which aborts the
  * stream and any poll loop.
  */
-export class ViewLadder {
+export class StreamLadder {
   private stopped = false;
   private mode: ViewMode = "push";
   private failedReconnects = 0;
@@ -230,7 +256,7 @@ export class ViewLadder {
           this.lastFrameAt = this.now();
           this.failedReconnects = 0;
           this.setMode("push");
-          if (kind === "view") this.deps.onView(data);
+          this.deps.onEvent(kind, data);
         }, this.abort.signal);
       } catch (error) {
         this.log(`[view] stream failed: ${(error as Error).message}`);

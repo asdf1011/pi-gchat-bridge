@@ -33,7 +33,7 @@ import { runDurableCommand } from "../adapter/commands.js";
 import { defaultSettings } from "../adapter/commands.js";
 import { ActivityFeed } from "./activity.js";
 import { Painter } from "./painter.js";
-import { httpActivitySource, httpViewSource, ViewLadder } from "../adapter/view-client.js";
+import { httpActivitySource, httpEventsSource, httpViewSource, StreamLadder } from "../adapter/view-client.js";
 import type { ProjectedView } from "../session-host/projection.js";
 import { chatTarget } from "../session-key.js";
 import { splitMessage } from "../stream.js";
@@ -646,12 +646,12 @@ async function main(): Promise<void> {
               // shape. It is what tells the painter a turn started in a thread it is not watching,
               // which is the job the sweep used to do.
               activity: (handlers: { started(id: number): void; settled(id: number): void }) => {
-                const ladder = new ViewLadder({
+                const ladder = new StreamLadder({
                   source: httpActivitySource({
                     baseUrl: config.selfUrl === "" ? `http://127.0.0.1:${config.healthPort}` : config.selfUrl,
                     ...(config.webToken ? { token: config.webToken } : {}),
                   }),
-                  onView: (event) => {
+                  onEvent: (_kind, event) => {
                     const activity = event as { conversationId?: unknown; kind?: unknown };
                     if (typeof activity.conversationId !== "number") return;
                     if (activity.kind === "started") handlers.started(activity.conversationId);
@@ -678,13 +678,13 @@ async function main(): Promise<void> {
                 // Settle is a transition, not a state: a stream that is idle stays idle, and
                 // reporting every idle frame would re-read the transcript continuously.
                 let wasBusy: boolean | undefined;
-                const ladder = new ViewLadder({
+                const ladder = new StreamLadder({
                   source: httpViewSource({
                     baseUrl: config.selfUrl === "" ? `http://127.0.0.1:${config.healthPort}` : config.selfUrl,
                     conversationId,
                     ...(config.webToken ? { token: config.webToken } : {}),
                   }),
-                  onView: (view) => {
+                  onEvent: (_kind, view) => {
                     const busy = (view as { busy?: unknown }).busy === true;
                     if (wasBusy === true && !busy) handlers.settled();
                     wasBusy = busy;

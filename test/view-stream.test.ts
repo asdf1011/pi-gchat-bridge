@@ -16,7 +16,7 @@ import test from "node:test";
 
 import { handleV1 } from "../src/adapter/v1-routes.js";
 import { httpViewSource } from "../src/adapter/view-client.js";
-import { decide, ViewLadder, type LadderPolicy, type ViewSource } from "../src/adapter/view-client.js";
+import { decide, StreamLadder, type LadderPolicy, type StreamSource } from "../src/adapter/view-client.js";
 import type { ProjectedView } from "../src/session-host/projection.js";
 import type { SessionHost } from "../src/session-host/api.js";
 
@@ -43,7 +43,7 @@ test("enough failed reconnects degrade to polling, whatever the silence says", (
 /** A view source the test drives: `open` resolves when told to. */
 function fakeSource() {
   const opens: { onFrame(kind: "view" | "heartbeat", data: unknown): void; finish(): void }[] = [];
-  const source: ViewSource = {
+  const source: StreamSource = {
     open: (onFrame, signal) =>
       new Promise<void>((resolve) => {
         // Honours the abort, like a real implementation must: `stop()` cannot wait for a
@@ -55,16 +55,20 @@ function fakeSource() {
   return { source, opens };
 }
 
-function ladder(deps: Partial<Parameters<typeof ViewLadder.prototype.constructor>[0]> = {}) {
+function ladder(deps: Partial<Parameters<typeof StreamLadder.prototype.constructor>[0]> = {}) {
   const { source, opens } = fakeSource();
   const views: unknown[] = [];
+  const kinds: string[] = [];
   const modes: string[] = [];
   let polls = 0;
   const policy = { suspectAfterMs: 100, degradeAfter: 2 };
   const time = { now: 1_000 };
-  const instance = new ViewLadder({
+  const instance = new StreamLadder({
     source,
-    onView: (view) => views.push(view),
+    onEvent: (kind, view) => {
+      kinds.push(kind);
+      views.push(view);
+    },
     poll: async () => {
       polls += 1;
     },
@@ -78,16 +82,20 @@ function ladder(deps: Partial<Parameters<typeof ViewLadder.prototype.constructor
     log: () => {},
     ...deps,
   });
-  return { instance, opens, views, modes, time, polls: () => polls, policy };
+  return { instance, opens, views, kinds, modes, time, polls: () => polls, policy };
 }
 
 test("view frames are passed on, and heartbeats keep the stream trusted", async () => {
-  const { instance, opens, views } = ladder();
+  const { instance, opens, views, kinds } = ladder();
   const running = instance.run();
   await Promise.resolve();
   opens[0]!.onFrame("view", { liveText: "half an answer" });
   opens[0]!.onFrame("heartbeat", { at: 1 });
-  assert.deepEqual(views, [{ liveText: "half an answer" }], "heartbeats are liveness, not content");
+  // Every frame reaches the caller with its kind, because a stream carries several kinds and only
+  // the caller knows which matter. The ladder's own business is liveness, which it takes from all of
+  // them; filtering here would mean touching the ladder whenever a stream gains an event.
+  assert.deepEqual(views, [{ liveText: "half an answer" }, { at: 1 }]);
+  assert.deepEqual(kinds, ["view", "heartbeat"]);
   instance.stop();
   await running;
 });
