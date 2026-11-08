@@ -98,6 +98,11 @@ async function loadPage(
       class StubEventSource {
         url: string;
         closed = false;
+        /**
+         * `readyState`, so the page's own reconnect can be tested: the browser stops retrying
+         * permanently once a stream closes, and the pane has to notice that rather than wait.
+         */
+        readyState = 1;
         listeners = new Map<string, ((event: { data: string }) => void)[]>();
         constructor(url: string) {
           this.url = url;
@@ -110,6 +115,7 @@ async function loadPage(
         }
         close() {
           this.closed = true;
+          this.readyState = 2; // EventSource.CLOSED
         }
         emit(event: string, data: unknown) {
           for (const fn of this.listeners.get(event) ?? []) fn({ data: JSON.stringify(data) });
@@ -1152,6 +1158,35 @@ test("deselecting closes the composer, unless a draft is in it", async () => {
     field.value = "half a thought";
     await fromFrame(h, { t: "pi-artifact-clear", file: "notes.md" });
     assert.equal(bar.hidden, false, "a draft is never thrown away by a stray tap");
+  } finally {
+    h?.close();
+  }
+});
+
+// --- Stream lifecycle -------------------------------------------------------
+
+test("a stream the browser has given up on is reopened by the page", async () => {
+  // The reported bug: coming back to an inactive tab showed "reconnecting…" for ever, because the
+  // page trusted the browser's retry — which stops permanently once an EventSource closes.
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ pathname: "/7/", conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    const doc = h.dom.window.document;
+    assert.equal(h.sources.length, 1, "one stream for the open conversation");
+
+    // The browser closes it (frozen tab, locked phone, restart that answered 5xx).
+    const first = h.sources[0]!;
+    first.close();
+    first.triggerError();
+    assert.equal(doc.getElementById("tool")?.textContent ?? "", "reconnecting…");
+
+    // The page reopens it on a short backoff, rather than waiting for a retry nobody makes.
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    assert.equal(h.sources.length, 2, "a replacement stream, created by the page");
+
+    // And the footer stops claiming to reconnect once a stream actually opens.
+    h.sources[1]!.listeners.get("open")?.forEach((fn) => fn({ data: "" }));
+    assert.equal(doc.getElementById("tool")?.textContent ?? "", "");
   } finally {
     h?.close();
   }

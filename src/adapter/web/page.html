@@ -440,6 +440,8 @@ function conversationIdFromPath() {
 // "ReferenceError: source is not defined" and the pane stayed blank.
 let current;
 let source;
+/** Pending reconnect for a stream the browser has given up on. */
+let reconnectTimer;
 const log = document.getElementById('log');
 const tool = document.getElementById('tool');
 const textBox = document.getElementById('text');
@@ -841,6 +843,31 @@ function open(id) {
   tool.textContent = '';
   restoreDraft(id);
   void loadHistory();
+  connectStream(id);
+}
+
+/**
+ * Open — or reopen — the event stream for a conversation.
+ *
+ * Not left to the browser's own retry, which gives up permanently in exactly the cases that
+ * matter: a tab left in the background, a phone that locked, a server answering 5xx while it
+ * restarts. In any of those `readyState` becomes CLOSED and an `EventSource` never tries again —
+ * so the pane sat on "reconnecting…" for ever, which is what coming back to a frozen tab looked
+ * like.
+ *
+ * The pane therefore owns the lifecycle: a closed stream is replaced on a short backoff, and
+ * returning to the tab forces an attempt rather than waiting for a timer to come round.
+ */
+function connectStream(id) {
+  if (source) {
+    source.close();
+    source = undefined;
+  }
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = undefined;
+  }
+
   source = new EventSource(rel('api/c/' + id + '/events'));
   source.addEventListener('text', (e) => {
     const d = JSON.parse(e.data);
@@ -869,6 +896,10 @@ function open(id) {
   // Comparing versions on each open is how an already-open page picks up a
   // rebuilt front end: the draft is already saved, so the reload costs nothing.
   source.addEventListener('open', async () => {
+    // A stream that opens is no longer reconnecting, whatever the last error said. Without this
+    // the footer keeps the message for ever on an idle conversation, because no frame arrives to
+    // overwrite it.
+    if (tool.textContent === 'reconnecting…') tool.textContent = '';
     if (!pageVersion || reloadedForVersion) return;
     try {
       const environment = await (await fetch(rel('api/environment'))).json();
@@ -892,10 +923,17 @@ function open(id) {
     paint();
   });
   source.addEventListener('error', () => {
-    // EventSource reconnects by itself; show it so a restart is visible not
-    // mysterious. Connection state is not conversation content, so it stays in
-    // the footer rather than in the pane.
+    // Connection state is not conversation content, so it stays in the footer rather than in the
+    // pane — but it must also be *true*. The browser stops retrying permanently once a stream
+    // closes (a frozen tab, a phone that locked, a restart that answered 5xx), and then "reconnecting…"
+    // would report an attempt nobody is making.
     tool.textContent = 'reconnecting…';
+    const gone = !source || source.readyState === 2; // EventSource.CLOSED
+    if (!gone || reconnectTimer) return;
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = undefined;
+      connectStream(id);
+    }, 1000);
   });
 }
 
@@ -1659,6 +1697,12 @@ window.addEventListener('message', (event) => {
 // A comment made on a phone while this page sat idle is only visible when the
 // tab is looked at again. Cheaper and more predictable than a poll.
 document.addEventListener('visibilitychange', () => {
+  // Back to the tab: a stream that died while we were away is not going to notice by itself, and
+  // waiting for a backoff that may already have elapsed is how "inactive then returning" looks
+  // broken. Only reconnect when nothing is open, so a healthy stream is left alone.
+  if (document.visibilityState === 'visible' && current && (!source || source.readyState !== 1)) {
+    connectStream(current);
+  }
   if (!document.hidden) void refreshReview();
 });
 
