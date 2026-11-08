@@ -195,19 +195,18 @@ export async function say(
 }
 
 /**
- * `watch`: the log as a stream, with the turn being written shown underneath.
+ * `watch`: follow a conversation by long-polling the log.
  *
- * This is the first client to use `GET /v1/events`, and it is here because it is the smallest: it
- * sends the last entry id it saw, prints what comes back, and remembers the id. A reconnection is
- * the same call — which is the whole claim of that endpoint, demonstrated by a client small enough
- * to read in one sitting.
+ * The reference client, and the smallest: ask with the cursor, print what comes back, remember the
+ * new cursor, ask again. There is no connection to hold and nothing to reconnect, which is the point
+ * of the poll — a terminal that was closed for an hour resumes exactly where it stopped.
  *
- * `live=1` adds the answer being written, printed on one rewritable line rather than as messages:
- * a terminal has no bubbles, and progress is not content.
+ * `observe=1` adds the turn being written, printed on one rewritable line: a terminal has no bubbles,
+ * and progress is not content.
  */
 export async function watch(
   deps: CliDeps,
-  options: { conversationId: number; signal?: AbortSignal; statusEveryMs?: number },
+  options: { conversationId: number; signal?: AbortSignal; waitSeconds?: number },
 ): Promise<number> {
   const out = deps.out ?? ((line: string) => console.log(line));
   const file = deps.statePath ?? defaultStatePath();
@@ -227,71 +226,52 @@ export async function watch(
     out(`# adopted at entry ${newest} — watching from now on (state in ${file})`);
   }
 
-  const fetchImpl = deps.fetch ?? ((input, init) => fetch(input, init as RequestInit));
-  const headers: Record<string, string> = { Accept: "text/event-stream" };
-  if (deps.token) headers.Authorization = `Bearer ${deps.token}`;
-  const since = state.conversations[key]?.cursor ?? 0;
-  const response = await fetchImpl(
-    `${deps.baseUrl.replace(/\/$/, "")}/v1/events?since=${since}&conversation=${options.conversationId}&live=1`,
-    { headers, ...(options.signal ? { signal: options.signal } : {}) },
-  );
-  if (!response.ok || !("body" in response) || !response.body) {
-    throw new Error(`watch: HTTP ${response.status}`);
-  }
-
   let live = "";
   let printed = 0;
-  const commit = (entryId: number): void => {
-    state.conversations[key] = { cursor: entryId };
-    void saveState(file, state);
-  };
+  let backoff = 1_000;
+  while (!options.signal?.aborted) {
+    let body: {
+      cursor?: number;
+      entries?: { entryId: number; role: string; text?: string; origin?: string }[];
+      waitedMs?: number;
+      busy?: boolean;
+      view?: { liveText?: string } | null;
+    };
+    try {
+      body = (await call(
+        deps,
+        `/v1/poll?since=${state.conversations[key]?.cursor ?? 0}&conversation=${options.conversationId}` +
+          `&observe=1&wait=${options.waitSeconds ?? 25}&batch=250`,
+      )) as typeof body;
+      backoff = 1_000;
+    } catch (error) {
+      if (options.signal?.aborted) return printed;
+      out(`# poll failed (${(error as Error).message}) — retrying in ${backoff}ms`);
+      await new Promise((resolve) => setTimeout(resolve, backoff));
+      backoff = Math.min(30_000, backoff * 2);
+      continue;
+    }
 
-  // A deliberately self-contained SSE read: this file is a reference client, and the point is that a
-  // bridge can be written against the protocol with nothing but `fetch`.
-  const reader = (response.body as ReadableStream<Uint8Array>).getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let boundary = buffer.indexOf("\n\n");
-    while (boundary !== -1) {
-      const block = buffer.slice(0, boundary);
-      buffer = buffer.slice(boundary + 2);
-      const event = /^event: (.*)$/m.exec(block)?.[1] ?? "message";
-      const raw = /^data: (.*)$/m.exec(block)?.[1];
-      boundary = buffer.indexOf("\n\n");
-      if (raw === undefined) continue;
-      let payload: Record<string, unknown>;
-      try {
-        payload = JSON.parse(raw) as Record<string, unknown>;
-      } catch {
-        continue;
-      }
+    for (const entry of body.entries ?? []) {
+      if (live !== "") out(""); // close the progress line before content
+      live = "";
+      const who = entry.origin === undefined ? entry.role : `${entry.role}:${entry.origin}`;
+      out(`[${entry.entryId}] ${who}: ${String(entry.text ?? "").replace(/\s+/g, " ").slice(0, 200)}`);
+      state.conversations[key] = { cursor: entry.entryId };
+      await saveState(file, state);
+      printed += 1;
+    }
 
-      if (event === "entry") {
-        // Progress line first, so the content is not glued to it.
-        if (live !== "") out("");
-        live = "";
-        const who = payload.origin === undefined ? String(payload.role) : `${String(payload.role)}:${String(payload.origin)}`;
-        out(`[${String(payload.entryId)}] ${who}: ${String(payload.text ?? "").replace(/\s+/g, " ").slice(0, 200)}`);
-        commit(Number(payload.entryId));
-        printed += 1;
-      } else if (event === "view") {
-        const text = typeof payload.liveText === "string" ? payload.liveText : "";
-        // One rewritable line: the tail of what is being written, and only while it changes.
-        if (text !== live) {
-          live = text;
-          out(`\r… ${live.replace(/\s+/g, " ").slice(-80)}`);
-        }
-      } else if (event === "resync") {
-        const cursor = Number(payload.cursor ?? 0);
-        out(`# fell out of the replay window — continuing from entry ${cursor}`);
-        commit(cursor);
-      } else if (event === "ready") {
-        commit(Number(payload.cursor ?? since));
-      }
+    // A cache that answers "nothing new" instantly is a cache to distrust: the ask was to wait.
+    if ((body.entries ?? []).length === 0 && body.waitedMs !== undefined && body.waitedMs < (options.waitSeconds ?? 25) * 200) {
+      out("# response arrived far sooner than the wait — treating it as cached and retrying");
+      continue;
+    }
+
+    const text = body.view?.liveText ?? "";
+    if (text !== live) {
+      live = text;
+      if (live !== "") out(`\r… ${live.replace(/\s+/g, " ").slice(-80)}`);
     }
   }
   return printed;
@@ -302,7 +282,7 @@ const USAGE = [
   "",
   "  list                       conversations this bridge can see, with its own position",
   "  tail   --conversation <id> [--follow]     print new entries, then remember where it got to",
-  "  watch  --conversation <id>                follow the conversation's stream, with live text",
+  "  watch  --conversation <id>                follow the conversation by long poll, with live text",
   "  say    --conversation <id> <words…>       submit a message as the cli surface",
   "",
   "env: BRIDGE_URL (default http://127.0.0.1:8081), BRIDGE_WEB_TOKEN,",

@@ -19,7 +19,7 @@ import test, { after } from "node:test";
 
 import { handleV1, type ConversationAddress } from "../src/adapter/v1-routes.js";
 import { ActivityFeed } from "../src/durable/activity.js";
-import { runCli, loadState, say, tail, watch } from "../src/scripts/bridge-cli.js";
+import { runCli, loadState, saveState, say, tail, watch } from "../src/scripts/bridge-cli.js";
 import type { SessionHost, TranscriptMessage } from "../src/session-host/api.js";
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "v1-"));
@@ -340,189 +340,6 @@ async function serveEvents(seam: SessionHost, addresses: ConversationAddress[], 
   };
 }
 
-test("the log replays from a cursor, in one order across conversations", async () => {
-  // The client's whole protocol: "I have seen 10, send me everything after it." Order is the id
-  // sequence, so a stream of several conversations needs no per-conversation bookkeeping.
-  const { seam } = streamSeam([
-    {
-      conversationId: 1,
-      entries: [
-        { entryId: 9, role: "user", text: "before the cursor" },
-        { entryId: 11, role: "assistant", text: "first", origin: "gchat" },
-      ],
-    },
-    { conversationId: 2, entries: [{ entryId: 10, role: "user", text: "second", origin: "webui" }] },
-  ]);
-  const served = await serveEvents(seam, [
-    { conversationId: 1, address: "spaces/S/threads/T" },
-    { conversationId: 2, address: "spaces/S/threads/U" },
-  ]);
-  try {
-    const response = await fetch(`${served.baseUrl}/v1/events?since=10`);
-    const events = await readEvents(response, 2);
-    assert.equal(events[0]?.event, "ready", "where the stream starts, before anything arrives");
-    assert.equal(JSON.parse(events[0]!.data).cursor, 10);
-    const entry = events[1]!;
-    assert.equal(entry.event, "entry");
-    assert.equal(JSON.parse(entry.data).entryId, 11, "only what is past the cursor");
-    assert.equal(JSON.parse(entry.data).origin, "gchat");
-  } finally {
-    await served.close();
-  }
-});
-
-test("a filter narrows the same stream, and an unreadable conversation is refused", async () => {
-  const { seam } = streamSeam([
-    { conversationId: 1, entries: [{ entryId: 20, role: "assistant", text: "mine", origin: "gchat" }] },
-    { conversationId: 2, entries: [{ entryId: 21, role: "assistant", text: "not yours" }] },
-  ]);
-  // Only conversation 1 is served by this bridge: scope is the right to read, not a filter the
-  // client chooses.
-  const served = await serveEvents(seam, [{ conversationId: 1, address: "spaces/S/threads/T" }]);
-  try {
-    const filtered = await fetch(`${served.baseUrl}/v1/events?since=19&conversation=1`);
-    const events = await readEvents(filtered, 2);
-    assert.equal(JSON.parse(events[1]!.data).entryId, 20);
-
-    assert.equal((await fetch(`${served.baseUrl}/v1/events?since=0&conversation=2`)).status, 404);
-  } finally {
-    await served.close();
-  }
-});
-
-test("a turn boundary is the trigger that reads the log forward", async () => {
-  // Entries are not pushed by themselves — there is no "entry appended" event — but every entry
-  // follows a boundary, so activity is the trigger. One page read per boundary, not a poll.
-  const { seam, add } = streamSeam([{ conversationId: 1, entries: [] }]);
-  const feed = new ActivityFeed({ seam });
-  const served = await serveEvents(seam, [{ conversationId: 1, address: "spaces/S/threads/T" }], feed);
-  try {
-    const response = await fetch(`${served.baseUrl}/v1/events?since=0`);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-
-    add(1, { entryId: 30, role: "assistant", text: "written while connected", origin: "gchat" });
-    feed.started(1);
-    await new Promise((resolve) => setTimeout(resolve, 40));
-
-    const events = await readEvents(response, 3);
-    assert.deepEqual(
-      events.map((event) => event.event),
-      ["ready", "activity", "entry"],
-      "the position, the boundary, then the content it announced",
-    );
-    const entry = events.find((event) => event.event === "entry")!;
-    assert.equal(JSON.parse(entry.data).text, "written while connected");
-  } finally {
-    await served.close();
-    feed.close();
-  }
-});
-
-test("a cursor further back than the replay window is told so, rather than flooded", async () => {
-  // "You are too far behind" is a protocol answer, not a client heuristic: the reader decides
-  // whether to accept the newest position or fetch history another way.
-  const entries = Array.from({ length: 620 }, (_, index) => ({
-    entryId: index + 1,
-    role: "assistant" as const,
-    text: `entry ${index + 1}`,
-  }));
-  const { seam } = streamSeam([{ conversationId: 1, entries }]);
-  const served = await serveEvents(seam, [{ conversationId: 1, address: "spaces/S/threads/T" }]);
-  try {
-    const response = await fetch(`${served.baseUrl}/v1/events?since=1`);
-    const events = await readEvents(response, 202);
-    const resync = events.find((event) => event.event === "resync");
-    assert.ok(resync, "the window ran out, and it says so");
-    assert.ok(JSON.parse(resync.data).cursor > 1, "with the position it continued from");
-  } finally {
-    await served.close();
-  }
-});
-
-test("the CLI's watch follows the stream and remembers its position", async () => {
-  // The first client ported onto /v1/events, and the smallest: send the last id seen, print what
-  // comes back, remember it. This is the endpoint's whole claim demonstrated by a client small
-  // enough to read in one sitting.
-  const { seam, add } = streamSeam([{ conversationId: 1, entries: [] }]);
-  const feed = new ActivityFeed({ seam });
-  const served = await serveEvents(seam, [{ conversationId: 1, address: "spaces/S/threads/T" }], feed);
-  const file = path.join(scratch, `watch-${Date.now()}.json`);
-  const lines: string[] = [];
-  const stop = new AbortController();
-  let running: Promise<number> | undefined;
-  try {
-    running = watch(
-      { baseUrl: served.baseUrl, statePath: file, out: (line) => lines.push(line) },
-      { conversationId: 1, signal: stop.signal },
-    );
-    // Wait for adoption before adding anything: a first run adopts at the head, so an entry that
-    // arrives before the adopt is deliberately not printed. Racing that is how this test was flaky.
-    for (let i = 0; i < 100 && !lines.some((line) => line.startsWith("# adopted")); i += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    assert.ok(lines.some((line) => line.startsWith("# adopted")), `watch never adopted: ${lines.join("\n")}`);
-
-    // A turn in progress, then the entry it produced — the boundary is what makes the stream read.
-    add(1, { entryId: 50, role: "assistant", text: "the answer arrives", origin: "gchat" });
-    feed.started(1);
-    // Poll for the printed line rather than sleeping a fixed time: the stream is asynchronous and a
-    // fixed wait is how this test was occasionally red for the wrong reason.
-    for (let i = 0; i < 200 && !lines.some((line) => line.includes("[50]")); i += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    assert.ok(lines.some((line) => line.includes("[50] assistant:gchat: the answer arrives")), lines.join("\n"));
-    assert.deepEqual((await loadState(file)).conversations["1"], { cursor: 50 });
-
-    // The remembered position is the whole point: a restart resumes from it rather than replaying.
-    assert.deepEqual((await loadState(file)).conversations["1"], { cursor: 50 });
-    stop.abort();
-    await running.catch(() => {});
-  } finally {
-    stop.abort();
-    await running?.catch(() => {});
-    await served.close().catch(() => {});
-    feed.close();
-  }
-});
-
-test("live text is opt-in, needs a conversation, and arrives on the same connection", async () => {
-  // The one thing the log stream cannot carry: the answer being written. It is ephemeral and
-  // per-turn, so it is a flag on a *filtered* stream rather than a property of the log.
-  const { seam } = streamSeam([
-    { conversationId: 1, entries: [{ entryId: 40, role: "user", text: "go", origin: "gchat" }] },
-  ]);
-  const frames: ((view: unknown) => void)[] = [];
-  (seam as unknown as Record<string, unknown>).attach = async (_id: number, onFrame: (view: unknown) => void) => {
-    frames.push(onFrame);
-    return {
-      snapshot: { liveText: "half", busy: true, lastAssistantText: "", tools: [] },
-      detach() {},
-    };
-  };
-  const served = await serveEvents(seam, [{ conversationId: 1, address: "spaces/S/threads/T" }]);
-  try {
-    // Unfiltered: refused, because per-token text for every running turn is not something to fan out.
-    assert.equal((await fetch(`${served.baseUrl}/v1/events?live=1`)).status, 400);
-
-    const response = await fetch(`${served.baseUrl}/v1/events?since=39&conversation=1&live=1`);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    frames[0]?.({ liveText: "half an answer", busy: true, lastAssistantText: "", tools: [] });
-
-    const events = await readEvents(response, 4);
-    assert.deepEqual(
-      events.map((event) => event.event),
-      ["ready", "entry", "view", "view"],
-      "position, content, the live snapshot, then live text",
-    );
-    assert.match(events[2]!.data, /"liveText":"half"/, "the snapshot, so a joiner paints");
-    assert.match(events[3]!.data, /half an answer/);
-  } finally {
-    await served.close();
-  }
-});
-
-/* --- the log as a long poll ---------------------------------------------------------- */
-
 test("a poll returns what is after the cursor, and does not wait for more", async () => {
   const { seam } = streamSeam([
     {
@@ -655,6 +472,36 @@ test("a poll reports how long it waited, so a cached empty answer is detectable"
     assert.equal(response.headers.get("x-poll-waited-ms"), String(body.waitedMs));
     assert.equal(body.cursor, 5, "and the cursor is unchanged, so a client resumes exactly where it was");
   } finally {
+    await served.close();
+  }
+});
+
+test("the CLI's watch follows by long poll and remembers its position", async () => {
+  // The reference client after the move to polling: ask with the cursor, print what comes back,
+  // remember it, ask again. No connection, so nothing to reconnect — which is the whole argument.
+  const { seam } = streamSeam([
+    { conversationId: 1, entries: [{ entryId: 60, role: "assistant", text: "the answer", origin: "gchat" }] },
+  ]);
+  const served = await serveEvents(seam, [{ conversationId: 1, address: "spaces/S/threads/T" }]);
+  const file = path.join(scratch, `watch-${Date.now()}.json`);
+  const lines: string[] = [];
+  const stop = new AbortController();
+  let running: Promise<number> | undefined;
+  try {
+    // Adopt first, so the pre-existing entry is deliberately not printed.
+    await saveState(file, { version: 1, conversations: { "1": { cursor: 59 } } });
+    running = watch(
+      { baseUrl: served.baseUrl, statePath: file, out: (line) => lines.push(line) },
+      { conversationId: 1, signal: stop.signal, waitSeconds: 1 },
+    );
+    for (let i = 0; i < 200 && !lines.some((line) => line.includes("[60]")); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(lines.some((line) => line.includes("[60] assistant:gchat: the answer")), lines.join("\n"));
+    assert.deepEqual((await loadState(file)).conversations["1"], { cursor: 60 });
+  } finally {
+    stop.abort();
+    await running?.catch(() => {});
     await served.close();
   }
 });
