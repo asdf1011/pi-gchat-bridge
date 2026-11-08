@@ -44,8 +44,8 @@
  *     and reads the ones nobody is watching — a dormant thread, or every thread in in-process
  *     mode. It is the residual polling §18 allows, and it never runs for a watched thread.
  */
-import type { EntryRef, MessageLike } from "./delivery-pass.js";
-import { entriesAfter } from "./delivery-pass.js";
+import type { EntryRef, MessageLike } from "./entries.js";
+import { entriesAfter } from "./entries.js";
 import type { Ledger } from "./ledger.js";
 
 import { logger } from "../logger.js";
@@ -521,7 +521,7 @@ export class Painter {
       return;
     }
 
-    const pending = window.entries.filter((entry) => entry.entryId > cursor);
+    const pending = window.entries; // already "after the cursor"
     const answer = pending.find((entry) => this.isAnswer(entry));
     const busy = await this.deps.busy(conversationId);
 

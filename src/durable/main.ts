@@ -31,7 +31,6 @@ import { attachViewSink, viewFramePainter } from "../adapter/view-sink.js";
 import { DurableRouter } from "../adapter/router.js";
 import { runDurableCommand } from "../adapter/commands.js";
 import { defaultSettings } from "../adapter/commands.js";
-import { runPass } from "./delivery-pass.js";
 import { ActivityFeed } from "./activity.js";
 import { Painter } from "./painter.js";
 import { httpActivitySource, httpViewSource, ViewLadder } from "../adapter/view-client.js";
@@ -590,9 +589,8 @@ async function main(): Promise<void> {
   // The state is deliberately the bridge's, not the server's: "how much of this have
   // I seen" is a fact about this surface, and it survives a conversation outliving
   // the bridge.
-  let ledgerTimer: NodeJS.Timeout | undefined;
   let paintTimer: NodeJS.Timeout | undefined;
-  if (config.ledgerMode === "shadow") {
+  {
     const ledgerFile =
       config.ledgerPath === ""
         ? path.join(path.dirname(dbPath), "bridge-ledger.json")
@@ -601,46 +599,11 @@ async function main(): Promise<void> {
     logger.info(
       `[ledger] shadow mode, positions in ${ledgerFile}${ledger.recovered ? " (adopting afresh: the file was unreadable)" : ""}`,
     );
-    const pass = async (): Promise<void> => {
-      const summary = await runPass(ledger, {
-        // This process is the Chat bridge, so entries stamped `gchat` are already in
-        // the thread and must not be painted back into it.
-        surface: "gchat",
-        // Only conversations that live in Chat: a web-only conversation has no
-        // surface for this bridge to fall behind on. And never a conversation the
-        // painter owns: the pass only *observes*, but observing means advancing the
-        // cursor, which would take an answer out from under the painter and leave the
-        // thread missing a reply that was never posted.
-        conversations: async () => host.bindings().then((bindings) =>
-          Object.entries(bindings.byChatKey).map(([chatKey, binding]) => ({
-            conversationId: binding.conversationId,
-            name: chatKey,
-            lastActivityAt: binding.updatedAt ?? binding.createdAt,
-          })),
-        ),
-        history: (conversationId, limit, offset) => seam.history(conversationId, { limit, offset }),
-        present: () => {},
-        owns: (name) => name.startsWith("spaces/"),
-        activeWithinMs: config.ledgerActiveWithinMs,
-      });
-      // The reconciliation that used to live here is gone with the claims it compared
-      // against. It is not missed, because the invariant is now *structural* rather than
-      // observed: the painter confirms an entry only after the post that carries it
-      // returns, so a failed post leaves the cursor behind it and the next tick retries.
-      // There is no window in which the cursor can claim something the mouth never did.
-      // Silent when nothing happened: a pass every minute must not fill the log.
-      if (summary.adopted > 0 || summary.presented > 0 || summary.unfinished.length > 0) {
-        logger.info(
-          `[ledger] pass: ${summary.looked} thread(s), adopted ${summary.adopted}, ` +
-            `would post ${summary.presented}, already here ${summary.own}, unclaimed ${summary.unknown}, ` +
-            `gaps ${summary.gaps}` +
-            (summary.unfinished.length === 0 ? "" : `, unfinished ${summary.unfinished.join(",")}`),
-        );
-      }
-    };
-    void pass();
-    ledgerTimer = setInterval(() => void pass(), config.ledgerIntervalMs);
-    ledgerTimer.unref();
+    // The shadow pass is gone. It existed to prove a cursor against real transcripts while the
+    // legacy path still posted; the painter posts now, so the pass was left observing a mouth that
+    // was already the same object — and worse, *confirming* entries the painter had not painted
+    // yet, which is how an answer gets stolen. The cursor is simply the painter's memory.
+    logger.info(`[ledger] positions in ${ledgerFile}${ledger.recovered ? " (unreadable: adopting afresh)" : ""}`);
 
     // --- The painter: the one mouth for the conversations it owns -----------------
     //
@@ -850,7 +813,6 @@ async function main(): Promise<void> {
    */
 
   const shutdown = async (): Promise<void> => {
-    if (ledgerTimer) clearInterval(ledgerTimer);
     if (paintTimer) clearInterval(paintTimer);
     logger.info("[bridge] shutting down...");
     await receiver.stop();

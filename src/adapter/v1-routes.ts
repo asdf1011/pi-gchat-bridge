@@ -30,7 +30,7 @@
  */
 import type http from "node:http";
 
-import { entriesAfter } from "../durable/delivery-pass.js";
+import { entriesAfter } from "../durable/entries.js";
 import type { SessionHost } from "../session-host/api.js";
 
 export interface ConversationAddress {
@@ -132,7 +132,6 @@ export async function handleV1(
       pageSize: limit,
     });
     const after = window.entries
-      .filter((entry) => entry.entryId > since)
       .slice(0, limit)
       .map(
         (entry): EntryView => ({

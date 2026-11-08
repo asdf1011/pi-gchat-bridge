@@ -82,26 +82,14 @@ export interface Config {
    */
   replaceOnFinish: boolean;
   /**
-   * What the bridge's own delivery cursor does (§17 of the design doc).
+   * Where the bridge's own cursor lives. Empty means "beside the database".
    *
-   * `shadow` walks each conversation forward from its cursor and *logs* what it
-   * would post, posting nothing: the cursor arithmetic is proven with no risk to
-   * message delivery. `off` disables the pass entirely.
-   */
-  ledgerMode: "shadow" | "off";
-  /**
-   * Where the cursor lives. Empty means "next to the database", which is the one
-   * directory this deployment can already write to.
-   *
-   * This is the bridge's *own* state, not the server's: a bridge is temporary and
-   * the conversation is not, so "how much of this have I seen" belongs to the
-   * bridge. See `durable/ledger.ts`.
+   * The bridge's only durable state: "how much of this have I seen" is a fact about one surface,
+   * and a conversation outlives any surface (§17).
    */
   ledgerPath: string;
-  /** How often the pass runs. Cheap: it reads a page or two per active thread. */
+  /** How often the sweep runs where there is no push path — in-process mode's mechanism. */
   ledgerIntervalMs: number;
-  /** Ignore threads nobody has touched for this long, so dormant ones cost nothing. */
-  ledgerActiveWithinMs: number;
   /**
    * How the painter watches a running turn: `in-process` or `stream`.
    *
@@ -186,12 +174,8 @@ export function loadConfig(): Config {
     // The job is detached, so waiting costs nothing.
     topicSummaryTimeoutMs: Number(process.env.BRIDGE_TOPIC_SUMMARY_TIMEOUT_MS ?? 15 * 60 * 1000),
     replaceOnFinish: (process.env.BRIDGE_REPLACE_ON_FINISH ?? "1") !== "0",
-    // Shadow by default: it posts nothing, so there is no reason to make an
-    // operator opt into the safety net before it can prove anything.
-    ledgerMode: (process.env.BRIDGE_LEDGER ?? "shadow") === "off" ? "off" : "shadow",
     ledgerPath: (process.env.BRIDGE_LEDGER_PATH ?? "").trim(),
     ledgerIntervalMs: Number(process.env.BRIDGE_LEDGER_INTERVAL_MS ?? 60_000),
-    ledgerActiveWithinMs: Number(process.env.BRIDGE_LEDGER_ACTIVE_WITHIN_MS ?? 7 * 24 * 60 * 60 * 1000),
     viewMode: (process.env.BRIDGE_VIEW ?? "").trim().toLowerCase() === "stream" ? "stream" : "in-process",
     selfUrl: (process.env.BRIDGE_SELF_URL ?? "").trim(),
   };
