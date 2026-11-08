@@ -194,11 +194,115 @@ export async function say(
   return body.submissionId ?? 0;
 }
 
+/**
+ * `watch`: the log as a stream, with the turn being written shown underneath.
+ *
+ * This is the first client to use `GET /v1/events`, and it is here because it is the smallest: it
+ * sends the last entry id it saw, prints what comes back, and remembers the id. A reconnection is
+ * the same call — which is the whole claim of that endpoint, demonstrated by a client small enough
+ * to read in one sitting.
+ *
+ * `live=1` adds the answer being written, printed on one rewritable line rather than as messages:
+ * a terminal has no bubbles, and progress is not content.
+ */
+export async function watch(
+  deps: CliDeps,
+  options: { conversationId: number; signal?: AbortSignal; statusEveryMs?: number },
+): Promise<number> {
+  const out = deps.out ?? ((line: string) => console.log(line));
+  const file = deps.statePath ?? defaultStatePath();
+  const state = await loadState(file);
+  const key = String(options.conversationId);
+
+  // No position yet: adopt at the head, like every other bridge — a captured conversation is not
+  // replayed at a person's terminal.
+  if (state.conversations[key] === undefined) {
+    const head = (await call(
+      deps,
+      `/v1/conversations/${options.conversationId}/entries?since=0&limit=1`,
+    )) as { newest?: number };
+    const newest = head.newest ?? 0;
+    state.conversations[key] = { cursor: newest };
+    await saveState(file, state);
+    out(`# adopted at entry ${newest} — watching from now on (state in ${file})`);
+  }
+
+  const fetchImpl = deps.fetch ?? ((input, init) => fetch(input, init as RequestInit));
+  const headers: Record<string, string> = { Accept: "text/event-stream" };
+  if (deps.token) headers.Authorization = `Bearer ${deps.token}`;
+  const since = state.conversations[key]?.cursor ?? 0;
+  const response = await fetchImpl(
+    `${deps.baseUrl.replace(/\/$/, "")}/v1/events?since=${since}&conversation=${options.conversationId}&live=1`,
+    { headers, ...(options.signal ? { signal: options.signal } : {}) },
+  );
+  if (!response.ok || !("body" in response) || !response.body) {
+    throw new Error(`watch: HTTP ${response.status}`);
+  }
+
+  let live = "";
+  let printed = 0;
+  const commit = (entryId: number): void => {
+    state.conversations[key] = { cursor: entryId };
+    void saveState(file, state);
+  };
+
+  // A deliberately self-contained SSE read: this file is a reference client, and the point is that a
+  // bridge can be written against the protocol with nothing but `fetch`.
+  const reader = (response.body as ReadableStream<Uint8Array>).getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let boundary = buffer.indexOf("\n\n");
+    while (boundary !== -1) {
+      const block = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      const event = /^event: (.*)$/m.exec(block)?.[1] ?? "message";
+      const raw = /^data: (.*)$/m.exec(block)?.[1];
+      boundary = buffer.indexOf("\n\n");
+      if (raw === undefined) continue;
+      let payload: Record<string, unknown>;
+      try {
+        payload = JSON.parse(raw) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+
+      if (event === "entry") {
+        // Progress line first, so the content is not glued to it.
+        if (live !== "") out("");
+        live = "";
+        const who = payload.origin === undefined ? String(payload.role) : `${String(payload.role)}:${String(payload.origin)}`;
+        out(`[${String(payload.entryId)}] ${who}: ${String(payload.text ?? "").replace(/\s+/g, " ").slice(0, 200)}`);
+        commit(Number(payload.entryId));
+        printed += 1;
+      } else if (event === "view") {
+        const text = typeof payload.liveText === "string" ? payload.liveText : "";
+        // One rewritable line: the tail of what is being written, and only while it changes.
+        if (text !== live) {
+          live = text;
+          out(`\r… ${live.replace(/\s+/g, " ").slice(-80)}`);
+        }
+      } else if (event === "resync") {
+        const cursor = Number(payload.cursor ?? 0);
+        out(`# fell out of the replay window — continuing from entry ${cursor}`);
+        commit(cursor);
+      } else if (event === "ready") {
+        commit(Number(payload.cursor ?? since));
+      }
+    }
+  }
+  return printed;
+}
+
 const USAGE = [
   "usage: bridge-cli <command> [options]",
   "",
   "  list                       conversations this bridge can see, with its own position",
   "  tail   --conversation <id> [--follow]     print new entries, then remember where it got to",
+  "  watch  --conversation <id>                follow the conversation's stream, with live text",
   "  say    --conversation <id> <words…>       submit a message as the cli surface",
   "",
   "env: BRIDGE_URL (default http://127.0.0.1:8081), BRIDGE_WEB_TOKEN,",
@@ -225,6 +329,14 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
         return 2;
       }
       await tail(deps, { conversationId, follow });
+      return 0;
+    }
+    case "watch": {
+      if (conversationId === undefined || !Number.isFinite(conversationId)) {
+        out("watch needs --conversation <id>");
+        return 2;
+      }
+      await watch(deps, { conversationId });
       return 0;
     }
     case "say": {

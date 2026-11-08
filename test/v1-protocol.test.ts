@@ -19,7 +19,7 @@ import test, { after } from "node:test";
 
 import { handleV1, type ConversationAddress } from "../src/adapter/v1-routes.js";
 import { ActivityFeed } from "../src/durable/activity.js";
-import { runCli, loadState, say, tail } from "../src/scripts/bridge-cli.js";
+import { runCli, loadState, say, tail, watch } from "../src/scripts/bridge-cli.js";
 import type { SessionHost, TranscriptMessage } from "../src/session-host/api.js";
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "v1-"));
@@ -434,6 +434,47 @@ test("a cursor further back than the replay window is told so, rather than flood
     assert.ok(JSON.parse(resync.data).cursor > 1, "with the position it continued from");
   } finally {
     await served.close();
+  }
+});
+
+test("the CLI's watch follows the stream and remembers its position", async () => {
+  // The first client ported onto /v1/events, and the smallest: send the last id seen, print what
+  // comes back, remember it. This is the endpoint's whole claim demonstrated by a client small
+  // enough to read in one sitting.
+  const { seam, add } = streamSeam([{ conversationId: 1, entries: [] }]);
+  const feed = new ActivityFeed({ seam });
+  const served = await serveEvents(seam, [{ conversationId: 1, address: "spaces/S/threads/T" }], feed);
+  const file = path.join(scratch, `watch-${Date.now()}.json`);
+  const lines: string[] = [];
+  try {
+    const running = watch(
+      { baseUrl: served.baseUrl, statePath: file, out: (line) => lines.push(line) },
+      { conversationId: 1 },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    // A turn in progress, then the entry it produced — the boundary is what makes the stream read.
+    add(1, { entryId: 50, role: "assistant", text: "the answer arrives", origin: "gchat" });
+    feed.started(1);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.ok(lines.some((line) => line.includes("[50] assistant:gchat: the answer arrives")), lines.join("\n"));
+    assert.deepEqual((await loadState(file)).conversations["1"], { cursor: 50 });
+
+    // Reconnecting is the same call with the remembered id: nothing is repeated.
+    lines.length = 0;
+    const second = watch(
+      { baseUrl: served.baseUrl, statePath: file, out: (line) => lines.push(line) },
+      { conversationId: 1 },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(lines.filter((line) => line.startsWith("[")).length, 0, "no replay of what it already saw");
+    await served.close();
+    feed.close();
+    void running.catch(() => {});
+    void second.catch(() => {});
+  } finally {
+    await served.close().catch(() => {});
+    feed.close();
   }
 });
 
