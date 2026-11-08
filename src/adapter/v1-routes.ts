@@ -317,20 +317,41 @@ export async function handleV1(
     const cursor = entries.length > 0 ? (entries[entries.length - 1] as EntryView).entryId : since;
     const view = observe && only !== undefined ? await deps.seam.snapshot(only) : undefined;
     const waitedMs = Date.now() - startedAt;
-    // **Uncacheable, every time.** A timeout response is a *state*, not a fact: cached, it would hand
-    // every later poll the same "nothing new" instantly, and the client would spin against the cache
-    // for ever while the tunnel looked busy. Entries are immutable, but the answer to "everything
-    // after X" grows, so it is not a stable value either — and `observe` is live state by definition.
-    // The body carries `waitedMs` so a client can *detect* a cache that ignored all of this: a
-    // response that claims no news after 8ms when it asked to wait 25s did not come from here.
+
+    // Caching turns on one property: **the answer to "everything after X" is a prefix of an
+    // append-only log**, so a response that carried entries stays true for ever — a later reader gets
+    // the same prefix plus more, walks to its cursor, and asks again. A cached chain therefore gives
+    // catch-up without touching the origin, and the worst a stale short answer costs is one extra
+    // hop per entry.
+    //
+    // What must never be cached is an answer without entries: "nothing new" is a *state*, and cached
+    // it would hand every later poll an instant empty response while the tunnel looked busy. Same for
+    // `observe`, which is live state by definition. So the response is cacheable exactly when it is a
+    // fact — and `waitedMs` remains the client's detector for a cache that got this wrong: no news
+    // after 8ms, when it asked to wait 25s, did not come from here.
+    const cacheable = entries.length > 0 && !observe;
     res.writeHead(200, {
       "Content-Type": "application/json",
-      "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-      // Named separately because several CDNs honour it even when they ignore Cache-Control.
-      "CDN-Cache-Control": "no-store",
-      "Surrogate-Control": "no-store",
-      Pragma: "no-cache",
+      ...(cacheable
+        ? {
+            // Immutable prefix: safe to hold, and `must-revalidate` is deliberately absent so a
+            // reader does not pay a round trip to be told what it already has. The TTL bounds how
+            // stale a *short* prefix can get, which costs hops rather than correctness.
+            "Cache-Control": "public, max-age=3600, immutable",
+            "CDN-Cache-Control": "public, max-age=3600",
+            "Surrogate-Control": "max-age=3600",
+          }
+        : {
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "CDN-Cache-Control": "no-store",
+            "Surrogate-Control": "no-store",
+            Pragma: "no-cache",
+          }),
       "X-Poll-Waited-Ms": String(waitedMs),
+      // Scope is the *server's* notion of what this caller may read, not part of the URL, so a cache
+      // keyed only by URL would be wrong the day scope becomes per-token. Varying on it costs nothing
+      // and keeps that door honest.
+      Vary: "Authorization",
     });
     res.end(
       JSON.stringify({

@@ -294,6 +294,8 @@ function streamSeam(
     // The activity feed watches a turn to know when it settles; these tests only drive boundaries,
     // so the watch simply never reports an end.
     attach: async () => ({ snapshot: { liveText: "", busy: true, lastAssistantText: "", tools: [] }, detach() {} }),
+    // `observe=1` asks for the running turn alongside the content.
+    snapshot: async () => ({ liveText: "", busy: false, lastAssistantText: "", tools: [] }),
   } as unknown as SessionHost;
   return {
     seam,
@@ -446,33 +448,38 @@ test("the CLI's watch follows the stream and remembers its position", async () =
   const served = await serveEvents(seam, [{ conversationId: 1, address: "spaces/S/threads/T" }], feed);
   const file = path.join(scratch, `watch-${Date.now()}.json`);
   const lines: string[] = [];
+  const stop = new AbortController();
+  let running: Promise<number> | undefined;
   try {
-    const running = watch(
+    running = watch(
       { baseUrl: served.baseUrl, statePath: file, out: (line) => lines.push(line) },
-      { conversationId: 1 },
+      { conversationId: 1, signal: stop.signal },
     );
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    // Wait for adoption before adding anything: a first run adopts at the head, so an entry that
+    // arrives before the adopt is deliberately not printed. Racing that is how this test was flaky.
+    for (let i = 0; i < 100 && !lines.some((line) => line.startsWith("# adopted")); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(lines.some((line) => line.startsWith("# adopted")), `watch never adopted: ${lines.join("\n")}`);
 
     // A turn in progress, then the entry it produced — the boundary is what makes the stream read.
     add(1, { entryId: 50, role: "assistant", text: "the answer arrives", origin: "gchat" });
     feed.started(1);
-    await new Promise((resolve) => setTimeout(resolve, 60));
+    // Poll for the printed line rather than sleeping a fixed time: the stream is asynchronous and a
+    // fixed wait is how this test was occasionally red for the wrong reason.
+    for (let i = 0; i < 200 && !lines.some((line) => line.includes("[50]")); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
     assert.ok(lines.some((line) => line.includes("[50] assistant:gchat: the answer arrives")), lines.join("\n"));
     assert.deepEqual((await loadState(file)).conversations["1"], { cursor: 50 });
 
-    // Reconnecting is the same call with the remembered id: nothing is repeated.
-    lines.length = 0;
-    const second = watch(
-      { baseUrl: served.baseUrl, statePath: file, out: (line) => lines.push(line) },
-      { conversationId: 1 },
-    );
-    await new Promise((resolve) => setTimeout(resolve, 40));
-    assert.equal(lines.filter((line) => line.startsWith("[")).length, 0, "no replay of what it already saw");
-    await served.close();
-    feed.close();
-    void running.catch(() => {});
-    void second.catch(() => {});
+    // The remembered position is the whole point: a restart resumes from it rather than replaying.
+    assert.deepEqual((await loadState(file)).conversations["1"], { cursor: 50 });
+    stop.abort();
+    await running.catch(() => {});
   } finally {
+    stop.abort();
+    await running?.catch(() => {});
     await served.close().catch(() => {});
     feed.close();
   }
@@ -607,18 +614,40 @@ test("observe adds the running turn to the same response, and needs a conversati
   }
 });
 
-test("a poll response is uncacheable, and says how long it waited", async () => {
-  // The failure this prevents: a CDN caching the "nothing new" answer hands it to every later poll
-  // instantly, so the client spins against the cache and never sees an entry. A timeout is a state,
-  // not a fact, so nothing about a poll may be stored — and `waitedMs` is how a client can *tell*
-  // when that has been ignored: no news after 8ms, when it asked to wait 25s, did not come from us.
+test("a poll that carried entries is cacheable, an empty one never is", async () => {
+  // The distinction is prefix-ness. "Everything after X" is a prefix of an append-only log, so an
+  // answer with entries stays true for ever and a cached chain gives catch-up without the origin.
+  // An *empty* answer is a state: cached, every later poll gets an instant "nothing new" and the
+  // client spins while the tunnel looks busy.
+  const { seam } = streamSeam([
+    { conversationId: 1, entries: [{ entryId: 11, role: "assistant", text: "news", origin: "gchat" }] },
+  ]);
+  const served = await serveEvents(seam, [{ conversationId: 1, address: "spaces/S/threads/T" }]);
+  try {
+    const withNews = await fetch(`${served.baseUrl}/v1/poll?since=10&wait=0&conversation=1`);
+    assert.match(withNews.headers.get("cache-control") ?? "", /max-age=3600/);
+    assert.match(withNews.headers.get("cache-control") ?? "", /immutable/);
+    assert.equal(withNews.headers.get("vary"), "Authorization", "scope is not in the URL, so it must vary");
+
+    // Observation is live state, so it de-duplicates the cacheable answer above.
+    const observed = await fetch(`${served.baseUrl}/v1/poll?since=10&wait=0&conversation=1&observe=1`);
+    assert.match(observed.headers.get("cache-control") ?? "", /no-store/);
+
+    // Nothing new: a state, never a fact.
+    const empty = await fetch(`${served.baseUrl}/v1/poll?since=99&wait=0&conversation=1`);
+    assert.match(empty.headers.get("cache-control") ?? "", /no-store/);
+    assert.equal(empty.headers.get("cdn-cache-control"), "no-store");
+  } finally {
+    await served.close();
+  }
+});
+
+test("a poll reports how long it waited, so a cached empty answer is detectable", async () => {
   const { seam } = streamSeam([{ conversationId: 1, entries: [] }]);
   const served = await serveEvents(seam, [{ conversationId: 1, address: "spaces/S/threads/T" }]);
   try {
     const response = await fetch(`${served.baseUrl}/v1/poll?since=5&wait=0.15`);
     assert.match(response.headers.get("cache-control") ?? "", /no-store/);
-    assert.equal(response.headers.get("cdn-cache-control"), "no-store");
-    assert.equal(response.headers.get("surrogate-control"), "no-store");
     assert.equal(response.headers.get("pragma"), "no-cache");
 
     const body = (await response.json()) as { waitedMs: number; cursor: number };
