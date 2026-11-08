@@ -114,6 +114,64 @@ export async function handleV1(
     return true;
   }
 
+  // --- One conversation's current state, once ----------------------------------
+  //
+  // The busy flag and the live text without a subscription: what a bridge asks when it wants to
+  // know "is a turn running here" — the painter's `busy` check, and the restart gate's quiet test.
+  // A single snapshot rather than an SSE stream, because it is a question, not a watch.
+  const one = /^\/v1\/conversations\/(\d+)$/.exec(url.pathname);
+  if (one && req.method === "GET") {
+    const conversationId = Number(one[1]);
+    const view = await deps.seam.snapshot(conversationId);
+    if (!view) {
+      json(res, 404, { ok: false, error: `no such conversation: ${conversationId}` });
+      return true;
+    }
+    json(res, 200, {
+      conversationId,
+      view: {
+        liveText: view.liveText,
+        busy: view.busy,
+        lastAssistantText: view.lastAssistantText,
+        tools: view.tools,
+      },
+    });
+    return true;
+  }
+
+  // --- How a submission ended ---------------------------------------------------
+  //
+  // The bridge submitted a message; it needs to know whether the turn finished, failed or is still
+  // running, without holding the turn in its own process (that is the whole point of the split).
+  // Long-poll by default, with a cap so a caller that gives up waiting still gets a truthful
+  // answer rather than a hung socket.
+  const submission = /^\/v1\/submissions\/(\d+)$/.exec(url.pathname);
+  if (submission && req.method === "GET") {
+    const submissionId = Number(submission[1]);
+    const waitSeconds = Math.min(60, Math.max(0, Number(url.searchParams.get("wait") ?? 30) || 0));
+    const settled = await Promise.race([
+      deps.seam.awaitSubmission(submissionId),
+      new Promise<undefined>((resolve) => {
+        const timer = setTimeout(() => resolve(undefined), waitSeconds * 1000);
+        timer.unref?.();
+      }),
+    ]);
+    if (!settled) {
+      json(res, 202, { submissionId, status: "running" });
+      return true;
+    }
+    if (settled.status === "done") {
+      json(res, 200, { submissionId, status: "done", answerId: settled.answerId, text: settled.text });
+      return true;
+    }
+    json(res, 200, {
+      submissionId,
+      status: settled.status,
+      ...(settled.reason === undefined ? {} : { reason: settled.reason }),
+    });
+    return true;
+  }
+
   const entries = /^\/v1\/conversations\/(\d+)\/entries$/.exec(url.pathname);
   if (entries && req.method === "GET") {
     const conversationId = Number(entries[1]);

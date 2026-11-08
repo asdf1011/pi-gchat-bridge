@@ -225,3 +225,62 @@ test("the command line behaves like a person would expect", async () => {
     await served.close();
   }
 });
+
+/* --- the two verbs a bridge needs to not be in-process ------------------------------ */
+
+test("one conversation's state is a snapshot, not a subscription", async () => {
+  // What the painter's busy check and the restart gate's quiet test both need: a question with an
+  // answer, not a watch.
+  const { seam } = fakeSeam([]);
+  (seam as unknown as Record<string, unknown>).snapshot = async (id: number) =>
+    id === 1 ? { liveText: "half", busy: true, lastAssistantText: "", tools: [] } : undefined;
+  const served = await serve(seam);
+  try {
+    const body = (await (await fetch(`${served.baseUrl}/v1/conversations/1`)).json()) as {
+      view: { busy: boolean; liveText: string };
+    };
+    assert.equal(body.view.busy, true);
+    assert.equal(body.view.liveText, "half");
+    assert.equal((await fetch(`${served.baseUrl}/v1/conversations/9`)).status, 404);
+  } finally {
+    await served.close();
+  }
+});
+
+test("a submission reports how it ended, so the bridge does not have to hold the turn", async () => {
+  const { seam } = fakeSeam([]);
+  (seam as unknown as Record<string, unknown>).awaitSubmission = async (id: number) =>
+    id === 5
+      ? { status: "done", answerId: 11, text: "the answer" }
+      : { status: "unanswered", reason: "aborted" };
+  const served = await serve(seam);
+  try {
+    const done = (await (await fetch(`${served.baseUrl}/v1/submissions/5`)).json()) as Record<string, unknown>;
+    assert.deepEqual(
+      { status: done.status, answerId: done.answerId, text: done.text },
+      { status: "done", answerId: 11, text: "the answer" },
+    );
+
+    // A failed turn is reported as a reason, not as an empty answer: the bridge worded its notices
+    // from that distinction.
+    const failed = (await (await fetch(`${served.baseUrl}/v1/submissions/6`)).json()) as Record<string, unknown>;
+    assert.equal(failed.status, "unanswered");
+    assert.equal(failed.reason, "aborted");
+  } finally {
+    await served.close();
+  }
+});
+
+test("a submission still running answers 202 rather than hanging the socket", async () => {
+  const { seam } = fakeSeam([]);
+  // Never settles: the bridge must be able to ask again rather than block for ever.
+  (seam as unknown as Record<string, unknown>).awaitSubmission = () => new Promise(() => {});
+  const served = await serve(seam);
+  try {
+    const response = await fetch(`${served.baseUrl}/v1/submissions/7?wait=0`);
+    assert.equal(response.status, 202);
+    assert.equal(((await response.json()) as { status: string }).status, "running");
+  } finally {
+    await served.close();
+  }
+});
