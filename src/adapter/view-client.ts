@@ -325,3 +325,44 @@ export class StreamLadder {
     return this.mode;
   }
 }
+
+/**
+ * One long poll of the log, as a client sees it.
+ *
+ * Deliberately a plain request: no connection to hold, no event kinds, no ladder. The cursor goes in
+ * the query and the answer comes back whole — which is the whole reason polling is worth considering
+ * over streaming here.
+ */
+export interface PollResult {
+  cursor: number;
+  entries: { conversationId: number; entryId: number; role: "user" | "assistant"; text: string; at?: number; origin?: string }[];
+  /** How long the server actually waited. Far below `wait` with no entries means a cache answered. */
+  waitedMs: number;
+  busy?: boolean;
+  view?: { liveText: string; busy: boolean; tools: unknown } | null;
+}
+
+export async function httpPoll(options: {
+  baseUrl: string;
+  since: number;
+  waitSeconds?: number;
+  batchMs?: number;
+  conversationId?: number;
+  observe?: boolean;
+  token?: string;
+  signal?: AbortSignal;
+}): Promise<PollResult> {
+  const query = new URLSearchParams({ since: String(options.since) });
+  if (options.waitSeconds !== undefined) query.set("wait", String(options.waitSeconds));
+  if (options.batchMs !== undefined) query.set("batch", String(options.batchMs));
+  if (options.conversationId !== undefined) query.set("conversation", String(options.conversationId));
+  if (options.observe) query.set("observe", "1");
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (options.token) headers.Authorization = `Bearer ${options.token}`;
+  const response = await fetch(`${options.baseUrl.replace(/\/$/, "")}/v1/poll?${query.toString()}`, {
+    headers,
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
+  if (!response.ok) throw new Error(`poll: HTTP ${response.status}`);
+  return (await response.json()) as PollResult;
+}

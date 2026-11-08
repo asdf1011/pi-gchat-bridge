@@ -570,3 +570,27 @@ test("with activity, the periodic check reads only turns that never settled", as
   assert.equal(reads, 0, "a turn that ends is not checked again");
   await painter.close();
 });
+
+test("entries handed over by a poll are consumed in order, and the cursor keeps up", async () => {
+  // The poll path, as the painter sees it: a batch arrives already ordered and already past the
+  // cursor; anything at or below the cursor is skipped, so a poll and a sweep can overlap safely.
+  const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
+  ledger.adopt(10, "new");
+  const { painter, posted } = painterFor(ledger, {});
+
+  await painter.ingest([
+    { conversationId: 1, entryId: 11, role: "user", text: "the prompt", origin: "webui" },
+    { conversationId: 1, entryId: 12, role: "assistant", text: "the answer", origin: "webui" },
+  ]);
+
+  assert.deepEqual(posted.map((row) => row.text), ["> the prompt\n\nthe answer"], "quoted, in one message");
+  assert.equal(ledger.cursor, 12);
+
+  // The same batch again — a re-delivered poll or a losing race with the sweep — changes nothing.
+  await painter.ingest([
+    { conversationId: 1, entryId: 11, role: "user", text: "the prompt", origin: "webui" },
+    { conversationId: 1, entryId: 12, role: "assistant", text: "the answer", origin: "webui" },
+  ]);
+  assert.equal(posted.length, 1, "already-consumed entries are not re-posted");
+  await painter.close();
+});

@@ -33,7 +33,7 @@ import { runDurableCommand } from "../adapter/commands.js";
 import { defaultSettings } from "../adapter/commands.js";
 import { ActivityFeed } from "./activity.js";
 import { Painter } from "./painter.js";
-import { httpActivitySource, httpEventsSource, httpViewSource, StreamLadder } from "../adapter/view-client.js";
+import { httpActivitySource, httpPoll, httpViewSource, StreamLadder } from "../adapter/view-client.js";
 import type { ProjectedView } from "../session-host/projection.js";
 import { chatTarget } from "../session-key.js";
 import { splitMessage } from "../stream.js";
@@ -113,6 +113,8 @@ async function main(): Promise<void> {
   // Conversations whose turns the painter posts (see the painter block below). Read
   // by the handler *and* the painter, from one value, so the two cannot disagree about
   // who owns a thread.
+  /** Stopped on shutdown so a held poll does not delay exit. */
+  let pollAbort: AbortController | undefined;
   /** Set once the painter is created, below. The handler pokes it; nothing else does. */
   let painter: Painter | undefined;
   // The server's own account of what it is doing. Subscribers are connections (§17), and the
@@ -800,6 +802,41 @@ async function main(): Promise<void> {
       );
       paintTimer.unref();
       instance.start();
+
+      // --- The delivery path: long-poll the log -------------------------------------
+      //
+      // The sweep above stays as the fallback; this is the mechanism. It is a loop of ordinary
+      // requests, so there is no connection to lose, no heartbeat to miss and no reconnect ladder:
+      // the cursor is the position, and a timeout is an ordinary answer. `wait` bounds how long a
+      // request may be held, and `batch` lets a turn's burst arrive as one response.
+      //
+      // Deliberately *beside* the sweep for now — both go through `ingest`, which is serialised and
+      // skips anything at or below the cursor, so whichever runs first consumes and the other finds
+      // nothing. Proving the poll in parallel is cheaper than being wrong alone.
+      pollAbort = new AbortController();
+      const poll = async (): Promise<void> => {
+        let backoff = 1_000;
+        while (!pollAbort.signal.aborted) {
+          try {
+            const result = await httpPoll({
+              baseUrl: config.selfUrl === "" ? `http://127.0.0.1:${config.healthPort}` : config.selfUrl,
+              since: ledger.cursor,
+              waitSeconds: 25,
+              batchMs: 250,
+              ...(config.webToken ? { token: config.webToken } : {}),
+              signal: pollAbort.signal,
+            });
+            if (result.entries.length > 0) await instance.ingest(result.entries);
+            backoff = 1_000;
+          } catch (error) {
+            if (pollAbort.signal.aborted) return;
+            logger.warn(`[paint] poll failed (${(error as Error).message}) — retrying in ${backoff}ms`);
+            await new Promise((resolve) => setTimeout(resolve, backoff));
+            backoff = Math.min(30_000, backoff * 2);
+          }
+        }
+      };
+      void poll();
       void instance.tick();
     }
   }
@@ -813,6 +850,7 @@ async function main(): Promise<void> {
    */
 
   const shutdown = async (): Promise<void> => {
+    pollAbort?.abort();
     if (paintTimer) clearInterval(paintTimer);
     logger.info("[bridge] shutting down...");
     await receiver.stop();

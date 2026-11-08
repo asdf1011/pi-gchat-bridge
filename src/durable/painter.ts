@@ -307,13 +307,46 @@ export class Painter {
       }
     }
     const safe = batch.filter((entry) => entry.entryId < frontier);
-    batch.length = 0;
-    batch.push(...safe);
-    batch.sort((a, b) => a.entryId - b.entryId);
-    if (batch.length === 0) return summary;
+    // Directly, not through `ingest`: this already runs inside the chain, and awaiting a promise
+    // chained *after* the running one is a deadlock.
+    await this.consumeBatch(safe, summary);
+    this.summary = summary;
+    return summary;
+  }
 
-    // A turn whose answer we are about to paint carries the prompt it is replying to, which is
-    // also in this batch — so the batch is consulted, not the transcript.
+  /**
+   * Take a batch of entries the way a *poll* delivers them: already in order, already past the
+   * cursor, already a prefix.
+   *
+   * Split out from the sweep because it is now the primary path — `GET /v1/poll` hands a bridge what
+   * has happened and the bridge hands it here — while the sweep stays as the fallback that reads the
+   * same way. Serialised on the same chain as a tick, so a poll and a sweep can never both consume
+   * the same entry.
+   */
+  async ingest(
+    entries: readonly { conversationId: number; entryId: number; role: "user" | "assistant"; text: string; at?: number; origin?: string }[],
+    summary: PaintSummary = { painted: 0, streamed: 0, posted: 0, failed: 0, adopted: 0 },
+  ): Promise<void> {
+    const run = this.chain.then(() => this.consumeBatch(entries, summary));
+    this.chain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  /** The body of a batch, for callers already inside the chain. Never re-enters it. */
+  private async consumeBatch(
+    entries: readonly { conversationId: number; entryId: number; role: "user" | "assistant"; text: string; at?: number; origin?: string }[],
+    summary: PaintSummary,
+  ): Promise<void> {
+    const batch = entries
+      .filter((entry) => entry.entryId > this.deps.ledger.cursor)
+      .sort((a, b) => a.entryId - b.entryId);
+    if (batch.length === 0) return;
+
+    // A turn whose answer we are about to paint carries the prompt it is replying to, which is also
+    // in this batch — so the batch is consulted, not the transcript.
     for (const [index, entry] of batch.entries()) {
       try {
         await this.consume(entry, batch.slice(0, index), summary);
@@ -324,8 +357,8 @@ export class Painter {
     }
     await this.deps.ledger.save();
 
-    // A turn that ended without an answer leaves a placeholder behind; the handler words the
-    // failure notice, but the placeholder is this component's to remove.
+    // A turn that ended without an answer leaves a placeholder behind; the handler words the failure
+    // notice, but the placeholder is this component's to remove.
     for (const [conversationId, open] of this.open) {
       if (await this.deps.busy(conversationId).catch(() => true)) continue;
       await open.stream.abandon().catch(() => {});
@@ -333,9 +366,6 @@ export class Painter {
       this.open.delete(conversationId);
       this.endTurn(conversationId);
     }
-
-    this.summary = summary;
-    return summary;
   }
 
   /**
