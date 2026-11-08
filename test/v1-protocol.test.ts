@@ -436,3 +436,39 @@ test("a cursor further back than the replay window is told so, rather than flood
     await served.close();
   }
 });
+
+test("live text is opt-in, needs a conversation, and arrives on the same connection", async () => {
+  // The one thing the log stream cannot carry: the answer being written. It is ephemeral and
+  // per-turn, so it is a flag on a *filtered* stream rather than a property of the log.
+  const { seam } = streamSeam([
+    { conversationId: 1, entries: [{ entryId: 40, role: "user", text: "go", origin: "gchat" }] },
+  ]);
+  const frames: ((view: unknown) => void)[] = [];
+  (seam as unknown as Record<string, unknown>).attach = async (_id: number, onFrame: (view: unknown) => void) => {
+    frames.push(onFrame);
+    return {
+      snapshot: { liveText: "half", busy: true, lastAssistantText: "", tools: [] },
+      detach() {},
+    };
+  };
+  const served = await serveEvents(seam, [{ conversationId: 1, address: "spaces/S/threads/T" }]);
+  try {
+    // Unfiltered: refused, because per-token text for every running turn is not something to fan out.
+    assert.equal((await fetch(`${served.baseUrl}/v1/events?live=1`)).status, 400);
+
+    const response = await fetch(`${served.baseUrl}/v1/events?since=39&conversation=1&live=1`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    frames[0]?.({ liveText: "half an answer", busy: true, lastAssistantText: "", tools: [] });
+
+    const events = await readEvents(response, 4);
+    assert.deepEqual(
+      events.map((event) => event.event),
+      ["ready", "entry", "view", "view"],
+      "position, content, the live snapshot, then live text",
+    );
+    assert.match(events[2]!.data, /"liveText":"half"/, "the snapshot, so a joiner paints");
+    assert.match(events[3]!.data, /half an answer/);
+  } finally {
+    await served.close();
+  }
+});

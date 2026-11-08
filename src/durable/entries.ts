@@ -71,6 +71,11 @@ export async function entriesAfter(
       reachedCursor = true; // ran out of transcript: everything there is, is in hand
       break;
     }
+    // A *short* page is also the end of the transcript: pages are counted back from the newest, so
+    // fewer messages than asked for means the beginning was reached. Without this, a conversation
+    // with three entries and a page size of 200 looks like it might have more, and callers report a
+    // gap that does not exist.
+    const exhausted = messages.length < pageSize;
     for (const message of messages) {
       if (message.entryId === undefined) continue;
       if (message.entryId > newest) newest = message.entryId;
@@ -85,6 +90,10 @@ export async function entriesAfter(
         ...(message.at === undefined ? {} : { at: message.at }),
         ...(message.origin === undefined ? {} : { origin: message.origin }),
       });
+    }
+    if (exhausted) {
+      reachedCursor = true;
+      break;
     }
     if (reachedCursor) break;
   }

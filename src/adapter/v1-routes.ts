@@ -260,6 +260,15 @@ export async function handleV1(
     }
     const target = only === undefined ? allowed : [only];
 
+    // Live text is opt-in and needs a conversation. `view` frames are ephemeral — not facts, not
+    // replayable — and per-token text for every running turn is the most expensive thing this
+    // server could push, so an unfiltered subscription to it is refused rather than served badly.
+    const live = url.searchParams.get("live") === "1";
+    if (live && only === undefined) {
+      json(res, 400, { ok: false, error: "live=1 needs conversation=<id>: live text is per turn" });
+      return true;
+    }
+
     res.writeHead(200, {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
@@ -344,6 +353,18 @@ export async function handleV1(
         })
       : () => {};
 
+    // The turn being written, if asked for: the snapshot first so a joiner paints immediately,
+    // then a frame per update. This is the same projection the per-conversation streams serve, on
+    // the same connection as the content — one subscription for a surface painting one conversation.
+    let view: { detach(): void } | undefined;
+    if (live && only !== undefined) {
+      const attached = await deps.seam.attach(only, (projected) => send("view", projected));
+      if (attached) {
+        view = attached;
+        send("view", attached.snapshot);
+      }
+    }
+
     const beat = setInterval(
       () => send("heartbeat", { at: Date.now(), cursor: newestSent }),
       deps.heartbeatMs ?? 15_000,
@@ -353,6 +374,7 @@ export async function handleV1(
       stopped = true;
       clearInterval(beat);
       unsubscribe();
+      view?.detach();
     };
     req.on("close", stop);
     res.on("close", stop);

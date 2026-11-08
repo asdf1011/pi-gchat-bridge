@@ -79,3 +79,15 @@ test("an unreadable conversation is reported as such", async () => {
   assert.deepEqual(window.entries, []);
   assert.equal(window.newest, 0);
 });
+
+test("a short page is the end of the transcript, not a possible gap", async () => {
+  // Paging counts back from the newest, so a page shorter than asked for means the beginning was
+  // reached. Missing this made a three-entry conversation look like it might have more history,
+  // and the /v1/events stream reported a resync for a gap that did not exist.
+  const messages = [
+    ...entry(1, [{ role: "user" as const, text: "only entry", origin: "gchat" }]),
+  ];
+  const window = await entriesAfter(historyOf(messages), 1, 0, { pageSize: 200 });
+  assert.equal(window.reachedCursor, true);
+  assert.deepEqual(window.entries.map((row) => row.entryId), [1]);
+});
