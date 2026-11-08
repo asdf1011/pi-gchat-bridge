@@ -381,9 +381,10 @@ test("a poke does nothing for a conversation this painter does not own, or has n
   assert.equal(fresh.get(1), undefined, "adoption stays the tick's job");
 });
 
-test("with an activity stream the sweep reads nothing at all", async () => {
-  // The point of activity: a turn is announced, so the sweep has no job while it is healthy. This
-  // is what removes the 60s poll from the normal path.
+test("with an activity stream the sweep still runs, as a safety net", async () => {
+  // It was tempting to switch the sweep off once turns were pushed, and doing that turned a
+  // missed event into a lost reply: two answers sat unposted while each mechanism believed the
+  // other had it. The net stays until the push path has a much longer record than this.
   const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
   ledger.adopt(1, 10, "new");
   let reads = 0;
@@ -404,7 +405,7 @@ test("with an activity stream the sweep reads nothing at all", async () => {
   });
 
   await painter.tick();
-  assert.equal(reads, 0, "activity is the mechanism, so the sweep stays quiet");
+  assert.ok(reads > 0, "the sweep still looks, so a missed event costs a minute rather than a message");
   await painter.close();
 });
 

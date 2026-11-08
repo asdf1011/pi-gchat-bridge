@@ -822,13 +822,13 @@ async function main(): Promise<void> {
       // The interval is the fallback for a deployment with no activity stream: it catches a
       // turn nothing announced (a web message, a resume after a restart).
       const instance = painter;
-      // With an activity stream there is no timer at all: turns are announced, and the ladder
-      // polls the sweep only while the stream is degraded. In-process mode has no stream to
-      // degrade, so there the sweep is the mechanism and keeps its interval.
-      if (config.viewMode !== "stream") {
-        paintTimer = setInterval(() => void instance.tick(), Math.min(config.ledgerIntervalMs, 15_000));
-        paintTimer.unref();
-      }
+      // Always a sweep. Shorter where there is no activity stream, because there it *is* the
+      // mechanism; slower where turns are also pushed, because there it is the safety net. An
+      // hour ago this timer was conditional, on the theory that a pushed turn needs no sweep —
+      // and two replies went missing while everything looked healthy.
+      const sweepMs = config.viewMode === "stream" ? 60_000 : Math.min(config.ledgerIntervalMs, 15_000);
+      paintTimer = setInterval(() => void instance.tick(), sweepMs);
+      paintTimer.unref();
       instance.start();
       void instance.tick();
     }

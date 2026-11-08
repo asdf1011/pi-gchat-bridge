@@ -65,15 +65,33 @@ test("one turn is watched once, however many submissions join it", async () => {
   assert.deepEqual(seen.map((event) => event.kind), ["started", "started", "started", "settled"]);
 });
 
-test("a turn that already finished when the watch begins settles immediately", async () => {
-  // The snapshot is the current state: a submission fast enough to end before the watcher attached
-  // must still produce its settle, or the reader waits for an event that will never come.
-  const { seam } = fakeSeam({ busy: false });
-  const feed = new ActivityFeed({ seam });
+test("an idle frame before the run starts is not a settle", async () => {
+  // The regression that silenced two replies: `started` is announced when the submission is
+  // accepted, the run begins a moment later, so the first frame is usually idle. Treating it as
+  // the end closed the painter's view before the turn began, and nothing ever posted the answer.
+  const { seam, frames } = fakeSeam({ busy: false });
+  const feed = new ActivityFeed({ seam, settleGraceMs: 60_000 });
   const seen: ActivityEvent[] = [];
   feed.subscribe((event) => seen.push(event));
-  feed.started(3);
+
+  feed.started(5);
   await new Promise((resolve) => setImmediate(resolve));
+  frames[0]?.({ busy: false }); // the gap between accepting and starting
+  assert.deepEqual(seen.map((event) => event.kind), ["started"], "not settled: the turn has not run yet");
+
+  frames[0]?.({ busy: true });
+  frames[0]?.({ busy: false });
+  assert.deepEqual(seen.map((event) => event.kind), ["started", "settled"], "settled when it actually ended");
+});
+
+test("a turn that never starts settles on the grace timeout", async () => {
+  // A submission that fails before running must still produce a settle, or a reader waits forever.
+  const { seam } = fakeSeam({ busy: false });
+  const feed = new ActivityFeed({ seam, settleGraceMs: 5 });
+  const seen: ActivityEvent[] = [];
+  feed.subscribe((event) => seen.push(event));
+  feed.started(6);
+  await new Promise((resolve) => setTimeout(resolve, 30));
   assert.deepEqual(seen.map((event) => event.kind), ["started", "settled"]);
 });
 

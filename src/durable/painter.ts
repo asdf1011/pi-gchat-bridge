@@ -251,10 +251,12 @@ export class Painter {
 
     for (const { conversationId } of conversations) {
       if (!this.deps.owns(conversationId)) continue;
-      // With activity, a turn is announced and a live conversation needs nothing from the sweep.
-      // Without it — in-process mode, or a degraded stream — the sweep *is* the mechanism, and
-      // this loop is how a dormant thread gets noticed at all.
-      if (this.deps.activity !== undefined && this.deps.watch !== undefined) continue;
+      // The sweep runs even with activity. It was tempting to switch it off once turns were
+      // pushed — and doing that turned a missed event into a *lost reply*: two answers sat
+      // unposted while every mechanism believed the other one had it. A safety net that costs
+      // one page read per conversation a minute is worth keeping until the push path has a much
+      // longer record than this.
+
       const position = this.deps.ledger.get(conversationId);
       if (!position) {
         // No position yet. The painter adopts for itself rather than deferring to the

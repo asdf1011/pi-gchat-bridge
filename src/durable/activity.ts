@@ -54,6 +54,15 @@ export class ActivityFeed {
       seam: Pick<SessionHost, "attach">;
       now?(): number;
       log?(message: string): void;
+      /**
+       * How long a turn may take to *start* before the watch gives up and calls it settled.
+       *
+       * `started` is announced when the submission is accepted, and the run begins a moment
+       * later — so the first frame a watcher sees is often already idle. Treating that as "the
+       * turn ended" is what silenced two replies: the painter closed its view before the turn
+       * had begun, and with no sweep left to notice, the answer was never posted.
+       */
+      settleGraceMs?: number;
     },
   ) {}
 
@@ -93,16 +102,37 @@ export class ActivityFeed {
     // Watch the turn to its end. The view is the honest signal: `busy` going false is the same
     // edge every surface uses, and it needs no cooperation from whatever awaited the turn.
     void (async () => {
+      // A turn settles when `busy` goes true → false. An idle frame *before* the run has begun
+      // is not a settle, it is the gap between accepting a submission and starting it — the
+      // distinction that cost two replies.
+      let sawBusy = false;
       let handle: Awaited<ReturnType<typeof this.deps.seam.attach>>;
+      const settle = (): void => {
+        if (!this.watching.delete(conversationId)) return; // already settled
+        clearTimeout(grace);
+        handle?.detach();
+        this.emit({ conversationId, kind: "settled", at: this.now() });
+      };
+      // A turn that never starts (a submission that fails immediately) still has to settle, or a
+      // reader waits for an event that will never come.
+      const grace = setTimeout(() => {
+        if (sawBusy) return; // it is running; the view will say when it stops
+        settle();
+      }, this.deps.settleGraceMs ?? 60_000);
+      grace.unref?.();
+
       try {
         handle = await this.deps.seam.attach(conversationId, (view) => {
-          if ((view as { busy?: unknown }).busy !== false) return;
-          handle?.detach();
-          this.watching.delete(conversationId);
-          this.emit({ conversationId, kind: "settled", at: this.now() });
+          const busy = (view as { busy?: unknown }).busy === true;
+          if (busy) {
+            sawBusy = true;
+            return;
+          }
+          if (sawBusy) settle();
         });
       } catch (error) {
         this.watching.delete(conversationId);
+        clearTimeout(grace);
         (this.deps.log ?? ((line: string) => logger.warn(line)))(
           `[activity] cannot watch conversation ${conversationId}: ${(error as Error).message}`,
         );
@@ -110,15 +140,11 @@ export class ActivityFeed {
       }
       if (!handle) {
         this.watching.delete(conversationId);
+        clearTimeout(grace);
         return;
       }
-      // The first frame is the current state: a turn that has already finished settles now
-      // rather than never.
-      if (handle.snapshot.busy !== true) {
-        handle.detach();
-        this.watching.delete(conversationId);
-        this.emit({ conversationId, kind: "settled", at: this.now() });
-      }
+      // Attaching can itself reveal a turn that is already running.
+      if (handle.snapshot.busy === true) sawBusy = true;
     })();
   }
 
