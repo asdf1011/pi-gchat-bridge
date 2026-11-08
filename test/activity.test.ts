@@ -153,34 +153,78 @@ async function readEvents(response: Response, count: number): Promise<{ event: s
   return events;
 }
 
-test("an unfiltered subscriber hears every conversation; a filtered one hears only its own", async () => {
+test("activity is unfiltered, and points at the per-conversation stream instead", async () => {
   const { seam } = fakeSeam();
   const feed = new ActivityFeed({ seam });
   const served = await serve(feed);
   try {
-    const all = await fetch(`${served.url}/v1/activity`);
-    const one = await fetch(`${served.url}/v1/activity?conversation=2`);
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    // A filtered activity stream *is* a per-conversation stream, and that one also carries the live
+    // view — so it has a path of its own rather than being a mode of this one.
+    const refused = await fetch(`${served.url}/v1/activity?conversation=2`);
+    assert.equal(refused.status, 400);
+    assert.match(((await refused.json()) as { error: string }).error, /conversations\/\{id\}\/events/);
 
+    const all = await fetch(`${served.url}/v1/activity`);
+    await new Promise((resolve) => setTimeout(resolve, 30));
     feed.started(1);
     feed.started(2);
     await new Promise((resolve) => setTimeout(resolve, 30));
-
-    const allEvents = await readEvents(all, 2);
+    const events = await readEvents(all, 2);
     assert.deepEqual(
-      allEvents.map((event) => JSON.parse(event.data).conversationId),
+      events.map((event) => JSON.parse(event.data).conversationId),
       [1, 2],
-      "the chat bridge's shape: everything",
-    );
-
-    const oneEvents = await readEvents(one, 1);
-    assert.deepEqual(
-      oneEvents.map((event) => JSON.parse(event.data).conversationId),
-      [2],
-      "the pane's shape: only what it is showing",
+      "the chat bridge's shape: every conversation",
     );
   } finally {
     await served.close();
+    feed.close();
+  }
+});
+
+test("one conversation's stream carries boundaries and live frames together", async () => {
+  // The pane's shape: one connection for the conversation it is showing, instead of one activity
+  // subscription plus one view subscription for the same reader.
+  const { seam, frames } = fakeSeam();
+  const feed = new ActivityFeed({ seam });
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    void handleV1(req, res, url, {
+      seam: {
+        ...(seam as unknown as Record<string, unknown>),
+        history: async () => [],
+        attach: async (_id: number, onFrame: (view: unknown) => void) => {
+          frames.push(onFrame as never);
+          return { snapshot: { liveText: "starting", busy: true, lastAssistantText: "", tools: [] }, detach() {} };
+        },
+      } as unknown as SessionHost,
+      conversations: async () => [],
+      activity: feed,
+      heartbeatMs: 5_000,
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/v1/conversations/1/events`);
+    assert.equal(response.status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    feed.started(1); // a boundary for this conversation
+    feed.started(2); // and one for another, which must not arrive here
+    frames[0]?.({ liveText: "half", busy: true, lastAssistantText: "", tools: [] });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const events = await readEvents(response, 3);
+    assert.deepEqual(
+      events.map((event) => event.event),
+      ["view", "activity", "view"],
+      "the snapshot first, then the boundary, then live text",
+    );
+    assert.equal(JSON.parse(events[1]!.data).conversationId, 1, "only this conversation's boundary");
+    assert.match(events[2]!.data, /half/);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
     feed.close();
   }
 });

@@ -74,9 +74,25 @@ export function httpViewSource(options: {
  * hear about all of them. The `events` it yields are hints, so a caller does not repaint from
  * them; it goes and reads.
  */
-export function httpActivitySource(options: { baseUrl: string; token?: string; conversationId?: number }): ViewSource {
-  const suffix = options.conversationId === undefined ? "" : `?conversation=${options.conversationId}`;
-  return sseSource(`${options.baseUrl.replace(/\/$/, "")}/v1/activity${suffix}`, options.token);
+export function httpActivitySource(options: { baseUrl: string; token?: string }): ViewSource {
+  return sseSource(`${options.baseUrl.replace(/\/$/, "")}/v1/activity`, options.token);
+}
+
+/**
+ * One conversation's stream: `activity` boundaries and `view` frames over one connection.
+ *
+ * What a surface watching a single conversation should hold, instead of the unfiltered activity
+ * stream plus a view stream. Both carry hints, so the ladder treats them identically.
+ */
+export function httpConversationEventsSource(options: {
+  baseUrl: string;
+  conversationId: number;
+  token?: string;
+}): ViewSource {
+  return sseSource(
+    `${options.baseUrl.replace(/\/$/, "")}/v1/conversations/${options.conversationId}/events`,
+    options.token,
+  );
 }
 
 /** The SSE reader both sources share: frames and heartbeats, nothing else. */

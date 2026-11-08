@@ -193,10 +193,14 @@ export async function handleV1(
       json(res, 404, { ok: false, error: "activity is not served here" });
       return true;
     }
-    const only = url.searchParams.get("conversation");
-    const filter = only === null ? undefined : Number(only);
-    if (filter !== undefined && !Number.isFinite(filter)) {
-      json(res, 400, { ok: false, error: "conversation must be a number" });
+    if (url.searchParams.has("conversation")) {
+      // A filtered activity stream would be a *per-conversation* stream, and that one should also
+      // carry the live view — one subscription for a surface watching a single conversation
+      // instead of two. Pointing at it is better than quietly ignoring the filter.
+      json(res, 400, {
+        ok: false,
+        error: "use /v1/conversations/{id}/events for one conversation (activity and view together)",
+      });
       return true;
     }
     res.writeHead(200, {
@@ -209,15 +213,61 @@ export async function handleV1(
       if (res.writableEnded) return;
       res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
     };
-    const unsubscribe = deps.activity.subscribe((event) => {
-      if (filter !== undefined && event.conversationId !== filter) return;
-      send("activity", event);
-    });
+    const unsubscribe = deps.activity.subscribe((event) => send("activity", event));
     const beat = setInterval(() => send("heartbeat", { at: Date.now() }), deps.heartbeatMs ?? 15_000);
     beat.unref?.();
     const stop = (): void => {
       clearInterval(beat);
       unsubscribe();
+    };
+    req.on("close", stop);
+    res.on("close", stop);
+    return true;
+  }
+
+  // --- One conversation's whole stream: boundaries and live state ----------------
+  //
+  // Everything a surface watching *one* conversation wants, over one connection: `activity` when a
+  // turn starts or settles, `view` while it runs. Two streams with the same lifetime and the same
+  // reader is a subscription nobody needs to hold twice — and the alternative, rolling them into
+  // the unfiltered activity stream, would make that stream's contents depend on a query parameter
+  // (cheap boundaries for everything, or expensive live state for one thing).
+  const events = /^\/v1\/conversations\/(\d+)\/events$/.exec(url.pathname);
+  if (events && req.method === "GET") {
+    const conversationId = Number(events[1]);
+    if ((await deps.seam.history(conversationId, { limit: 1, offset: 0 })) === undefined) {
+      json(res, 404, { ok: false, error: `no such conversation: ${conversationId}` });
+      return true;
+    }
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+    const send = (event: string, data: unknown): void => {
+      if (res.writableEnded) return;
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+
+    const view = await deps.seam.attach(conversationId, (projected) => send("view", projected));
+    if (!view) {
+      json(res, 404, { ok: false, error: `no such conversation: ${conversationId}` });
+      return true;
+    }
+    send("view", view.snapshot); // a joiner paints immediately, as on the view stream
+
+    const unsubscribe = deps.activity
+      ? deps.activity.subscribe((event) => {
+          if (event.conversationId === conversationId) send("activity", event);
+        })
+      : () => {};
+    const beat = setInterval(() => send("heartbeat", { at: Date.now() }), deps.heartbeatMs ?? 15_000);
+    beat.unref?.();
+    const stop = (): void => {
+      clearInterval(beat);
+      unsubscribe();
+      view.detach();
     };
     req.on("close", stop);
     res.on("close", stop);
