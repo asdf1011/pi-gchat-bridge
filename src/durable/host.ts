@@ -840,6 +840,10 @@ export class BridgeHost {
       return false;
     }
     const current = (await this.harness.snapshot(OriginsDoc, this.context)) ?? { byEntry: {} };
+    // A retried submission (same `requestId`) is deduped upstream and arrives here again for an
+    // entry that is already stamped. That is the idempotency working, not a fault, so it must be
+    // quiet — the first version warned "every user entry is stamped", which reads like damage.
+    if (originForSubmission(current, submission)) return true;
     const entryId = [...ids].reverse().find((id) => current.byEntry[`${conversationId}:${id}`] === undefined);
     if (entryId === undefined) {
       logger.warn(`[origins] conversation ${conversationId}: every user entry is stamped (submission ${submission})`);

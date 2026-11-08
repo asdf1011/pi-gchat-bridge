@@ -21,6 +21,7 @@
  * Serving it: the server's own HTTP listener answers `/v1` (see `adapter/v1-routes.ts`).
  * This file is only the client, which is why it can be tested against a stub.
  */
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -177,11 +178,17 @@ export async function tail(
 }
 
 /** `say`: put words into the conversation. The origin makes it a first-class message. */
-export async function say(deps: CliDeps, conversationId: number, text: string): Promise<number> {
+export async function say(
+  deps: CliDeps,
+  conversationId: number,
+  text: string,
+  /** Stable per attempt, so a retried `say` is the same submission rather than a second message. */
+  requestId: string = randomUUID(),
+): Promise<number> {
   const out = deps.out ?? ((line: string) => console.log(line));
   const body = (await call(deps, `/v1/conversations/${conversationId}/submissions`, {
     method: "POST",
-    body: { text, origin: "cli" },
+    body: { text, origin: "cli", requestId },
   })) as { submissionId?: number };
   out(`submitted ${body.submissionId ?? "?"} to conversation ${conversationId} (origin cli)`);
   return body.submissionId ?? 0;
