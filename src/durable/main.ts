@@ -693,7 +693,7 @@ async function main(): Promise<void> {
                   // Degraded: read the entries, which is what the bridge would otherwise do on
                   // its own timer. That is the §18 fallback, and it is the only polling left.
                   poll: async () => {
-                    await painter?.poke(conversationId);
+                    await painter?.poke();
                   },
                   heartbeatMs: 15_000,
                   onMode: (mode) => logger.info(`[paint] conversation ${conversationId}: view ${mode}`),
@@ -745,7 +745,7 @@ async function main(): Promise<void> {
               seam,
               conversationId,
               stream,
-              onSettle: () => void painter?.poke(conversationId),
+              onSettle: () => void painter?.poke(),
             });
             return {
               stream: {

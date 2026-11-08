@@ -209,30 +209,15 @@ export class Painter {
   constructor(private deps: PainterDeps) {}
 
   /**
-   * Look at one conversation now.
+   * Look at the log now.
    *
-   * The settle edge of a view frame calls this, so an answer is finished the moment the turn
-   * ends rather than at the next tick. It is the same work a tick does for that conversation
-   * — one read of the entries past the cursor, then paint or post — so there is one path and
-   * no second way to decide what an answer is.
+   * Despite the name this is a *global* look, because the cursor is global: advancing it from one
+   * conversation's entries would step over earlier entries in another, and those would never be
+   * read again. So any "look now" is a merge of every owned conversation — which is what a tick
+   * does, and the reason this is now a thin alias.
    */
-  async poke(conversationId: number): Promise<void> {
-    const run = this.chain.then(async () => {
-      if (!this.deps.owns(conversationId)) return;
-      const position = this.deps.ledger.get(conversationId);
-      if (!position) return; // adoption is the tick's job; a poke never invents a position
-      const summary: PaintSummary = { painted: 0, streamed: 0, posted: 0, failed: 0, adopted: 0 };
-      try {
-        await this.tickOne(conversationId, position.cursor, summary);
-      } catch (error) {
-        this.log(`[paint] conversation ${conversationId}: ${(error as Error).message}`);
-      }
-    });
-    this.chain = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    return run;
+  async poke(): Promise<void> {
+    await this.tick();
   }
 
   /**
@@ -253,7 +238,7 @@ export class Painter {
       this.log(
         `[paint] conversation ${conversationId}: a turn claimed to start and has not settled — checking it`,
       );
-      await this.poke(conversationId);
+      await this.poke();
       // Looked at once; if it is still unsettled next time, the log says so again. Clearing it
       // here would hide a turn that genuinely never ends.
       this.inFlight.set(conversationId, now);
@@ -291,45 +276,138 @@ export class Painter {
       this.log(`[paint] cannot list conversations: ${(error as Error).message}`);
       return summary;
     }
+    const owned = conversations.filter((conversation) => this.deps.owns(conversation.conversationId));
+    if (owned.length === 0) return summary;
 
-    for (const { conversationId } of conversations) {
-      if (!this.deps.owns(conversationId)) continue;
-      // The sweep runs even with activity. It was tempting to switch it off once turns were
-      // pushed — and doing that turned a missed event into a *lost reply*: two answers sat
-      // unposted while every mechanism believed the other one had it. A safety net that costs
-      // one page read per conversation a minute is worth keeping until the push path has a much
-      // longer record than this.
+    // No position at all: take one at the newest entry anywhere, and paint nothing on this look.
+    if (!this.deps.ledger.hasPosition()) {
+      await this.adoptAtHead(owned);
+      return summary;
+    }
 
-      const position = this.deps.ledger.get(conversationId);
-      if (!position) {
-        // No position yet. The painter adopts for itself rather than deferring to the
-        // shadow pass: once it owns a conversation the pass stays out of it entirely
-        // (a pass that advanced the cursor past an answer would silently stop the
-        // painter from ever painting it), so there is nobody else to take the position.
-        // Adopting at the head is the same rule the pass uses — never at zero, or a
-        // captured conversation would be replayed.
-        const window = await entriesAfter(this.deps, conversationId, 0, this.pages);
-        this.deps.ledger.adopt(conversationId, window.newest, this.deps.ledger.recovered ? "lost-position" : "new");
-        await this.deps.ledger.save();
-        this.log(
-          `[paint] ${this.deps.address?.(conversationId) ?? `conversation ${conversationId}`}: ` +
-            `adopted at entry ${window.newest} (` +
-            (this.deps.ledger.recovered
-              ? "the position file was unreadable"
-              : "nothing before this painter's first look is repainted") +
-            ")",
-        );
-        continue;
-      }
+    // One cursor, so entries must be consumed in *global* order: reading one conversation at a
+    // time would let a busy thread's later entry advance the cursor past an earlier entry in a
+    // quiet one, and that entry would never be read again. Hence a batch, merged and sorted.
+    const batch: { conversationId: number; entryId: number; role: "user" | "assistant"; text: string; at?: number; origin?: string }[] = [];
+    // One cursor, so the batch may only be consumed up to the *frontier*: the earliest id where some
+    // conversation has more that we did not read. Advancing past it would step over entries in a
+    // conversation that was cut short by the page budget, and they would never be read again — the
+    // failure mode a per-conversation cursor used to make impossible.
+    let frontier = Number.POSITIVE_INFINITY;
+    for (const { conversationId } of owned) {
       try {
-        await this.tickOne(conversationId, position.cursor, summary);
+        const window = await entriesAfter(this.deps, conversationId, this.deps.ledger.cursor, this.pages);
+        if (!window.reachedCursor && window.entries.length > 0) {
+          frontier = Math.min(frontier, Math.max(...window.entries.map((entry) => entry.entryId)) + 1);
+        }
+        batch.push(...window.entries);
       } catch (error) {
         summary.failed += 1;
         this.log(`[paint] conversation ${conversationId}: ${(error as Error).message}`);
       }
     }
+    const safe = batch.filter((entry) => entry.entryId < frontier);
+    batch.length = 0;
+    batch.push(...safe);
+    batch.sort((a, b) => a.entryId - b.entryId);
+    if (batch.length === 0) return summary;
+
+    // A turn whose answer we are about to paint carries the prompt it is replying to, which is
+    // also in this batch — so the batch is consulted, not the transcript.
+    for (const [index, entry] of batch.entries()) {
+      try {
+        await this.consume(entry, batch.slice(0, index), summary);
+      } catch (error) {
+        summary.failed += 1;
+        this.log(`[paint] conversation ${entry.conversationId}: ${(error as Error).message}`);
+      }
+    }
+    await this.deps.ledger.save();
+
+    // A turn that ended without an answer leaves a placeholder behind; the handler words the
+    // failure notice, but the placeholder is this component's to remove.
+    for (const [conversationId, open] of this.open) {
+      if (await this.deps.busy(conversationId).catch(() => true)) continue;
+      await open.stream.abandon().catch(() => {});
+      open.detach();
+      this.open.delete(conversationId);
+      this.endTurn(conversationId);
+    }
+
     this.summary = summary;
     return summary;
+  }
+
+  /**
+   * One entry, decided and acted on.
+   *
+   * This is the whole of the painter's judgement in one place, and it is the same judgement whether
+   * the entry arrived on the stream or was read by the sweep:
+   *
+   *   - **commentary** (an assistant entry with no origin stamp) is accounted for and never painted:
+   *     a turn emits an entry per message and only the settled one is its answer;
+   *   - **an answer** becomes one message — the placeholder finished in place, or posted plainly if
+   *     no stream was open — quoting a prompt that came from another surface;
+   *   - **its own surface's entries** are stepped over: they are already in the thread.
+   */
+  private async consume(
+    entry: { conversationId: number; entryId: number; role: "user" | "assistant"; text: string; at?: number; origin?: string },
+    earlier: readonly { conversationId: number; entryId: number; role: "user" | "assistant"; text: string; origin?: string }[],
+    summary: PaintSummary,
+  ): Promise<void> {
+    const conversationId = entry.conversationId;
+
+    if (this.isAnswer(entry)) {
+      const prompt = this.promptFor(earlier, entry);
+      const body = prompt ? `${quotePrompt(prompt.text)}\n\n${entry.text}` : entry.text;
+      const open = this.open.get(conversationId);
+      if (open) {
+        await open.stream.finish(body);
+        open.detach();
+        this.open.delete(conversationId);
+        summary.streamed += 1;
+      } else {
+        await this.deps.surfaceClient.post(conversationId, body);
+        summary.posted += 1;
+      }
+      this.endTurn(conversationId);
+      summary.painted += 1;
+      this.deps.ledger.advance(entry.entryId);
+      this.log(
+        `[paint] ${this.deps.address?.(conversationId) ?? `conversation ${conversationId}`}: ` +
+          `painted answer ${entry.entryId} (${entry.text.length} chars)${prompt ? ", quoting the prompt" : ""}`,
+      );
+      return;
+    }
+
+    if (entry.role === "user" && this.deps.watch === undefined) {
+      // A turn *still running* and nothing is watching it: open the stream that paints it. The
+      // `busy` check is what separates "a turn started just now" from "a prompt we are catching up
+      // on", and only the first deserves a placeholder — a replayed prompt does not.
+      if (await this.deps.busy(conversationId).catch(() => false)) {
+        await this.ensureStream(conversationId, "polled");
+      }
+    }
+    // Commentary, a prompt, or this surface's own words: accounted for, not painted.
+    this.deps.ledger.advance(entry.entryId);
+  }
+
+  /** Take a position at the newest entry anywhere, and say so. */
+  private async adoptAtHead(owned: readonly { conversationId: number }[]): Promise<void> {
+    let newest = 0;
+    for (const { conversationId } of owned) {
+      const window = await entriesAfter(this.deps, conversationId, 0, { pageSize: 1 }).catch(() => undefined);
+      if (window) newest = Math.max(newest, window.newest);
+    }
+    this.deps.ledger.adopt(newest, this.deps.ledger.recovered ? "lost-position" : "new");
+    await this.deps.ledger.save();
+    this.log(
+      `[paint] adopted at entry ${newest} (` +
+        (this.deps.ledger.recovered
+          ? "the position file was unreadable"
+          : "nothing before this painter's first look is repainted") +
+        ")",
+    );
   }
 
   /** Page budget for one look. Exposed so a test can make "too far behind" cheap to reach. */
@@ -358,7 +436,7 @@ export class Painter {
       started: (conversationId) => void this.beginTurn(conversationId),
       settled: (conversationId) => {
         // Read the answer, then let the view go: the subscription exists for one turn.
-        void this.poke(conversationId).finally(() => this.endTurn(conversationId));
+        void this.poke().finally(() => this.endTurn(conversationId));
       },
     });
     if (handle) this.activity = handle;
@@ -373,7 +451,8 @@ export class Painter {
    */
   private async beginTurn(conversationId: number): Promise<void> {
     if (!this.deps.owns(conversationId)) return;
-    await this.ensurePosition(conversationId);
+    // A position is global and taken at startup; a turn starting cannot invent one.
+    if (!this.deps.ledger.hasPosition()) return;
     this.inFlight.set(conversationId, Date.now());
     if (this.watching.has(conversationId)) return;
     const watch = this.deps.watch;
@@ -386,7 +465,7 @@ export class Painter {
         void this.paintFrame(conversationId, projected);
       },
       settled: () => {
-        void this.poke(conversationId).finally(() => this.endTurn(conversationId));
+        void this.poke().finally(() => this.endTurn(conversationId));
       },
     });
     if (handle) this.watching.set(conversationId, handle);
@@ -400,50 +479,6 @@ export class Painter {
       watcher.detach();
       this.watching.delete(conversationId);
     }
-  }
-
-  /** Take a position at the head if this conversation has none. */
-  private async ensurePosition(conversationId: number): Promise<void> {
-    if (this.deps.ledger.get(conversationId)) return;
-    const window = await entriesAfter(this.deps, conversationId, 0, this.pages);
-    this.deps.ledger.adopt(conversationId, window.newest, this.deps.ledger.recovered ? "lost-position" : "new");
-    await this.deps.ledger.save();
-    this.log(
-      `[paint] ${this.deps.address?.(conversationId) ?? `conversation ${conversationId}`}: ` +
-        `adopted at entry ${window.newest} when the turn started`,
-    );
-  }
-
-  /** The old name, kept for the sweep's in-process fallback: open a view if the surface can. */
-  private async ensureWatching(conversationId: number): Promise<boolean> {
-    if (this.watching.has(conversationId)) return true;
-    const watch = this.deps.watch;
-    if (!watch) return false;
-    // A watched conversation is painted from frames and posted by `poke`, and both need a
-    // position — so taking one is part of starting to watch. Adopting at the head, as ever:
-    // nothing that predates this bridge is repainted.
-    if (!this.deps.ledger.get(conversationId)) {
-      const window = await entriesAfter(this.deps, conversationId, 0, this.pages);
-      this.deps.ledger.adopt(conversationId, window.newest, this.deps.ledger.recovered ? "lost-position" : "new");
-      await this.deps.ledger.save();
-      this.log(
-        `[paint] ${this.deps.address?.(conversationId) ?? `conversation ${conversationId}`}: ` +
-          `adopted at entry ${window.newest} while starting its subscription`,
-      );
-    }
-    const handle = watch(conversationId, {
-      frame: (projected) => {
-        // Painting happens here, not on a timer: the frames are the turn.
-        void this.paintFrame(conversationId, projected);
-      },
-      settled: () => {
-        // Reading the answer is the one thing a frame cannot do: the entry lands just after
-        // the view goes idle, which is what `poke` is for.
-        void this.poke(conversationId);
-      },
-    });
-    if (handle) this.watching.set(conversationId, handle);
-    return handle !== undefined;
   }
 
   /**
@@ -493,98 +528,6 @@ export class Painter {
       return await opening;
     } finally {
       this.opening.delete(conversationId);
-    }
-  }
-
-  private async tickOne(conversationId: number, cursor: number, summary: PaintSummary): Promise<void> {
-    const window = await entriesAfter(this.deps, conversationId, cursor, this.pages);
-
-    // --- Too far behind to be sure of anything: adopt, do not paint it all. ---
-    //
-    // This is the rule the shadow pass has had from the start, and the painter needs it
-    // for a sharper reason: it *posts*. A bridge that was down for a week comes back with
-    // a cursor at the far end of a conversation, and walking forward from there would put
-    // every answer it missed into the thread as a burst of messages — which is not
-    // catch-up, it is a replay nobody asked for. So a cursor the pages cannot reach means
-    // "start from the head", said out loud, and the conversation resumes rather than
-    // re-runs.
-    if (!window.reachedCursor) {
-      const head = window.newest;
-      this.deps.ledger.adopt(conversationId, head, "gap");
-      await this.deps.ledger.save();
-      summary.adopted += 1;
-      this.log(
-        `[paint] ${this.deps.address?.(conversationId) ?? `conversation ${conversationId}`}: cursor ${cursor} ` +
-          `is further back than ${(this.deps.maxPages ?? 10) * (this.deps.pageSize ?? 50)} entries — ` +
-          `adopting at ${head} instead of repainting the gap`,
-      );
-      return;
-    }
-
-    const pending = window.entries; // already "after the cursor"
-    const answer = pending.find((entry) => this.isAnswer(entry));
-    const busy = await this.deps.busy(conversationId);
-
-    // --- A settled turn: the answer is an entry, so finish from the transcript. ---
-    if (answer && !busy) {
-      const prompt = this.promptFor(pending, answer);
-      const body = prompt ? `${quotePrompt(prompt.text)}\n\n${answer.text}` : answer.text;
-      const open = this.open.get(conversationId);
-      if (open) {
-        // The placeholder becomes the answer where the surface allows it: no second
-        // create, no "Message deleted" stub, one notification.
-        await open.stream.finish(body);
-        open.detach();
-        this.open.delete(conversationId);
-        summary.streamed += 1;
-      } else {
-        await this.deps.surfaceClient.post(conversationId, body);
-        summary.posted += 1;
-      }
-      // Everything up to the answer is accounted for in one step: commentary is never
-      // painted, and the answer has just been.
-      this.deps.ledger.confirm(conversationId, answer.entryId);
-      await this.deps.ledger.save();
-      summary.painted += 1;
-      this.log(
-        `[paint] ${this.deps.address?.(conversationId) ?? `conversation ${conversationId}`}: ` +
-          `painted answer ${answer.entryId} (${answer.text.length} chars)${prompt ? ", quoting the prompt" : ""}`,
-      );
-      return;
-    }
-
-    // --- A running turn: attach to the view so the surface shows progress. ---
-    if (busy) {
-      // Commentary before the answer is accounted for immediately: it will never be
-      // painted, and holding the cursor back would re-read it every tick.
-      const last = pending.filter((entry) => !this.isAnswer(entry)).at(-1);
-      if (last && !answer) {
-        this.deps.ledger.confirm(conversationId, last.entryId);
-        await this.deps.ledger.save();
-      }
-      // Only when nobody is watching: a held subscription has already opened the stream and is
-      // painting into it, and going through the same single-flight path means the two can never
-      // race into two placeholders.
-      if (this.deps.watch === undefined) await this.ensureStream(conversationId, "polled");
-      return;
-    }
-
-    // --- Neither: a settled turn with no answer (an aborted or failed run). ---
-    if (pending.length > 0) {
-      const open = this.open.get(conversationId);
-      if (open) {
-        await open.stream.abandon();
-        open.detach();
-        this.open.delete(conversationId);
-      }
-      // The failure notice is not this component's job: it belongs to whatever knows
-      // *why* the turn produced nothing, which is the adapter that awaited it.
-      this.deps.ledger.confirm(conversationId, pending[pending.length - 1]!.entryId);
-      await this.deps.ledger.save();
-      this.log(
-        `[paint] ${this.deps.address?.(conversationId) ?? `conversation ${conversationId}`}: ` +
-          `turn produced no answer (through entry ${pending[pending.length - 1]!.entryId})`,
-      );
     }
   }
 

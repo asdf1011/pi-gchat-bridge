@@ -1,134 +1,139 @@
 /**
- * A bridge's own memory of how far it has got.
+ * A bridge's own memory of how far it has got — one number.
  *
- * This is the whole of a bridge's durable state, and it lives next to the bridge
- * rather than in the conversation server on purpose. The server owns what happened;
- * a bridge owns *how much of it this surface has seen*. A bridge is temporary — its
- * surface can be closed for a week, its process restarted, its state file lost —
- * and none of that is a fact about the conversation.
+ * The cursor is **global**: entry ids come from one monotonic sequence across every conversation,
+ * so a single integer addresses "everything that has happened, in order". That is what makes the log
+ * streamable (`GET /v1/events?since=`), and it is why this file no longer holds a map of
+ * per-conversation positions: one cursor is the position, and "which conversation" is a property of
+ * the entry rather than of the reader's memory.
  *
- * Two fields per conversation, and the second is the interesting one:
- *
- *   - `cursor` — the highest entry this bridge has accounted for.
- *   - `inFlight` — an entry it *started* handing to its surface and has not
- *     confirmed. Chat offers no idempotent create and no way to ask what it
- *     already holds, so this marker cannot prevent a duplicate; what it can do is
- *     make one *explainable*: on restart we know exactly which message may appear
- *     twice, and say so instead of shrugging.
+ * This is the whole of a bridge's durable state, and it lives next to the bridge rather than in the
+ * conversation server, on purpose. The server owns what happened; a bridge owns *how much of it this
+ * surface has seen*. A bridge is temporary — its surface can be closed for a week, its process
+ * restarted, its state file lost — and none of that is a fact about the conversation.
  *
  * Three rules that keep this from becoming a liability:
  *
- *   1. **Adopt at the head, never at zero.** A bridge with no position starts from
- *      the conversation's newest entry and logs it. Starting at zero would replay
- *      a captured conversation — a week of history — as a burst of messages the
- *      moment a state file is missing or a deployment is copied.
- *   2. **A lost position is not a lost conversation.** Nothing is ever posted
- *      twice *because* state was lost: the head is the boundary, so the cost is one
- *      possibly-duplicated message from the crash window, not a replay.
- *   3. **A corrupt file is treated as absent.** Refusing to start because a cursor
- *      file cannot be parsed would make the bridge's bookkeeping more important
- *      than its job. It is logged and replaced.
+ *   1. **Adopt at the head, never at zero.** A bridge with no position starts from the newest entry
+ *      and says so. Starting at zero would replay a captured conversation — a week of history — as a
+ *      burst of messages the moment a state file is missing or a deployment is copied.
+ *   2. **A lost position is not a lost conversation.** Nothing is ever posted twice *because* state
+ *      was lost: the head is the boundary.
+ *   3. **A corrupt file is treated as absent.** Refusing to start because a cursor cannot be parsed
+ *      would make bookkeeping more important than the job. It is logged and replaced.
  */
 import fsp from "node:fs/promises";
 import path from "node:path";
 
 import { logger } from "../logger.js";
 
-/** Why a conversation's position was established. Recorded for the log, not for logic. */
-export type AdoptionReason = "new" | "gap" | "lost-position";
+/** Why a position was established. Recorded for the log, not for logic. */
+export type AdoptionReason = "new" | "gap" | "lost-position" | "migrated";
 
-/** How far one bridge has got in one conversation. */
-export interface ConversationCursor {
-  /** Highest entry accounted for. `0` means "an empty conversation, seen at the start". */
+export interface LedgerValue {
+  version: 2;
+  /** Highest entry this bridge has accounted for, across every conversation. */
   cursor: number;
-  /** An entry this bridge began posting but never confirmed. */
-  inFlight?: { entryId: number; startedAt: number };
-  /** When the bridge first took a position here. */
   adoptedAt: number;
   adoptedReason: AdoptionReason;
 }
 
-export interface LedgerValue {
-  version: 1;
-  conversations: Record<string, ConversationCursor>;
-}
-
 /**
- * One bridge's positions, and the file they live in.
+ * One bridge's position, and the file it lives in.
  *
- * Reads are synchronous over an in-memory copy; `save()` is the only I/O that
- * matters, and it is atomic (write beside, then rename) so a kill mid-write cannot
- * leave a half-written cursor that reads as "no position at all".
+ * Reads are synchronous over an in-memory copy; `save()` is the only I/O that matters, and it is
+ * atomic (write beside, then rename) so a kill mid-write cannot leave a half-written cursor that
+ * reads as "no position at all".
  */
 export class Ledger {
   private constructor(
     private readonly file: string,
     private value: LedgerValue,
-    /** True when a file existed but could not be read: positions were adopted afresh. */
+    /** True when a file existed but could not be read: the position was adopted afresh. */
     readonly recovered: boolean,
   ) {}
 
   /** Load the ledger at `file`, or start empty. Never throws for a bad file. */
   static async load(file: string): Promise<Ledger> {
+    const fresh = (): LedgerValue => ({
+      version: 2,
+      cursor: 0,
+      adoptedAt: Date.now(),
+      adoptedReason: "new",
+    });
     try {
       const raw = await fsp.readFile(file, "utf8");
-      const parsed = JSON.parse(raw) as Partial<LedgerValue>;
-      if (parsed?.version !== 1 || typeof parsed.conversations !== "object" || parsed.conversations === null) {
-        logger.warn(`[ledger] ${file}: unrecognised contents — starting from the head of each conversation`);
-        return new Ledger(file, { version: 1, conversations: {} }, true);
+      const parsed = JSON.parse(raw) as
+        | (Partial<LedgerValue> & { conversations?: Record<string, { cursor?: number }> })
+        | { version?: number };
+      const asV2 = parsed as Partial<LedgerValue>;
+      if (asV2.version === 2 && typeof asV2.cursor === "number") {
+        return new Ledger(
+          file,
+          {
+            version: 2,
+            cursor: asV2.cursor,
+            adoptedAt: typeof asV2.adoptedAt === "number" ? asV2.adoptedAt : Date.now(),
+            adoptedReason: (asV2.adoptedReason as AdoptionReason) ?? "new",
+          },
+          false,
+        );
       }
-      return new Ledger(file, { version: 1, conversations: parsed.conversations as LedgerValue["conversations"] }, false);
+      // Version 1 kept a position *per conversation*. The global cursor is the highest of those: a
+      // conversation that was behind is behind the global cursor anyway, and the sweep reads forward
+      // from the cursor per conversation, so nothing is skipped by taking the maximum.
+      const asV1 = parsed as { version?: number; conversations?: Record<string, { cursor?: number }> };
+      if (asV1.version === 1 && asV1.conversations && typeof asV1.conversations === "object") {
+        const cursors = Object.values(asV1.conversations)
+          .map((entry) => (typeof entry?.cursor === "number" ? entry.cursor : 0))
+          .filter((cursor) => Number.isFinite(cursor));
+        const cursor = cursors.length === 0 ? 0 : Math.max(...cursors);
+        logger.info(`[ledger] ${file}: migrated ${cursors.length} per-conversation positions to one cursor ${cursor}`);
+        return new Ledger(file, { version: 2, cursor, adoptedAt: Date.now(), adoptedReason: "migrated" }, false);
+      }
+      logger.warn(`[ledger] ${file}: unrecognised contents — starting from the head`);
+      return new Ledger(file, fresh(), true);
     } catch (error) {
       const missing = (error as NodeJS.ErrnoException).code === "ENOENT";
-      // A missing file is the normal first start. Anything else is damage worth a
-      // line in the log, because it means the adoptions that follow are not the
-      // bridge's real history.
+      // A missing file is the normal first start. Anything else is damage worth a line in the log,
+      // because the adoptions that follow are not the bridge's real history.
       if (!missing) logger.warn(`[ledger] ${file}: unreadable (${(error as Error).message}) — adopting afresh`);
-      return new Ledger(file, { version: 1, conversations: {} }, !missing);
+      return new Ledger(file, fresh(), !missing);
     }
   }
 
-  /** Where this bridge has got to in one conversation, if it has ever engaged. */
-  get(conversationId: number): ConversationCursor | undefined {
-    return this.value.conversations[String(conversationId)];
+  /** True when this bridge has ever taken a position. */
+  hasPosition(): boolean {
+    return this.value.cursor > 0;
   }
 
-  /** Every conversation this bridge has a position for. */
-  conversations(): { conversationId: number; cursor: ConversationCursor }[] {
-    return Object.entries(this.value.conversations).map(([id, cursor]) => ({
-      conversationId: Number(id),
-      cursor,
-    }));
+  /** The highest entry accounted for, across every conversation. */
+  get cursor(): number {
+    return this.value.cursor;
+  }
+
+  /** When and why the position was first taken. */
+  get adoptedReason(): AdoptionReason {
+    return this.value.adoptedReason;
+  }
+
+  /** True when a position was established by reading a file that could not be parsed. */
+  get isFresh(): boolean {
+    return this.value.cursor === 0;
   }
 
   /**
-   * Take a position at `cursor` without having posted anything, because there is
-   * nothing to post: everything up to here was the other path's work, or predates
-   * this bridge.
+   * Take a position without having posted anything, because there is nothing to post: everything up
+   * to here was another path's work, or predates this bridge.
    */
-  adopt(conversationId: number, cursor: number, reason: AdoptionReason, at = Date.now()): void {
-    this.value.conversations[String(conversationId)] = { cursor, adoptedAt: at, adoptedReason: reason };
+  adopt(cursor: number, reason: AdoptionReason, at = Date.now()): void {
+    this.value = { version: 2, cursor, adoptedAt: at, adoptedReason: reason };
   }
 
-  /** Record that this bridge is about to hand `entryId` to its surface. */
-  begin(conversationId: number, entryId: number, at = Date.now()): void {
-    const current = this.value.conversations[String(conversationId)];
-    if (!current) return; // no position: `adopt` comes first, and a stray begin is a bug elsewhere
-    this.value.conversations[String(conversationId)] = {
-      ...current,
-      inFlight: { entryId, startedAt: at },
-    };
-  }
-
-  /** Record that `entryId` is on the surface: advance, and clear the in-flight marker. */
-  confirm(conversationId: number, entryId: number): void {
-    const current = this.value.conversations[String(conversationId)];
-    if (!current) return;
-    this.value.conversations[String(conversationId)] = {
-      cursor: Math.max(current.cursor, entryId),
-      adoptedAt: current.adoptedAt,
-      adoptedReason: current.adoptedReason,
-    };
+  /** Account for an entry. The cursor never goes backwards, so out-of-order calls are harmless. */
+  advance(entryId: number): void {
+    if (!Number.isFinite(entryId) || entryId <= this.value.cursor) return;
+    this.value = { ...this.value, cursor: entryId };
   }
 
   /** Write the ledger out atomically. A failure is logged, never thrown: bookkeeping is not the job. */
@@ -146,6 +151,6 @@ export class Ledger {
 
   /** The whole value, for tests and diagnostics. */
   snapshot(): LedgerValue {
-    return JSON.parse(JSON.stringify(this.value)) as LedgerValue;
+    return { ...this.value };
   }
 }

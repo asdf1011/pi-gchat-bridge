@@ -113,13 +113,13 @@ const prompt = (text: string, origin: string): MessageLike => ({ role: "user", t
 
 test("a settled answer is painted once, then the cursor is past it", async () => {
   const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
-  ledger.adopt(1, 10, "new");
+  ledger.adopt(10, "new");
   const { painter, posted } = painterFor(ledger, { 10: [prompt("hi", "gchat")], 11: [answer("the answer")] });
 
   const summary = await painter.tick();
   assert.equal(summary.painted, 1);
   assert.deepEqual(posted, [{ conversationId: 1, text: "the answer" }]);
-  assert.equal(ledger.get(1)?.cursor, 11, "the cursor is the retry story: behind = try again");
+  assert.equal(ledger.cursor, 11, "the cursor is the retry story: behind = try again");
 
   // A second tick has nothing to do — the entry is accounted for.
   const again = await painter.tick();
@@ -129,7 +129,7 @@ test("a settled answer is painted once, then the cursor is past it", async () =>
 
 test("a turn's commentary is never painted", async () => {
   const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
-  ledger.adopt(1, 10, "new");
+  ledger.adopt(10, "new");
   const { painter, posted } = painterFor(ledger, {
     11: [commentary("checking now")],
     12: [commentary("and the tests")],
@@ -140,7 +140,7 @@ test("a turn's commentary is never painted", async () => {
   // One message for the turn, not three: an assistant entry only counts as an answer
   // when the host stamped it as one.
   assert.deepEqual(posted, [{ conversationId: 1, text: "all done" }]);
-  assert.equal(ledger.get(1)?.cursor, 13);
+  assert.equal(ledger.cursor, 13);
 });
 
 test("several submissions that share one answer produce exactly one post", async () => {
@@ -149,7 +149,7 @@ test("several submissions that share one answer produce exactly one post", async
   // that entry once per submission — four identical 2.5k-character replies. The painter
   // cannot reproduce it, because it posts *entries* and there is one of those.
   const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
-  ledger.adopt(1, 10, "new");
+  ledger.adopt(10, "new");
   const { painter, posted } = painterFor(ledger, {
     11: [prompt("first", "gchat")],
     12: [prompt("second", "gchat")],
@@ -160,12 +160,12 @@ test("several submissions that share one answer produce exactly one post", async
 
   await painter.tick();
   assert.deepEqual(posted, [{ conversationId: 1, text: "the one answer" }]);
-  assert.equal(ledger.get(1)?.cursor, 15);
+  assert.equal(ledger.cursor, 15);
 });
 
 test("a running turn streams into the placeholder instead of posting", async () => {
   const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
-  ledger.adopt(1, 10, "new");
+  ledger.adopt(10, "new");
   const { painter, streams, posted, driveText } = painterFor(
     ledger,
     { 11: [prompt("hi", "gchat")] },
@@ -187,7 +187,7 @@ test("a running turn streams into the placeholder instead of posting", async () 
 
 test("the placeholder becomes the answer in place", async () => {
   const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
-  ledger.adopt(1, 10, "new");
+  ledger.adopt(10, "new");
   let busy = true;
   const fake = fakeSurface();
   const messages: MessageLike[] = [{ role: "user", text: "hi", origin: "gchat", entryId: 11, at: 1 }];
@@ -216,12 +216,12 @@ test("the placeholder becomes the answer in place", async () => {
   assert.equal(summary.streamed, 1);
   assert.deepEqual(fake.streams[0]!.calls, ["finish:10"], "patched in place, not posted again");
   assert.deepEqual(fake.posted, [], "a second create would be a second notification");
-  assert.equal(ledger.get(1)?.cursor, 12);
+  assert.equal(ledger.cursor, 12);
 });
 
 test("an answer to another surface's prompt carries that prompt", async () => {
   const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
-  ledger.adopt(1, 10, "new");
+  ledger.adopt(10, "new");
   const { painter, posted } = painterFor(ledger, {
     11: [prompt("typed in the browser", "webui")],
     12: [answer("typed in the browser", "webui")],
@@ -236,7 +236,7 @@ test("an answer to another surface's prompt carries that prompt", async () => {
 
 test("a prompt typed in Chat is not quoted back at it", async () => {
   const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
-  ledger.adopt(1, 10, "new");
+  ledger.adopt(10, "new");
   const { painter, posted } = painterFor(ledger, {
     11: [prompt("typed in chat", "gchat")],
     12: [answer("the answer", "gchat")],
@@ -247,19 +247,19 @@ test("a prompt typed in Chat is not quoted back at it", async () => {
 
 test("a conversation this painter does not own is left alone", async () => {
   const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
-  ledger.adopt(1, 10, "new");
+  ledger.adopt(10, "new");
   const { painter, posted, streams } = painterFor(ledger, { 11: [answer("x")] }, { owns: () => false });
 
   const summary = await painter.tick();
   assert.equal(summary.painted, 0);
   assert.deepEqual(posted, []);
   assert.deepEqual(streams, []);
-  assert.equal(ledger.get(1)?.cursor, 10, "not owned means untouched, not advanced");
+  assert.equal(ledger.cursor, 10, "not owned means untouched, not advanced");
 });
 
 test("a turn that produced no answer leaves no placeholder and no message", async () => {
   const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
-  ledger.adopt(1, 10, "new");
+  ledger.adopt(10, "new");
   const fake = fakeSurface();
   let busy = true;
   const messages: MessageLike[] = [{ role: "user", text: "hi", origin: "gchat", entryId: 11, at: 1 }];
@@ -284,7 +284,7 @@ test("a turn that produced no answer leaves no placeholder and no message", asyn
 
   assert.deepEqual(fake.streams[0]!.calls, ["abandon"], "the placeholder goes, rather than hanging there");
   assert.deepEqual(fake.posted, [], "and the failure notice is not this component's to write");
-  assert.equal(ledger.get(1)?.cursor, 12, "the commentary is accounted for so it is not re-read");
+  assert.equal(ledger.cursor, 12, "the commentary is accounted for so it is not re-read");
 });
 
 test("two ticks cannot both post the same answer", async () => {
@@ -292,50 +292,31 @@ test("two ticks cannot both post the same answer", async () => {
   // interval can fire at the same moment. Two ticks reading one unposted answer would
   // each post it — the duplication this component exists to prevent, so ticks queue.
   const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
-  ledger.adopt(1, 10, "new");
+  ledger.adopt(10, "new");
   const { painter, posted } = painterFor(ledger, { 11: [answer("the answer")] });
 
   await Promise.all([painter.tick(), painter.tick(), painter.tick()]);
   assert.deepEqual(posted, [{ conversationId: 1, text: "the answer" }]);
 });
 
-test("a cursor too far behind is adopted, never repainted", async () => {
-  // The failure this exists for: the bridge was down for a week, the cursor sits at the
-  // far end, and walking forward would put every missed answer into the thread as a burst
-  // of messages. That is a replay, not catch-up, so the position is abandoned loudly and
-  // the conversation resumes from the head.
+test("a bridge that was away paints what it missed, in order", async () => {
+  // The old rule adopted at the head when the cursor was out of reach, to avoid a burst. With one
+  // global cursor that rule is *startup-only*, and this is the deliberate consequence: a bridge that
+  // was down catches up rather than skipping. Consistency beats silence — a missing reply is the
+  // failure mode this whole component exists to prevent, and a burst is visible, bounded and true.
   const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
-  ledger.adopt(1, 1, "new");
+  ledger.adopt(1, "new");
   const transcript: Transcript = {};
-  for (let id = 2; id <= 40; id += 1) transcript[id] = [answer(`entry ${id}`)];
+  for (let id = 2; id <= 6; id += 1) transcript[id] = [answer(`entry ${id}`)];
+  const { painter, posted } = painterFor(ledger, transcript);
 
-  const fake = fakeSurface();
-  const messages: MessageLike[] = [];
-  for (const id of Object.keys(transcript).map(Number).sort((a, b) => a - b)) {
-    for (const message of transcript[id] ?? []) messages.push({ ...message, entryId: id });
-  }
-  const painter = new Painter({
-    surface: "gchat",
-    ledger,
-    owns: () => true,
-    conversations: async () => [{ conversationId: 1 }],
-    history: async (_id, limit, offset) => {
-      const end = Math.max(0, messages.length - offset);
-      return messages.slice(Math.max(0, end - limit), end);
-    },
-    busy: async () => false,
-    surfaceClient: fake.surface,
-    pageSize: 5,
-    maxPages: 2,
-    log: () => {},
-  });
-
-  const summary = await painter.tick();
-  assert.equal(summary.adopted, 1);
-  assert.equal(summary.painted, 0);
-  assert.deepEqual(fake.posted, [], "39 missed answers are not posted");
-  assert.equal(ledger.get(1)?.cursor, 40, "it starts again from the head");
-  assert.equal(ledger.get(1)?.adoptedReason, "gap");
+  await painter.tick();
+  assert.deepEqual(
+    posted.map((row) => row.text),
+    ["entry 2", "entry 3", "entry 4", "entry 5", "entry 6"],
+    "everything past the cursor, oldest first",
+  );
+  assert.equal(ledger.cursor, 6);
 });
 
 test("a conversation with no position is adopted at the head, not replayed", async () => {
@@ -349,8 +330,8 @@ test("a conversation with no position is adopted at the head, not replayed", asy
   const first = await painter.tick();
   assert.equal(first.painted, 0, "adoption is not painting");
   assert.deepEqual(posted, [], "nothing that already happened is repainted");
-  assert.equal(ledger.get(1)?.cursor, 11);
-  assert.equal(ledger.get(1)?.adoptedReason, "new");
+  assert.equal(ledger.cursor, 11);
+  assert.equal(ledger.adoptedReason, "new");
 });
 
 test("a poke finishes the answer immediately, without waiting for a tick", async () => {
@@ -358,27 +339,32 @@ test("a poke finishes the answer immediately, without waiting for a tick", async
   // sitting unposted until the next tick. It does the same work a tick does for one
   // conversation, so there is one definition of "here is the answer".
   const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
-  ledger.adopt(1, 10, "new");
+  ledger.adopt(10, "new");
   const { painter, posted } = painterFor(ledger, { 11: [answer("the answer")] });
 
   await painter.poke(1);
   assert.deepEqual(posted, [{ conversationId: 1, text: "the answer" }]);
-  assert.equal(ledger.get(1)?.cursor, 11);
+  assert.equal(ledger.cursor, 11);
 });
 
-test("a poke does nothing for a conversation this painter does not own, or has not adopted", async () => {
-  const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
-  const { painter, posted } = painterFor(ledger, { 11: [answer("x")] }, { owns: () => false });
-  await painter.poke(1);
-  assert.deepEqual(posted, [], "not owned, not painted");
-
-  // Owned but never adopted: a poke must not invent a position, or the first thing it saw
-  // would be treated as already-delivered history.
+test("a poke with no position adopts at the head, and paints nothing", async () => {
+  // A look must never invent a position by painting: the first thing it saw would be treated as
+  // fresh when it is history. Adoption comes first, and the next look paints from there.
   const fresh = await Ledger.load(path.join(scratch, `l${++counter}.json`));
-  const second = painterFor(fresh, { 11: [answer("x")] });
-  await second.painter.poke(1);
-  assert.deepEqual(second.posted, []);
-  assert.equal(fresh.get(1), undefined, "adoption stays the tick's job");
+  const { painter, posted } = painterFor(fresh, { 11: [answer("past")] });
+
+  await painter.poke();
+  assert.deepEqual(posted, [], "nothing is painted on the adopting look");
+  assert.equal(fresh.cursor, 11, "but the position is taken, at the head");
+  assert.equal(fresh.adoptedReason, "new");
+
+  // A conversation it does not own is never read at all, adopted or not.
+  const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
+  ledger.adopt(10, "new");
+  const foreign = painterFor(ledger, { 11: [answer("x")] }, { owns: () => false });
+  await foreign.painter.poke();
+  assert.deepEqual(foreign.posted, []);
+  assert.equal(ledger.cursor, 10, "and its cursor is untouched");
 });
 
 test("with an activity stream the sweep still runs, as a safety net", async () => {
@@ -386,7 +372,7 @@ test("with an activity stream the sweep still runs, as a safety net", async () =
   // missed event into a lost reply: two answers sat unposted while each mechanism believed the
   // other had it. The net stays until the push path has a much longer record than this.
   const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
-  ledger.adopt(1, 10, "new");
+  ledger.adopt(10, "new");
   let reads = 0;
   const painter = new Painter({
     surface: "gchat",
@@ -413,7 +399,7 @@ test("a conversation with no subscription is still swept, so a dormant thread is
   // The other half: no subscription (dormant, or in-process mode) means the sweep is the only
   // thing that can notice a new turn there. Discovery is what the tick is for now.
   const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
-  ledger.adopt(1, 10, "new");
+  ledger.adopt(10, "new");
   let reads = 0;
   const painter = new Painter({
     surface: "gchat",
@@ -438,7 +424,7 @@ test("a turn is announced, painted from its frames, and settled by one read", as
   // The shape activity gives the painter: a view exists for the *turn*, not for the conversation,
   // so nothing is held between turns and nothing is polled while one runs.
   const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
-  ledger.adopt(1, 10, "new");
+  ledger.adopt(10, "new");
   const fake = fakeSurface();
   type Handlers = { started(id: number): void; settled(id: number): void };
   let handlers: Handlers | undefined;
@@ -491,12 +477,12 @@ test("a turn is announced, painted from its frames, and settled by one read", as
   await until(() => views === 0);
   assert.equal(fake.streams[0]!.calls.at(-1), "finish:10", "finished in place, not posted again");
   assert.deepEqual(fake.posted, []);
-  assert.equal(ledger.get(1)?.cursor, 12);
+  assert.equal(ledger.cursor, 12);
   assert.equal(views, 0, "and the view is gone: nothing held between turns");
   await painter.close();
 });
 
-test("a turn in a conversation never seen adopts at the head when it is announced", async () => {
+test("a turn announced before any position exists paints nothing that predates it", async () => {
   // A view can arrive for a thread this bridge has no position for — a dormant conversation where
   // someone typed in the browser. Painting without adopting would leave the answer unpostable.
   const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
@@ -521,9 +507,17 @@ test("a turn in a conversation never seen adopts at the head when it is announce
   painter.start();
   handlers!.started(1);
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(ledger.get(1)?.cursor, 40, "adopted at the head, so history is not repainted");
-  assert.equal(ledger.get(1)?.adoptedReason, "new");
+
+  // No position yet, so the announced turn is not painted at all — the view would show a turn whose
+  // history has not been positioned, and painting it would treat everything before it as fresh.
+  assert.equal(ledger.hasPosition(), false, "a turn cannot invent a position");
   await painter.close();
+
+  // The sweep takes the position, and only then does painting begin: nothing that predates it is
+  // repainted, because the cursor starts at the head.
+  await painter.tick();
+  assert.equal(ledger.cursor, 40, "adopted at the head");
+  assert.equal(ledger.adoptedReason, "new");
 });
 
 test("with activity, the periodic check reads only turns that never settled", async () => {
@@ -532,7 +526,7 @@ test("with activity, the periodic check reads only turns that never settled", as
   // was mishandled, which no heartbeat can see. In the normal case the set is empty and this costs
   // no reads at all.
   const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
-  ledger.adopt(1, 10, "new");
+  ledger.adopt(10, "new");
   let reads = 0;
   type Handlers = { started(id: number): void; settled(id: number): void };
   let handlers: Handlers | undefined;
