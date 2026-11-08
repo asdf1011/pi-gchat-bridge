@@ -225,6 +225,140 @@ export async function handleV1(
     return true;
   }
 
+  // --- The log as a stream: replay from a cursor, then follow --------------------
+  //
+  // The shape the API was converging on (§2.9): one monotonic entry id is the cursor for
+  // *everything*, so a client sends the last id it saw and gets every entry after it — filtered to
+  // one conversation or not at all — and then keeps receiving new ones. A reconnection is the same
+  // request with the last id received, and the log is the buffer, so nothing can be missed and the
+  // server remembers nothing about the reader.
+  //
+  // Differences from the verbs beside it, all deliberate:
+  //   - `activity` events are included, but they are a convenience: a *user* entry means a turn
+  //     started and a stamped *assistant* entry means one settled, so a client could derive both.
+  //   - live text is NOT here. `view` frames are ephemeral — not facts, not replayable — and belong
+  //     on the per-conversation stream (`/events` with a conversation, or `/view`), where a surface
+  //     is actually painting.
+  //   - replay is bounded, and "you are too far behind" is said out loud (`resync`) rather than
+  //     heuristically guessed by the client.
+  if (url.pathname === "/v1/events" && req.method === "GET") {
+    const sinceRaw = Number(url.searchParams.get("since") ?? 0);
+    const since = Number.isFinite(sinceRaw) && sinceRaw > 0 ? Math.floor(sinceRaw) : 0;
+    const onlyParam = url.searchParams.get("conversation");
+    const only = onlyParam === null ? undefined : Number(onlyParam);
+    if (only !== undefined && !Number.isFinite(only)) {
+      json(res, 400, { ok: false, error: "conversation must be a number" });
+      return true;
+    }
+
+    // Scope is a *right to read*, not a client-supplied filter: without this an unfiltered stream
+    // would hand a bridge the content of conversations it does not serve.
+    const allowed = (await deps.conversations()).map((conversation) => conversation.conversationId);
+    if (only !== undefined && !allowed.includes(only)) {
+      json(res, 404, { ok: false, error: `no such conversation: ${only}` });
+      return true;
+    }
+    const target = only === undefined ? allowed : [only];
+
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+    const send = (event: string, data: unknown): void => {
+      if (res.writableEnded) return;
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+
+    // One cursor per conversation, because a page read is per conversation; the client sees one
+    // monotonic id, which is what makes the stream addressable at all.
+    const cursors = new Map<number, number>(target.map((conversationId) => [conversationId, since]));
+    let newestSent = since;
+    let stopped = false;
+    const MAX_REPLAY = 500;
+
+    const readForward = async (conversationId: number, maxEntries: number): Promise<boolean> => {
+      const from = cursors.get(conversationId) ?? since;
+      const window = await entriesAfter(
+        { history: (id, limit, offset) => deps.seam.history(id, { limit, offset }) },
+        conversationId,
+        from,
+        { pageSize: Math.min(200, Math.max(1, maxEntries)), maxPages: 1 },
+      );
+      for (const entry of window.entries) {
+        if (stopped) return true;
+        send("entry", {
+          conversationId: entry.conversationId,
+          entryId: entry.entryId,
+          role: entry.role,
+          text: entry.text,
+          ...(entry.at === undefined ? {} : { at: entry.at }),
+          ...(entry.origin === undefined ? {} : { origin: entry.origin }),
+        });
+        cursors.set(conversationId, entry.entryId);
+        newestSent = Math.max(newestSent, entry.entryId);
+      }
+      // `reachedCursor` is the honest signal: the reader stops as soon as it sees an entry at or
+      // before the cursor, so `false` means there is more history past the window — not merely that
+      // this page was shorter than the budget.
+      return window.reachedCursor;
+    };
+
+    // Say where the stream starts before anything arrives, so a client that receives no entries
+    // knows its position rather than assuming.
+    send("ready", { cursor: since, conversations: target.length });
+
+    // --- Replay: bounded, and honest when the cursor is out of window. ---
+    let budget = MAX_REPLAY;
+    // Tracked from the reads themselves: a budget that reaches zero by subtraction is not the same
+    // as history that ran out, and reporting the first as "you are too far behind" is a lie.
+    let truncated = false;
+    for (let round = 0; round < 10 && budget > 0 && !stopped; round += 1) {
+      let drained = true;
+      for (const conversationId of target) {
+        if (budget <= 0) break;
+        const share = Math.max(1, Math.floor(budget / Math.max(1, target.length)));
+        const done = await readForward(conversationId, share);
+        budget = Math.max(0, budget - share);
+        if (!done) {
+          drained = false;
+          truncated = true;
+        }
+      }
+      if (drained) break;
+    }
+    if (truncated && !stopped) {
+      // More history than the window allows. Say so, and continue from the newest thing seen —
+      // the reader decides whether to accept that, rather than being handed a flood.
+      send("resync", { cursor: newestSent, dropped: true });
+    }
+
+    // Entries only ever arrive alongside a turn boundary, so activity is the trigger to read
+    // forward again: one page read per boundary instead of a poll.
+    const unsubscribe = deps.activity
+      ? deps.activity.subscribe((event) => {
+          if (!target.includes(event.conversationId)) return;
+          send("activity", event);
+          void readForward(event.conversationId, 50).catch(() => {});
+        })
+      : () => {};
+
+    const beat = setInterval(
+      () => send("heartbeat", { at: Date.now(), cursor: newestSent }),
+      deps.heartbeatMs ?? 15_000,
+    );
+    beat.unref?.();
+    const stop = (): void => {
+      stopped = true;
+      clearInterval(beat);
+      unsubscribe();
+    };
+    req.on("close", stop);
+    res.on("close", stop);
+    return true;
+  }
+
   // --- One conversation's whole stream: boundaries and live state ----------------
   //
   // Everything a surface watching *one* conversation wants, over one connection: `activity` when a
