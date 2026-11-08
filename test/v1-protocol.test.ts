@@ -513,3 +513,119 @@ test("live text is opt-in, needs a conversation, and arrives on the same connect
     await served.close();
   }
 });
+
+/* --- the log as a long poll ---------------------------------------------------------- */
+
+test("a poll returns what is after the cursor, and does not wait for more", async () => {
+  const { seam } = streamSeam([
+    {
+      conversationId: 1,
+      entries: [
+        { entryId: 10, role: "user", text: "old" },
+        { entryId: 11, role: "assistant", text: "new", origin: "gchat" },
+      ],
+    },
+  ]);
+  const served = await serveEvents(seam, [{ conversationId: 1, address: "spaces/S/threads/T" }]);
+  try {
+    const body = (await (await fetch(`${served.baseUrl}/v1/poll?since=10&wait=0`)).json()) as {
+      cursor: number;
+      entries: { entryId: number; text: string }[];
+    };
+    assert.deepEqual(body.entries.map((entry) => entry.entryId), [11]);
+    assert.equal(body.cursor, 11, "the cursor is the last thing handed over, so a client can resume");
+  } finally {
+    await served.close();
+  }
+});
+
+test("a poll waits for a turn and comes back with its burst in one response", async () => {
+  // The shape this replaces a subscription with: block until something happens, then answer. The
+  // batch window is why a turn's prompt and answer arrive together rather than as two round trips.
+  const { seam, add } = streamSeam([{ conversationId: 1, entries: [] }]);
+  const feed = new ActivityFeed({ seam });
+  const served = await serveEvents(seam, [{ conversationId: 1, address: "spaces/S/threads/T" }], feed);
+  try {
+    const started = Date.now();
+    const pending = fetch(`${served.baseUrl}/v1/poll?since=0&wait=5&batch=80&conversation=1`);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    add(1, { entryId: 20, role: "user", text: "the prompt", origin: "gchat" });
+    feed.started(1);
+    // The answer lands inside the batch window, so one response carries both.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    add(1, { entryId: 21, role: "assistant", text: "the answer", origin: "gchat" });
+
+    const body = (await (await pending).json()) as { cursor: number; entries: { entryId: number }[] };
+    assert.deepEqual(body.entries.map((entry) => entry.entryId), [20, 21], "one response, in order");
+    assert.equal(body.cursor, 21);
+    assert.ok(Date.now() - started < 5_000, "it came back on the event, not on the timeout");
+  } finally {
+    await served.close();
+    feed.close();
+  }
+});
+
+test("a poll with nothing to report times out and says so by returning the same cursor", async () => {
+  const { seam } = streamSeam([{ conversationId: 1, entries: [] }]);
+  const served = await serveEvents(seam, [{ conversationId: 1, address: "spaces/S/threads/T" }]);
+  try {
+    const started = Date.now();
+    const body = (await (await fetch(`${served.baseUrl}/v1/poll?since=99&wait=0.15`)).json()) as {
+      cursor: number;
+      entries: unknown[];
+    };
+    assert.deepEqual(body.entries, []);
+    assert.equal(body.cursor, 99, "a timeout is an ordinary answer, not an error");
+    assert.ok(Date.now() - started >= 100, "and it did wait");
+  } finally {
+    await served.close();
+  }
+});
+
+test("observe adds the running turn to the same response, and needs a conversation", async () => {
+  const { seam } = streamSeam([{ conversationId: 1, entries: [] }]);
+  (seam as unknown as Record<string, unknown>).snapshot = async () => ({
+    liveText: "half",
+    busy: true,
+    lastAssistantText: "",
+    tools: [],
+  });
+  const served = await serveEvents(seam, [{ conversationId: 1, address: "spaces/S/threads/T" }]);
+  try {
+    const body = (await (await fetch(`${served.baseUrl}/v1/poll?since=0&wait=0&conversation=1&observe=1`)).json()) as {
+      busy: boolean;
+      view: { liveText: string };
+    };
+    assert.equal(body.busy, true);
+    assert.equal(body.view.liveText, "half", "live text arrives in the same response as content");
+
+    // Unfiltered observation would be a view snapshot per conversation — refused, as with live=1.
+    assert.equal((await fetch(`${served.baseUrl}/v1/poll?observe=1&wait=0`)).status, 400);
+  } finally {
+    await served.close();
+  }
+});
+
+test("a poll response is uncacheable, and says how long it waited", async () => {
+  // The failure this prevents: a CDN caching the "nothing new" answer hands it to every later poll
+  // instantly, so the client spins against the cache and never sees an entry. A timeout is a state,
+  // not a fact, so nothing about a poll may be stored — and `waitedMs` is how a client can *tell*
+  // when that has been ignored: no news after 8ms, when it asked to wait 25s, did not come from us.
+  const { seam } = streamSeam([{ conversationId: 1, entries: [] }]);
+  const served = await serveEvents(seam, [{ conversationId: 1, address: "spaces/S/threads/T" }]);
+  try {
+    const response = await fetch(`${served.baseUrl}/v1/poll?since=5&wait=0.15`);
+    assert.match(response.headers.get("cache-control") ?? "", /no-store/);
+    assert.equal(response.headers.get("cdn-cache-control"), "no-store");
+    assert.equal(response.headers.get("surrogate-control"), "no-store");
+    assert.equal(response.headers.get("pragma"), "no-cache");
+
+    const body = (await response.json()) as { waitedMs: number; cursor: number };
+    assert.ok(body.waitedMs >= 100, "it reports its own patience, which is what makes a cached answer detectable");
+    assert.equal(response.headers.get("x-poll-waited-ms"), String(body.waitedMs));
+    assert.equal(body.cursor, 5, "and the cursor is unchanged, so a client resumes exactly where it was");
+  } finally {
+    await served.close();
+  }
+});

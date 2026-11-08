@@ -225,6 +225,129 @@ export async function handleV1(
     return true;
   }
 
+  // --- The log as a long poll: the same cursor, without a connection -------------
+  //
+  // A poll states its position, gets what is after it, and comes back. There is no subscription to
+  // lose, no heartbeat to miss, and no reconnect ladder — a dead client is simply a client that
+  // stopped asking, and a timeout is an ordinary answer. The replay window of the stream has no
+  // meaning here either: a reader that is far behind gets a page and asks again, so nothing has to be
+  // declared "too far" at all.
+  //
+  // `wait` blocks until something happens or the time runs out, and `batch` delays the answer by a
+  // few hundred milliseconds after the first sign of life so a turn's burst — prompt, commentary,
+  // answer — arrives in one response rather than three. That is not a compromise on promptness: the
+  // Chat bridge already coalesces its PATCHes at 250ms, so this is the cadence text has always been
+  // rendered at.
+  if (url.pathname === "/v1/poll" && req.method === "GET") {
+    const since = Math.max(0, Math.floor(Number(url.searchParams.get("since") ?? 0) || 0));
+    const onlyParam = url.searchParams.get("conversation");
+    const only = onlyParam === null ? undefined : Number(onlyParam);
+    if (only !== undefined && !Number.isFinite(only)) {
+      json(res, 400, { ok: false, error: "conversation must be a number" });
+      return true;
+    }
+    const observe = url.searchParams.get("observe") === "1";
+    if (observe && only === undefined) {
+      json(res, 400, { ok: false, error: "observe=1 needs conversation=<id>: a view is per turn" });
+      return true;
+    }
+
+    const served = (await deps.conversations()).map((conversation) => conversation.conversationId);
+    if (only !== undefined && !served.includes(only)) {
+      json(res, 404, { ok: false, error: `no such conversation: ${only}` });
+      return true;
+    }
+    const target = only === undefined ? served : [only];
+    const limit = Math.min(MAX_LIMIT, Math.max(1, Number(url.searchParams.get("limit") ?? 200) || 200));
+    const waitMs = Math.min(60_000, Math.max(0, Number(url.searchParams.get("wait") ?? 25) * 1000 || 0));
+    const batchMs = Math.min(2_000, Math.max(0, Number(url.searchParams.get("batch") ?? 250) || 0));
+    const startedAt = Date.now();
+
+    const read = async (): Promise<EntryView[]> => {
+      const merged: EntryView[] = [];
+      for (const conversationId of target) {
+        const window = await entriesAfter(
+          { history: (id, pageLimit, offset) => deps.seam.history(id, { limit: pageLimit, offset }) },
+          conversationId,
+          since,
+          { pageSize: Math.min(50, limit) },
+        );
+        merged.push(
+          ...window.entries.map(
+            (entry): EntryView => ({
+              entryId: entry.entryId,
+              role: entry.role,
+              text: entry.text,
+              ...(entry.at === undefined ? {} : { at: entry.at }),
+              ...(entry.origin === undefined ? {} : { origin: entry.origin }),
+            }),
+          ),
+        );
+      }
+      // The same global-order rule as the sweep: one cursor, so the oldest first.
+      merged.sort((a, b) => a.entryId - b.entryId);
+      return merged.slice(0, limit);
+    };
+
+    let entries = await read();
+    if (entries.length === 0 && waitMs > 0) {
+      // Something to wait for: the activity feed, because a turn boundary is the only moment entries
+      // appear. Blind without it — a deployment with no feed still honours `wait`, it just sleeps.
+      await new Promise<void>((resolve) => {
+        let done = false;
+        const finish = (): void => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          unsubscribe();
+          resolve();
+        };
+        const timer = setTimeout(finish, waitMs);
+        timer.unref?.();
+        const unsubscribe = deps.activity
+          ? deps.activity.subscribe((event) => {
+              if (target.includes(event.conversationId)) finish();
+            })
+          : () => {};
+      });
+      if (batchMs > 0) await new Promise((resolve) => setTimeout(resolve, batchMs));
+      entries = await read();
+    }
+
+    const cursor = entries.length > 0 ? (entries[entries.length - 1] as EntryView).entryId : since;
+    const view = observe && only !== undefined ? await deps.seam.snapshot(only) : undefined;
+    const waitedMs = Date.now() - startedAt;
+    // **Uncacheable, every time.** A timeout response is a *state*, not a fact: cached, it would hand
+    // every later poll the same "nothing new" instantly, and the client would spin against the cache
+    // for ever while the tunnel looked busy. Entries are immutable, but the answer to "everything
+    // after X" grows, so it is not a stable value either — and `observe` is live state by definition.
+    // The body carries `waitedMs` so a client can *detect* a cache that ignored all of this: a
+    // response that claims no news after 8ms when it asked to wait 25s did not come from here.
+    res.writeHead(200, {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+      // Named separately because several CDNs honour it even when they ignore Cache-Control.
+      "CDN-Cache-Control": "no-store",
+      "Surrogate-Control": "no-store",
+      Pragma: "no-cache",
+      "X-Poll-Waited-Ms": String(waitedMs),
+    });
+    res.end(
+      JSON.stringify({
+        cursor,
+        entries,
+        waitedMs,
+        ...(observe
+          ? {
+              busy: view?.busy === true,
+              view: view === undefined ? null : { liveText: view.liveText, busy: view.busy, tools: view.tools },
+            }
+          : {}),
+      }),
+    );
+    return true;
+  }
+
   // --- The log as a stream: replay from a cursor, then follow --------------------
   //
   // The shape the API was converging on (§2.9): one monotonic entry id is the cursor for
