@@ -352,7 +352,7 @@ function sourceLine(number: number, text: string, comments: readonly ViewComment
  * rendered text and wrapped, so the highlight sits on the words the person
  * selected rather than on a whole block.
  */
-const RENDER_SCRIPT = `
+export const RENDER_SCRIPT = `
 (function () {
   var FRAME = { file: document.body.getAttribute("data-file") || "" };
 
@@ -362,7 +362,13 @@ const RENDER_SCRIPT = `
       acceptNode: function (node) {
         var parent = node.parentElement;
         if (!parent) return NodeFilter.FILTER_REJECT;
-        if (parent.closest("pre, code, mark, script, sup.cmark")) return NodeFilter.FILTER_REJECT;
+        // Inline code is allowed: a code span is prose-sized text, and a highlight inside it
+        // neither breaks copying nor rendering. It used to be excluded, which made every comment
+        // on a code span invisible in the rendered view — including a comment on an API heading,
+        // where this document keeps its subject matter. Fenced blocks stay excluded: they are
+        // line-anchored, and wrapping text across one breaks whitespace and selection, so comments
+        // there belong to the source view.
+        if (parent.closest("pre, mark, script, sup.cmark")) return NodeFilter.FILTER_REJECT;
         return NodeFilter.FILTER_ACCEPT;
       }
     });
