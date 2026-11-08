@@ -703,6 +703,9 @@ async function main(): Promise<void> {
                   onMode: (mode) => logger.info(`[paint] activity ${mode}`),
                 });
                 void ladder.run();
+                logger.info(
+                  "[paint] activity: subscribed to every conversation (push; the sweep runs only if this degrades)",
+                );
                 return { detach: () => ladder.stop() };
               },
               watch: (
