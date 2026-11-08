@@ -139,38 +139,11 @@ export async function handleV1(
     return true;
   }
 
-  // --- How a submission ended ---------------------------------------------------
-  //
-  // The bridge submitted a message; it needs to know whether the turn finished, failed or is still
-  // running, without holding the turn in its own process (that is the whole point of the split).
-  // Long-poll by default, with a cap so a caller that gives up waiting still gets a truthful
-  // answer rather than a hung socket.
-  const submission = /^\/v1\/submissions\/(\d+)$/.exec(url.pathname);
-  if (submission && req.method === "GET") {
-    const submissionId = Number(submission[1]);
-    const waitSeconds = Math.min(60, Math.max(0, Number(url.searchParams.get("wait") ?? 30) || 0));
-    const settled = await Promise.race([
-      deps.seam.awaitSubmission(submissionId),
-      new Promise<undefined>((resolve) => {
-        const timer = setTimeout(() => resolve(undefined), waitSeconds * 1000);
-        timer.unref?.();
-      }),
-    ]);
-    if (!settled) {
-      json(res, 202, { submissionId, status: "running" });
-      return true;
-    }
-    if (settled.status === "done") {
-      json(res, 200, { submissionId, status: "done", answerId: settled.answerId, text: settled.text });
-      return true;
-    }
-    json(res, 200, {
-      submissionId,
-      status: settled.status,
-      ...(settled.reason === undefined ? {} : { reason: settled.reason }),
-    });
-    return true;
-  }
+  // `GET /v1/submissions/{id}` was here, and it never had a consumer: a bridge learns what an
+  // answer said from the entries, and the painter has never asked. The one thing it added over the
+  // log was the failure *reason* (aborted vs a provider error), and the honest fix for that is to
+  // put the reason where the rest of the facts live — in the log — rather than keeping an
+  // unconsumed endpoint with a fiddly contract (long-poll, cap, 202) that nobody exercises.
 
   const entries = /^\/v1\/conversations\/(\d+)\/entries$/.exec(url.pathname);
   if (entries && req.method === "GET") {
