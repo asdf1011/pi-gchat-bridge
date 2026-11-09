@@ -33,8 +33,7 @@ import { DurableRouter } from "../adapter/router.js";
 import { runDurableCommand } from "../adapter/commands.js";
 import { defaultSettings } from "../adapter/commands.js";
 import { ActivityFeed } from "./activity.js";
-import { Painter } from "./painter.js";
-import { observeTurn } from "./observe.js";
+import { startChatPainter } from "./chat-painter.js";
 import { httpPoll } from "../adapter/poll-client.js";
 import { entriesAfter } from "./entries.js";
 import type { ProjectedView } from "../session-host/projection.js";
@@ -119,13 +118,6 @@ async function main(): Promise<void> {
    * it). Chat is the surface that would otherwise be missing those turns, and a
    * conversation that only half appears in one client is not much use.
    */
-  // Conversations whose turns the painter posts (see the painter block below). Read
-  // by the handler *and* the painter, from one value, so the two cannot disagree about
-  // who owns a thread.
-  /** Stopped on shutdown so a held poll does not delay exit. */
-  let pollAbort: AbortController | undefined;
-  /** Set once the painter is created, below. The handler pokes it; nothing else does. */
-  let painter: Painter | undefined;
   // The server's own account of what it is doing. Subscribers are connections (§17), and the
   // per-turn watching is one attachment per running turn — not per reader. Late-bound because
   // the seam is built below, and this object is only used once requests start arriving.
@@ -598,6 +590,9 @@ async function main(): Promise<void> {
     }
   };
 
+  // The painter, started as one thing: the cursor and the mouth it feeds.
+  const chatPainter = await startChatPainter({ seam: chatSeam, config, client, dbPath });
+
   // `RECEIVER=none` runs the bridge for `/web` only — no Pub/Sub, no service
   // account, no Chat app. It exists because `PubSubReceiver.start()` refuses to
   // start without a subscription, so a web-only deployment (and the browser
@@ -624,230 +619,6 @@ async function main(): Promise<void> {
   // The state is deliberately the bridge's, not the server's: "how much of this have
   // I seen" is a fact about this surface, and it survives a conversation outliving
   // the bridge.
-  let paintTimer: NodeJS.Timeout | undefined;
-  {
-    const ledgerFile =
-      config.ledgerPath === ""
-        ? path.join(path.dirname(dbPath), "bridge-ledger.json")
-        : config.ledgerPath;
-    const ledger = await Ledger.load(ledgerFile);
-    // The shadow pass is gone. It existed to prove a cursor against real transcripts while the
-    // legacy path still posted; the painter posts now, so the pass was left observing a mouth that
-    // was already the same object — and worse, *confirming* entries the painter had not painted
-    // yet, which is how an answer gets stolen. The cursor is simply the painter's memory.
-    logger.info(`[ledger] positions in ${ledgerFile}${ledger.recovered ? " (unreadable: adopting afresh)" : ""}`);
-
-    // --- The painter: the one mouth for the conversations it owns -----------------
-    //
-    // Rolled out per *conversation*, not per bridge: there is one Chat bridge, so
-    // "one bridge at a time" is all or nothing, whereas a conversation is exactly the
-    // unit whose cursor, thread and notification policy are already its own. Opted-in
-    // threads get their turns posted here and the handler keeps its hands off them
-    // (same predicate, same process, so the two cannot disagree).
-    {
-      logger.info(
-        `[paint] posting for every Chat conversation — the handler will not; painting ${
-          config.viewMode === "poll" ? "by polling the snapshot (the extracted shape)" : "in-process"
-        }`,
-      );
-      // The address a conversation lives at. Read per use rather than cached: bindings
-      // are rewritten on every message, and a stale key here would post into the wrong
-      // thread — the failure this whole arrangement exists to make impossible.
-      // Through the seam, not the host: this is adapter code, and the fork is the point at which
-      // reaching into the host's own documents stops compiling.
-      const addressOf = async (conversationId: number): Promise<string | undefined> => {
-        const bound = await chatSeam.list().catch(() => []);
-        return bound.find((row) => row.conversationId === conversationId)?.name;
-      };
-      painter = new Painter({
-        surface: "gchat",
-        ledger,
-        // Every conversation that lives in Chat, and nothing else: a web-only
-        // conversation has no thread for this bridge to keep up.
-        owns: () => true,
-        conversations: async () => {
-          const bound = await chatSeam.list().catch(() => []);
-          return bound
-            .filter((row) => row.name.startsWith("spaces/"))
-            .map((row) => ({
-              conversationId: row.conversationId,
-              ...(row.lastActivityAt === undefined ? {} : { lastActivityAt: row.lastActivityAt }),
-            }));
-        },
-        // The painter walks forward from its cursor, so this asks the seam the same question the
-        // protocol answers: entries after an id, bounded. The `entries` helper does the grouping
-        // (one entry per surface message) that the wire format already assumes.
-        entriesSince: async (conversationId, since, limit) => {
-          const window = await entriesAfter(
-            { history: (id, pageLimit, offset) => chatSeam.history(id, { limit: pageLimit, offset }) },
-            conversationId,
-            since,
-            { pageSize: limit, maxPages: 1 },
-          );
-          return window.entries;
-        },
-        busy: async (conversationId) => (await chatSeam.snapshot(conversationId))?.busy === true,
-        // The painting half, when the surface is not in-process: poll the snapshot while a turn
-        // runs. Three updates a second is finer than the 250ms debounce the Chat placeholder already
-        // applies to its own text, so a poll is not a compromise on how an answer appears — and it
-        // needs no connection, no heartbeat and no reconnect.
-        watch:
-          config.viewMode !== "in-process"
-            ? (conversationId: number, handlers: { frame(projected: unknown): void; settled(): void }) => {
-                // One request in flight, held until the draft or the log moves. The entries it
-                // carries go through the same delivery path as the poll beside it; the cursor is
-                // what keeps the two from posting anything twice.
-                const stop = new AbortController();
-                observeTurn(
-                  {
-                    baseUrl: config.selfUrl === "" ? `http://127.0.0.1:${config.healthPort}` : config.selfUrl,
-                    conversationId,
-                    ...(config.webToken ? { token: config.webToken } : {}),
-                    since: () => ledger.cursor,
-                    onEntries: (entries) => instance.ingest(entries),
-                    onFrame: (view) => handlers.frame(view),
-                    onSettled: () => handlers.settled(),
-                    log: (line) => logger.info(line),
-                  },
-                  stop.signal,
-                );
-                return { detach: () => stop.abort() };
-              }
-            : undefined,
-        surfaceClient: {
-          // The stream and its subscription are one act: a Chat placeholder cannot be
-          // patched before it exists, and creating it later would be a second message.
-          // Opening a stream is all this does. Subscribing it is the *watcher's* job in
-          // stream mode (one subscription held across turns), and the sink's in-process mode,
-          // so a conversation never ends up with two.
-          open: async (conversationId) => {
-            const target = chatTarget(await addressOf(conversationId));
-            if (!target) return undefined;
-            const key = (await addressOf(conversationId)) ?? String(conversationId);
-            const stream = new ReplyStream(client, target.space, target.threadName, "gchat", {
-              replaceOnFinish: config.replaceOnFinish,
-            });
-            stream.register(key);
-            const paint = viewFramePainter(stream);
-
-            if (config.viewMode === "poll") {
-              // The watcher paints; nothing to attach here.
-              return {
-                stream: {
-                  text: (full) => stream.onSnapshot(full),
-                  tool: (name, args) => stream.showTool(name, args),
-                  clearTool: () => stream.clearTool(),
-                  finish: async (text) => {
-                    await stream.finish(text);
-                    stream.unregister(key);
-                  },
-                  abandon: async () => {
-                    await stream.abandon();
-                    stream.unregister(key);
-                  },
-                },
-                paint: (projected) => paint(projected as ProjectedView),
-                detach: () => stream.unregister(key),
-              };
-            }
-
-            // In-process: the sink subscribes, paints and reports the settle edge itself.
-            const sink = await attachViewSink({
-              seam: chatSeam,
-              conversationId,
-              stream,
-              onSettle: () => void painter?.poke(),
-            });
-            return {
-              stream: {
-                text: (full) => stream.onSnapshot(full),
-                tool: (name, args) => stream.showTool(name, args),
-                clearTool: () => stream.clearTool(),
-                finish: async (text) => {
-                  await stream.finish(text);
-                  stream.unregister(key);
-                },
-                abandon: async () => {
-                  await stream.abandon();
-                  stream.unregister(key);
-                },
-              },
-              paint: () => {}, // the sink is already painting this stream
-              detach: () => {
-                sink.detach();
-                stream.unregister(key);
-              },
-            };
-          },
-          post: async (conversationId, text) => {
-            const target = chatTarget(await addressOf(conversationId));
-            if (!target) return;
-            for (const [index, chunk] of splitMessage(text).entries()) {
-              await client.sendMessage(
-                target.space,
-                chunk,
-                target.threadName,
-                index > 0 && target.threadName === undefined ? { silent: true } : undefined,
-              );
-            }
-          },
-        },
-      });
-      // The interval is the fallback for a deployment with no activity stream: it catches a
-      // turn nothing announced (a web message, a resume after a restart).
-      const instance = painter;
-      // Periodic work, and *what* it is depends on whether there is a push path:
-      //
-      //   - no activity stream (in-process): the sweep is the mechanism, so it walks every
-      //     conversation, on the shorter interval it has always used;
-      //   - activity stream: the mechanism is the event, and all that is left to check is turns
-      //     that claimed to start and never finished — normally an empty set, so normally no
-      //     reads. A blanket sweep here would be a second mechanism doing nothing until something
-      //     broke, which is a fair thing to refuse.
-      const polled = config.viewMode === "poll";
-      paintTimer = setInterval(
-        () => void instance.tick(),
-        polled ? 60_000 : Math.min(config.ledgerIntervalMs, 15_000),
-      );
-      paintTimer.unref();
-
-      // --- The delivery path: long-poll the log -------------------------------------
-      //
-      // The sweep above stays as the fallback; this is the mechanism. It is a loop of ordinary
-      // requests, so there is no connection to lose, no heartbeat to miss and no reconnect ladder:
-      // the cursor is the position, and a timeout is an ordinary answer. `wait` bounds how long a
-      // request may be held, and `batch` lets a turn's burst arrive as one response.
-      //
-      // Deliberately *beside* the sweep for now — both go through `ingest`, which is serialised and
-      // skips anything at or below the cursor, so whichever runs first consumes and the other finds
-      // nothing. Proving the poll in parallel is cheaper than being wrong alone.
-      pollAbort = new AbortController();
-      const poll = async (): Promise<void> => {
-        let backoff = 1_000;
-        while (!pollAbort.signal.aborted) {
-          try {
-            const result = await httpPoll({
-              baseUrl: config.selfUrl === "" ? `http://127.0.0.1:${config.healthPort}` : config.selfUrl,
-              since: ledger.cursor,
-              waitSeconds: 25,
-              batchMs: 250,
-              ...(config.webToken ? { token: config.webToken } : {}),
-              signal: pollAbort.signal,
-            });
-            if (result.entries.length > 0) await instance.ingest(result.entries);
-            backoff = 1_000;
-          } catch (error) {
-            if (pollAbort.signal.aborted) return;
-            logger.warn(`[paint] poll failed (${(error as Error).message}) — retrying in ${backoff}ms`);
-            await new Promise((resolve) => setTimeout(resolve, backoff));
-            backoff = Math.min(30_000, backoff * 2);
-          }
-        }
-      };
-      void poll();
-      void instance.tick();
-    }
-  }
 
   /**
    * Feed view frames into a stream, whichever way they arrived.
@@ -858,8 +629,7 @@ async function main(): Promise<void> {
    */
 
   const shutdown = async (): Promise<void> => {
-    pollAbort?.abort();
-    if (paintTimer) clearInterval(paintTimer);
+    chatPainter?.stop();
     logger.info("[bridge] shutting down...");
     await receiver.stop();
     artifactsServer?.close();
