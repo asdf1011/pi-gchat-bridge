@@ -42,14 +42,17 @@ test("identifiers the script assigns are declared", () => {
   for (const m of script.matchAll(/\b(?:let|const|var)\s+([A-Za-z_$][\w$]*)/g)) {
     declared.add(m[1]!);
   }
-  // Function parameters and function declarations are in scope too.
-  for (const m of script.matchAll(/function\s+([A-Za-z_$][\w$]*)/g)) declared.add(m[1]!);
-  for (const m of script.matchAll(/\(([^)]*)\)\s*=>/g)) {
-    for (const part of m[1]!.split(",")) {
+  // Function parameters and function declarations are in scope too — including a parameter with a
+  // default (`function show(key, push = true)`), which otherwise reads as an assignment to `push`.
+  const params = (list: string) => {
+    for (const part of list.split(",")) {
       const name = part.trim().split(/[:\s=]/)[0];
       if (name) declared.add(name);
     }
-  }
+  };
+  for (const m of script.matchAll(/function\s+([A-Za-z_$][\w$]*)/g)) declared.add(m[1]!);
+  for (const m of script.matchAll(/function\s+[A-Za-z_$][\w$]*\s*\(([^)]*)\)/g)) params(m[1]!);
+  for (const m of script.matchAll(/\(([^)]*)\)\s*=>/g)) params(m[1]!);
 
   const assigned = new Set<string>();
   for (const m of script.matchAll(/(?<![.\w$])([A-Za-z_$][\w$]*)\s*=[^=]/g)) {
