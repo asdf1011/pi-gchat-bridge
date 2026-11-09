@@ -220,9 +220,16 @@ async function main(): Promise<void> {
       onStart: (child) => {
         child.stdout?.on("data", (chunk: Buffer) => {
           for (const line of chunk.toString().split("\n")) {
+            if (line === "") continue;
             if (line.startsWith("CHAT_ADAPTER_LISTENING ")) {
               logger.info(`[bridge] chat adapter ready on ${line.slice("CHAT_ADAPTER_LISTENING ".length)}`);
+              continue;
             }
+            // Everything else the child prints is forwarded, unchanged. Its logger writes to stdout,
+            // and a piped stdout that nobody re-emits is a process whose log does not exist — which
+            // is how the first version of this fork ran for two hours with every `[chat]` and
+            // `[paint]` line it produced silently dropped.
+            process.stdout.write(`${line}\n`);
           }
         });
         // Each generation gets its own link: a dead child's channel is gone.
@@ -553,9 +560,14 @@ async function main(): Promise<void> {
       onStart: (child) => {
         child.stdout?.on("data", (chunk: Buffer) => {
           for (const line of chunk.toString().split("\n")) {
+            if (line === "") continue;
             if (line.startsWith("WEB_ADAPTER_LISTENING ")) {
               logger.info(`[bridge] web adapter ready on ${line.slice("WEB_ADAPTER_LISTENING ".length)}`);
+              continue;
             }
+            // Forwarded for the same reason as the Chat adapter's: a piped stdout that is parsed
+            // for one marker and then dropped is a process with no log.
+            process.stdout.write(`${line}\n`);
           }
         });
         // Each generation gets its own link: a dead child's channel is gone.
