@@ -72,6 +72,11 @@ async function loadPage(
     /** Draft text to seed into localStorage before the page's script runs. */
     draft?: { conversationId: number; text: string };
     postStatus?: number;
+    /** The artifact host's address, and the files this conversation is said to have written. */
+    artifactsBaseUrl?: string;
+    artifacts?: { key: string; markdown?: boolean; wrote?: number; edited?: number }[];
+    /** A URL fragment, as a reload would arrive with one. */
+    hash?: string;
   } = {},
 ): Promise<Harness> {
   // Conversation mode: the URL carries the conversation id.
@@ -89,7 +94,7 @@ async function loadPage(
   // them on `dom.window` afterwards threw "fetch is not defined" inside load(),
   // because the page calls it at the bottom of its own script.
   const dom = new JSDOM(WEB_PAGE, {
-    url: `http://127.0.0.1:8081${pathname}`,
+    url: `http://127.0.0.1:8081${pathname}${options.hash ?? ""}`,
     runScripts: "dangerously",
     pretendToBeVisual: true,
     beforeParse(win) {
@@ -165,8 +170,14 @@ async function loadPage(
           return {
             ok: true,
             status: 200,
-            json: async () => ({ artifactsBaseUrl: "", pageVersion: options.pageVersion ?? "v1" }),
+            json: async () => ({
+              artifactsBaseUrl: options.artifactsBaseUrl ?? "",
+              pageVersion: options.pageVersion ?? "v1",
+            }),
           };
+        }
+        if (/\/api\/c\/\d+\/artifacts$/.test(url)) {
+          return { ok: true, status: 200, json: async () => options.artifacts ?? [] };
         }
         if (url.includes("/message")) {
           return { ok: true, status: options.postStatus ?? 202, json: async () => ({ ok: true }) };
@@ -1211,6 +1222,134 @@ test("the composer takes focus only when the click asked for it", async () => {
 
     await fromFrame(h, { t: "pi-artifact-select", file: "notes.md", quote: "crumbs", intent: "comment" });
     assert.equal(doc.activeElement, field, "a deliberate comment does");
+  } finally {
+    h?.close();
+  }
+});
+
+/* --- the artifact drawer in the URL ------------------------------------------ */
+
+const drawerFiles = [
+  { key: "conversation/7/notes.md", markdown: true, wrote: 1, edited: 0 },
+  { key: "conversation/7/run.sh", wrote: 1, edited: 0 },
+];
+
+test("a page that loads with a fragment opens that document", async () => {
+  // A reload is the ordinary way to arrive here: opening a document writes its key into the fragment,
+  // and the browser hands it back. The drawer must come up on the document, not on the list.
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      pathname: "/7/",
+      hash: "#conversation%2F7%2Fnotes.md",
+      artifactsBaseUrl: "http://127.0.0.1:8082",
+      artifacts: drawerFiles,
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+    });
+    await h.settle();
+    const doc = h.dom.window.document;
+    assert.deepEqual(h.errors, []);
+
+    assert.equal((doc.getElementById("artifacts") as HTMLElement).hidden, false, "the drawer is open");
+    assert.ok(doc.getElementById("artifacts")!.classList.contains("showing-doc"), "on the document, not the list");
+    assert.equal(doc.getElementById("artifacts-title")!.textContent, "notes.md");
+    // Markdown opens rendered, which is what a reader wants; the source view is for everything else.
+    assert.match(doc.getElementById("artifact-frame")!.getAttribute("src") ?? "", /notes\.md\?render$/);
+    // The entry's own state, so the browser's back gesture still means "close the document". Compared
+    // field by field: the object comes from the jsdom realm, so it is not reference-equal to a literal.
+    assert.equal(h.dom.window.history.state.artifact, "conversation/7/notes.md");
+  } finally {
+    h?.close();
+  }
+});
+
+test("a fragment naming a file that is gone leaves the list showing, and drops the fragment", async () => {
+  // A link to a file that has since been deleted, or one belonging to another conversation. The list
+  // is the honest answer, and the address should stop claiming otherwise.
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      pathname: "/7/",
+      hash: "#conversation%2F7%2Fdeleted.md",
+      artifactsBaseUrl: "http://127.0.0.1:8082",
+      artifacts: drawerFiles,
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+    });
+    await h.settle();
+    const doc = h.dom.window.document;
+    assert.deepEqual(h.errors, []);
+
+    assert.equal((doc.getElementById("artifacts") as HTMLElement).hidden, false, "the drawer still opens");
+    assert.equal(doc.getElementById("artifacts")!.classList.contains("showing-doc"), false, "on the list");
+    assert.equal(h.dom.window.location.hash, "", "and the address no longer names it");
+  } finally {
+    h?.close();
+  }
+});
+
+test("a refresh a turn triggers keeps the document open", async () => {
+  // `loadArtifacts(preserve)` was written for this: a turn ends, the drawer refreshes its list, and the
+  // document being read must stay put — including its scroll and its selection. It keyed on the framed
+  // document's key, which nothing was setting, so every refresh quietly fell back to the list.
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      pathname: "/7/",
+      hash: "#conversation%2F7%2Fnotes.md",
+      artifactsBaseUrl: "http://127.0.0.1:8082",
+      artifacts: drawerFiles,
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+      history: [{ role: "user", text: "hi", html: "<p>hi</p>" }],
+    });
+    await h.settle();
+    const doc = h.dom.window.document;
+    const panel = doc.getElementById("artifacts")!;
+    assert.ok(panel.classList.contains("showing-doc"), "the fragment opened it");
+
+    // A turn that ran and finished is what makes the pane refetch and refresh the review.
+    const source = h.sources[h.sources.length - 1]!;
+    source.emit("text", { text: "working", busy: true });
+    source.emit("text", { busy: false });
+    for (let i = 0; i < 100 && !h.requests.some((r) => r.url.includes("/artifacts")); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    await h.settle();
+
+    assert.ok(panel.classList.contains("showing-doc"), "the document is still showing");
+    assert.equal(doc.getElementById("artifacts-title")!.textContent, "notes.md");
+    assert.match(doc.getElementById("artifact-frame")!.getAttribute("src") ?? "", /notes\.md\?render$/);
+  } finally {
+    h?.close();
+  }
+});
+
+test("the fragment follows the drawer: another key opens it, closing clears it", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      pathname: "/7/",
+      hash: "#conversation%2F7%2Fnotes.md",
+      artifactsBaseUrl: "http://127.0.0.1:8082",
+      artifacts: drawerFiles,
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+    });
+    await h.settle();
+    const doc = h.dom.window.document;
+
+    // A hash change is a request to show another file — that is what a link to one now looks like.
+    h.dom.window.location.hash = "#conversation%2F7%2Frun.sh";
+    for (let i = 0; i < 100 && doc.getElementById("artifacts-title")!.textContent !== "run.sh"; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(doc.getElementById("artifacts-title")!.textContent, "run.sh");
+    assert.match(doc.getElementById("artifact-frame")!.getAttribute("src") ?? "", /run\.sh\?view=source$/, "a script opens as source");
+
+    // ← after a reload closes the document instead of walking out of the conversation, and the address
+    // stops claiming a file is open.
+    doc.getElementById("artifacts-back")!.click();
+    await h.settle();
+    assert.equal(doc.getElementById("artifacts")!.classList.contains("showing-doc"), false);
+    assert.equal(h.dom.window.location.hash, "");
   } finally {
     h?.close();
   }

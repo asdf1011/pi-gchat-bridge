@@ -1238,6 +1238,8 @@ document.getElementById('send').onsubmit = async (e) => {
 
 let artifactsBase = '';
 let artifactsOpen = false;
+/** Whether this page pushed the history entry the open document lives in. */
+let artifactsEntryPushed = false;
 
 const artifactsButton = document.getElementById('artifacts-toggle');
 const artifactsPanel = document.getElementById('artifacts');
@@ -1309,7 +1311,13 @@ artifactsFrame.addEventListener('load', () => {
   if (artifactsOpen && artifactsPanel.classList.contains('showing-doc')) applyListState();
 });
 
-function showArtifact(key, markdown) {
+/**
+ * Show one document in the drawer.
+ *
+ * `push` is false when this is a *restore* — the page just loaded with the fragment already naming
+ * this file, so the entry exists and pushing another would make one back gesture do nothing.
+ */
+function showArtifact(key, markdown, push = true) {
   for (const li of artifactsList.children) li.classList.toggle('on', li.dataset.key === key);
   // The document slides over the list and takes the drawer's full width, so a
   // name-heavy list stops competing with the thing being read.
@@ -1321,10 +1329,18 @@ function showArtifact(key, markdown) {
   // A transcript entry per document, so the browser's own back gesture means what it
   // looks like it means: close the document, show the list.
   try {
-    history.pushState({ artifact: key }, '', '#' + encodeURIComponent(key));
+    const state = { artifact: key };
+    const address = '#' + encodeURIComponent(key);
+    if (push) history.pushState(state, '', address);
+    else history.replaceState(state, '', address);
   } catch {
-    // A sandboxed or file: context can refuse pushState; the drawer still works.
+    // A sandboxed or file: context can refuse either call; the drawer still works.
   }
+  // Whether this page added the entry. After a reload it did not — the entry was restored from the
+  // address — and one back gesture must not then leave the page entirely.
+  artifactsEntryPushed = push;
+  // Which document the frame holds, for the refresh that must not drop it.
+  artifactsFrame.dataset.key = key;
   // Markdown is rendered by the artifact host inside its sandboxed document;
   // everything else is shown as plain text, never as HTML.
   loadFrame(artifactUrl(key, markdown));
@@ -1341,6 +1357,8 @@ function applyListState() {
   artifactsTitle.removeAttribute('title');
   artifactsBack.hidden = true;
   artifactsNewTab.hidden = true;
+  delete artifactsFrame.dataset.key;
+  artifactsEntryPushed = false;
   if (artifactsFrame.getAttribute('src') !== 'about:blank') loadFrame('about:blank');
 }
 
@@ -1351,14 +1369,78 @@ function applyListState() {
  * back gesture end in the same place.
  */
 function showArtifactList() {
-  if (history.state && history.state.artifact) history.back();
-  else applyListState();
+  // A back gesture only means "close the document" when this page made the entry it would undo.
+  // Otherwise — a reload, a pasted link — going back would leave the conversation.
+  if (artifactsEntryPushed && history.state && history.state.artifact) {
+    history.back();
+    return;
+  }
+  applyListState();
+  try {
+    history.replaceState({}, '', location.pathname);
+  } catch {
+    // Refused in a sandboxed context; the drawer is already showing the list.
+  }
 }
 
 // A back gesture after opening a document lands here.
 window.addEventListener('popstate', () => {
   if (artifactsOpen) applyListState();
 });
+
+// The fragment is the address of a document, so a change to it is a request to show that document —
+// whether it came from a pasted link, an edited address, or forward/back between two files.
+window.addEventListener('hashchange', () => {
+  const key = artifactKeyFromHash();
+  if (!key) {
+    if (artifactsOpen && artifactsPanel.classList.contains('showing-doc')) applyListState();
+    return;
+  }
+  if (!artifactsOpen || artifactsFrame.dataset.key !== key) void restoreArtifact(key);
+});
+
+/**
+ * The artifact the URL fragment names.
+ *
+ * The fragment is the artifact key — that is what opening a document writes there — so a reload or a
+ * pasted link can put the reader back on the file they were reading. Keys contain slashes, so the
+ * encode/decode pair is not decoration: `#conversation/1/notes.md` and `#conversation%2F1%2Fnotes.md`
+ * are the same file, and only the encoded one survives being copied out of an address bar intact.
+ */
+function artifactKeyFromHash() {
+  const raw = location.hash.replace(/^#/, '');
+  if (!raw) return '';
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw; // not percent-encoded, but still names something
+  }
+}
+
+/**
+ * Open the document the URL names.
+ *
+ * Waits for the environment (the artifact host's address is fetched) and for the list, because a
+ * document opens *from* the list: its row is what says whether it renders. A key that is no longer
+ * one of this conversation's files leaves the list showing and drops the fragment, so the address bar
+ * never claims something the page is not showing.
+ */
+async function restoreArtifact(key) {
+  if (!key) return;
+  await artifactsReady;
+  if (artifactsBase === '' || !current) return;
+  await setArtifactsOpen(true);
+  const row = [...artifactsList.children].find((li) => li.dataset.key === key);
+  if (!row) {
+    try {
+      history.replaceState({}, '', location.pathname);
+    } catch {
+      // Same as everywhere else: a refusal costs the address, not the drawer.
+    }
+    return;
+  }
+  showArtifact(key, row.dataset.markdown === '1', false);
+}
 
 /**
  * Rebuild the list.
@@ -1386,6 +1468,7 @@ async function loadArtifacts(preserve) {
   for (const row of rows) {
     const li = document.createElement('li');
     li.dataset.key = row.key;
+    li.dataset.markdown = row.markdown ? '1' : '';
     li.innerHTML = '<span class="col"><span class="name"></span><span class="dir"></span></span><span class="counts"></span>';
     // The name first and the directory underneath: a list of full paths is mostly
     // directory, and the drawer only needs enough to tell two files apart.
@@ -1409,12 +1492,12 @@ async function loadArtifacts(preserve) {
   showArtifactList();
 }
 
-function setArtifactsOpen(open) {
+async function setArtifactsOpen(open) {
   artifactsOpen = open;
   artifactsPanel.hidden = !open;
   if (open) {
     void loadComments();
-    void loadArtifacts();
+    await loadArtifacts();
   } else {
     applyListState();
     if (history.state && history.state.artifact) history.replaceState({}, '', location.pathname);
@@ -1793,7 +1876,7 @@ document.addEventListener('keydown', (event) => {
 
 // The panel is pointless without an artifact host to point at, so it stays
 // hidden unless the deployment says where that is.
-void (async () => {
+const artifactsReady = (async () => {
   try {
     const environment = await (await fetch(rel('api/environment'))).json();
     artifactsBase = String(environment.artifactsBaseUrl || '').replace(/\/$/, '');
@@ -1880,6 +1963,8 @@ if (openId === undefined) {
   current = openId;
   void loadTitle();
   open(openId);
+  // A reload lands here with the fragment still naming the file that was open.
+  void restoreArtifact(artifactKeyFromHash());
 }
 </script>
 </body>
