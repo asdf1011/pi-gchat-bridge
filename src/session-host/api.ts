@@ -602,7 +602,14 @@ export interface SessionHost {
   /** Compact the conversation's context now. Instructions are free text. */
   compact(conversationId: number, instructions?: string, options?: { signal?: AbortSignal }): Promise<void>;
 
-  /** Stop whatever the conversation is doing. True when something was stopped. */
+  /**
+   * Stop whatever the conversation is doing.
+   *
+   * `false` means the conversation is gone, not "there was nothing to stop": aborting is idempotent
+   * and the host has nothing to report about a turn it was not running. Ask the *view* whether
+   * something was running (`snapshot().busy`) when the answer needs to say so — which is what the
+   * Chat adapter does, and what `/abort` had to be taught.
+   */
   abort(conversationId: number, options?: { signal?: AbortSignal }): Promise<boolean>;
 
   /** Store-wide token and cost totals. */

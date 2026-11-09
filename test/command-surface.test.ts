@@ -52,6 +52,9 @@ function fakeSeam(overrides: Partial<Record<keyof SessionHost, unknown>> = {}): 
       calls.create.push(args);
       return { conversationId: 12, name: "web:here", model: "deepseek/deepseek-chat", createdAt: 1 };
     },
+    // The view is where "is something running" comes from: `/abort` asks it, because `abort` itself
+    // is idempotent and only reports whether the conversation exists.
+    snapshot: async () => ({ liveText: "", busy: false, lastAssistantText: "", tools: [] }),
     label: async (...args: unknown[]) => {
       calls.label.push(args);
       return true;
@@ -203,8 +206,16 @@ test("the small commands answer in text and actually call the host", async () =>
   await runCommand(seam, subject, { text: "/compact keep the decisions" });
   assert.deepEqual(calls.compact[0], [7, "keep the decisions"]);
 
-  await runCommand(seam, subject, { text: "/abort" });
-  assert.equal(calls.abort, 1);
+  const idle = await runCommand(seam, subject, { text: "/abort" });
+  assert.equal(idle.kind === "text" ? idle.text : "", "Nothing was running.");
+  assert.equal(calls.abort, 0, "and nothing was stopped, because nothing was running");
+
+  const { seam: busySeam, calls: busyCalls } = fakeSeam({
+    snapshot: async () => ({ liveText: "…", busy: true, lastAssistantText: "", tools: [] }),
+  });
+  const busy = await runCommand(busySeam, subject, { text: "/abort" });
+  assert.equal(busy.kind === "text" ? busy.text : "", "Stopped.");
+  assert.equal(busyCalls.abort, 1);
 });
 
 test("an unknown command is a list of the real ones, not an error", async () => {
