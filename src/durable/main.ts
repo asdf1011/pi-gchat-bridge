@@ -27,6 +27,7 @@ import type { MessageReceiver } from "../receiver.js";
 import { StateStore } from "../state.js";
 import { ReplyStream } from "../stream.js";
 import type { IncomingMessage } from "../types.js";
+import { createHost, memoryLinkPair } from "@earendil-works/chord";
 import { attachViewSink, viewFramePainter } from "../adapter/view-sink.js";
 import { DurableRouter } from "../adapter/router.js";
 import { runDurableCommand } from "../adapter/commands.js";
@@ -48,7 +49,8 @@ import { startArtifactsServer } from "../adapter/artifacts-server.js";
 import { artifactRoots } from "./artifacts.js";
 import { initArtifactRepo } from "./artifact-vcs.js";
 import { inProcessSessionHost } from "../session-host/inprocess.js";
-import { serveSessionHost } from "../session-host/link.js";
+import { linkSessionHost, serveSessionHost } from "../session-host/link.js";
+import type { SessionHost } from "../session-host/api.js";
 import { supervise, type Supervisor } from "../session-host/supervisor.js";
 import { ipcLink } from "@earendil-works/chord";
 import { SecretRegistry } from "./extensions/redact.js";
@@ -169,9 +171,32 @@ async function main(): Promise<void> {
     onObserveError: (error) => logger.warn(`[artifacts] observation failed: ${String(error)}`),
   });
 
-  // The Chat adapter's view of the same seam. Identical today; `BRIDGE_CHAT_ENGINE=link` points it
-  // at a linked seam instead, which is how the extraction is verified before anything is forked.
-  const chatSeam = hostSeam;
+  // The Chat adapter's view of the seam.
+  //
+  // `BRIDGE_CHAT_ENGINE=link` gives it a *linked* seam in this same process: two chord objects, a
+  // memory pair between them, and the adapter reaching the host the way it will when it is finally
+  // forked. That is the extraction with the fork left out, and it is worth the round trip: an
+  // operation the adapter needs but the link does not publish fails here, in a log line, instead of
+  // at the moment a second process starts and Chat goes quiet.
+  const chatEngine = process.env.BRIDGE_CHAT_ENGINE ?? "inprocess";
+  let chatSeam: SessionHost = hostSeam;
+  // `serveSessionHost` opens no socket: it is a chord host, and a deployment that never links pays
+  // nothing but an object.
+  const objectHost = serveSessionHost(hostSeam);
+  if (chatEngine === "link") {
+    const [down, up] = memoryLinkPair();
+    objectHost.accept(down, { principal: "chat-adapter", kind: "client" });
+    const client = createHost({
+      self: "chat-adapter",
+      name: "chat-adapter",
+      kind: "client",
+      upstream: { link: up, principal: "session-host" },
+    });
+    chatSeam = linkSessionHost({ host: client });
+    logger.info("[bridge] chat engine=link: the Chat adapter talks to the host over a link");
+  } else {
+    logger.info("[bridge] chat engine=inprocess: the Chat adapter shares the host's seam");
+  }
 
   const defaults = await defaultSettings(hostSeam);
   const [fallback] = await hostSeam.models();
@@ -407,11 +432,8 @@ async function main(): Promise<void> {
     // src/web-host.ts compiles next to the entrypoint, one level up from this file.
     const entry = new URL("../web-host.js", import.meta.url).pathname;
 
-    // `serveSessionHost` only creates a chord host: it opens no socket, so a
-    // bridge that never forks an adapter pays nothing for it. It is created once
-    // and accepts one link per adapter generation.
-    const objectHost = serveSessionHost(hostSeam);
-
+    // The one chord host this process serves, created above and shared: it accepts one link per
+    // adapter generation, and a deployment with two linked adapters still has one host.
     webSupervisor = supervise({
       start: () =>
         fork(entry, [], {

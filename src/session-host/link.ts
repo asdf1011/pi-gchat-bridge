@@ -106,6 +106,7 @@ export function serveSessionHost(seam: SessionHost): Host {
     label: ({ name, label }) => seam.label(name, label),
     quota: () => seam.quota() as Promise<ProviderQuota[]>,
     info: () => seam.info(),
+    awaitSubmission: ({ submissionId }: { submissionId: number }) => seam.awaitSubmission(submissionId),
     usage: () => seam.usage(),
     recordVerdict: async ({ name, verdict }: { name: string; verdict: AdapterVerdict }) => {
       await seam.recordVerdict(name, verdict);
@@ -541,8 +542,9 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
         tools: Record<string, unknown>;
       };
     },
-    awaitSubmission: (): Promise<Settled> => {
-      throw notImplemented("awaitSubmission");
+    awaitSubmission: async (submissionId: number) => {
+      const root = await session();
+      return (await host.root((ctx) => root.awaitSubmission({ submissionId }, ctx))) as Settled;
     },
     write: async (conversationId: number, entry: AdapterEntry) => {
       const ref = await conversationRef(host, conversationId, session);

@@ -327,3 +327,17 @@ test("a verdict recorded over the link is the host's verdict", async () => {
   assert.deepEqual(await linked.verdict("threads/verdict"), verdict, "and read back over the link");
   assert.equal(await linked.verdict("threads/none"), undefined, "no verdict is undefined, not null");
 });
+
+test("awaitSubmission crosses the link, and a settled turn comes back as data", async () => {
+  // The Chat handler's failure notices are worded from this answer, which is why it crosses now: an
+  // adapter that cannot wait cannot say why a turn produced nothing.
+  const { linked } = await bothEnds();
+  const created = await linked.getOrCreate("threads/await", { model: { provider: "deepseek", modelId: "flash" } });
+  const accepted = await linked.submit(created.conversationId, { content: "hello", origin: "gchat" });
+  assert.ok("submissionId" in accepted, JSON.stringify(accepted));
+
+  const settled = await linked.awaitSubmission(accepted.submissionId);
+  // The memory host has no model runtime, so this turn cannot be answered — which is exactly the
+  // shape the handler words a notice from, and it must arrive as a value over the wire.
+  assert.equal(settled.status, "unanswered");
+});

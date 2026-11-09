@@ -89,6 +89,20 @@ export const AdapterVerdictSchema = Type.Object({
   at: Type.Number(),
 });
 
+/**
+ * How a submission ended, as the seam reports it.
+ *
+ * A loose object rather than a discriminated union, like the comment result: chord's schema language
+ * has no cheap union, and `status` is the discriminator both ends already switch on.
+ */
+export const SettledSchema = Type.Object({
+  status: Type.Union([Type.Literal("done"), Type.Literal("unanswered")]),
+  answerId: Type.Optional(Type.Number()),
+  text: Type.Optional(Type.String()),
+  reason: Type.Optional(Type.String()),
+  detail: Type.Optional(Type.Unknown()),
+});
+
 /** One provider's quota, as `/quota` shows it. Mirrors `ProviderQuota` at the seam. */
 export const ProviderQuotaSchema = Type.Object({
   provider: Type.String(),
@@ -408,6 +422,14 @@ export const SessionContract = remote("pi-bridge.session", {
         quota: method(Type.Object({}), Type.Array(ProviderQuotaSchema)),
         /** Where the host is running: storage path, working directory, start time. */
         info: method(Type.Object({}), HostInfoSchema),
+        /**
+         * Wait for a submission to settle.
+         *
+         * Session-level, not conversation-level: the id is enough — that is what makes it durable
+         * across a host restart — and the Chat handler words its failure notices from the answer, so
+         * an adapter that cannot wait cannot say why a turn produced nothing.
+         */
+        awaitSubmission: method(Type.Object({ submissionId: Type.Number() }), SettledSchema),
         /** Store-wide token and cost totals, as the host tallies them. */
         usage: method(
           Type.Object({}),
