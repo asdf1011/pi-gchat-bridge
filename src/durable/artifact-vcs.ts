@@ -242,8 +242,12 @@ export async function initArtifactRepo(dir: string): Promise<boolean> {
     // Fold the `.gitignore` into an initial revision immediately, so it is not
     // attributed to the first turn that writes a file. Without this, turn 1
     // always looks like it changed something the model never touched.
-    await jj(dir, ["describe", "-m", "artifacts repository"]);
-    await jj(dir, ["new", "-m", "wip"]);
+    //
+    // `jj commit` wants to be one command rather than `describe` + `new`: it is the
+    // same two effects in one operation, and an operation is what costs — every one
+    // exports to the colocated git repo, which took most of the wall time in the
+    // version-control tests (about 1.4s against 0.45s, per repository).
+    await jj(dir, ["commit", "-m", "artifacts repository"]);
   } catch (error) {
     // A directory that cannot be a repo (permissions, a broken parent repo) is
     // still a usable place to put files. Say so, do not fail.
@@ -266,6 +270,7 @@ export async function commitTurn(
   dir: string,
   submissionId: number | string,
 ): Promise<string | undefined> {
+  let finished = false;
   try {
     // `--ignore-working-copy` on the reads keeps a display from creating an op,
     // but the write path needs the snapshot, so it is deliberately absent here.
@@ -282,12 +287,16 @@ export async function commitTurn(
       return undefined; // clean: jj would make no operation, so make none
     }
 
-    await jj(dir, ["describe", "-m", `turn ${submissionId}`]);
+    // One operation, not two: `jj commit` describes the current commit and starts the
+    // next one, where `describe` + `new` is two operations and two git exports. The
+    // change id is read from `@-` afterwards, which is the commit just finished.
+    await jj(dir, ["commit", "-m", `turn ${submissionId}`]);
+    finished = true;
     const log = await jj(dir, [
       "log",
       "--no-graph",
       "-r",
-      "@",
+      "@-",
       "-T",
       "change_id.short()",
     ]);
@@ -305,7 +314,9 @@ export async function commitTurn(
     // starting a fresh change, so the next turn's work lands on this turn's
     // revision and two turns share one anchor. `JJ_EDITOR=true` in the
     // environment is what keeps `-m` from needing an editor.
-    await jj(dir, ["new", "-m", "wip"]).catch(() => {});
+    // Unless `jj commit` already started the next one — it does, so the only case that
+    // needs this is a turn that changed nothing (and a turn that threw before committing).
+    if (!finished) await jj(dir, ["new", "-m", "wip"]).catch(() => {});
   }
 }
 
