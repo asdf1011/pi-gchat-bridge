@@ -99,11 +99,16 @@ async function main(): Promise<void> {
   const client = new ChatClient(config.serviceAccountPath);
   const state = new StateStore(config.stateFile);
 
-  // --- The seam every adapter talks to. ---
+  // --- The seam, and which side of the boundary is asking. ---
   //
-  // In-process today, but constructed once and passed to each adapter, so the
-  // adapters depend on the interface rather than on this object. The artifact
-  // roots are decided here because deriving artifacts is the host's job: a viewer
+  // Two names for one object today, which is the point: the host's own uses (`/v1`, the artifact
+  // origin, `/idle`, the web routes when they are served here) and the Chat adapter's (the router,
+  // the handler, notify, the titler, the painter) are different things that happen to share a
+  // process. Naming them apart is what makes "give the Chat adapter a link instead" a one-line
+  // change rather than a hunt through twenty call sites, and what keeps a host route from being
+  // accidentally sent through a fork.
+  //
+  // The artifact roots are decided host-side because deriving artifacts is the host's job: a viewer
   // asks for a list, it does not walk the transcript and filter paths itself.
   /**
    * Show a turn that started on another surface in the Chat side of the
@@ -121,7 +126,7 @@ async function main(): Promise<void> {
   // The server's own account of what it is doing. Subscribers are connections (§17), and the
   // per-turn watching is one attachment per running turn — not per reader. Late-bound because
   // the seam is built below, and this object is only used once requests start arriving.
-  const activity = new ActivityFeed({ seam: { attach: (id, frame) => seam.attach(id, frame) } });
+  const activity = new ActivityFeed({ seam: { attach: (id, frame) => hostSeam.attach(id, frame) } });
 
   // Created lazily, on the first turn of a conversation, rather than up front:
   // most conversations never write an artifact, and an empty repository per
@@ -148,7 +153,7 @@ async function main(): Promise<void> {
     logger.info(`[artifacts] tracking ${config.artifactsDir}/conversation/<id>`);
   }
 
-  const seam = inProcessSessionHost({
+  const hostSeam = inProcessSessionHost({
     host,
     roots: config.artifactsDir === ""
       ? artifactRoots(config.cwd, getAgentDir())
@@ -164,8 +169,12 @@ async function main(): Promise<void> {
     onObserveError: (error) => logger.warn(`[artifacts] observation failed: ${String(error)}`),
   });
 
-  const defaults = await defaultSettings(seam);
-  const [fallback] = await seam.models();
+  // The Chat adapter's view of the same seam. Identical today; `BRIDGE_CHAT_ENGINE=link` points it
+  // at a linked seam instead, which is how the extraction is verified before anything is forked.
+  const chatSeam = hostSeam;
+
+  const defaults = await defaultSettings(hostSeam);
+  const [fallback] = await hostSeam.models();
   const defaultModel = defaults.provider && defaults.modelId
     ? { provider: defaults.provider, modelId: defaults.modelId }
     : fallback
@@ -175,7 +184,7 @@ async function main(): Promise<void> {
     logger.error("[bridge] no model configured — set a default in ~/.pi/agent/settings.json");
     process.exit(1);
   }
-  const router = new DurableRouter(seam, {
+  const router = new DurableRouter(chatSeam, {
     model: defaultModel,
     ...(defaults.thinkingLevel ? { thinkingLevel: defaults.thinkingLevel as never } : {}),
   });
@@ -199,7 +208,7 @@ async function main(): Promise<void> {
           // already the process that owns the store.
           if (
             await handleV1(req, res, url, {
-              seam,
+              seam: hostSeam,
               activity,
               conversations: async () => {
                 const bindings = await host.bindings();
@@ -235,7 +244,7 @@ async function main(): Promise<void> {
               const bindings = await host.bindings();
               for (const binding of Object.values(bindings.byChatKey)) {
                 if ((binding.updatedAt ?? binding.createdAt) < since) continue;
-                if ((await seam.snapshot(binding.conversationId))?.busy === true) {
+                if ((await hostSeam.snapshot(binding.conversationId))?.busy === true) {
                   busy.push(binding.conversationId);
                 }
               }
@@ -279,7 +288,7 @@ async function main(): Promise<void> {
             const result = await handleDurableNotify(
               {
                 client,
-                seam,
+                seam: chatSeam,
                 router,
                 notifyToken: config.notifyToken || undefined,
                 defaultAgent: { model: defaultModel },
@@ -298,7 +307,7 @@ async function main(): Promise<void> {
           if (
             webEngine !== "link" &&
             (await handleWebRequest(req, res, url, {
-              seam,
+              seam: hostSeam,
               model: defaultModel,
               ...(config.webToken ? { token: config.webToken } : {}),
               ...(config.artifactsBaseUrl ? { artifactsBaseUrl: config.artifactsBaseUrl } : {}),
@@ -366,7 +375,7 @@ async function main(): Promise<void> {
       ]).redact(text);
     };
     artifactsServer = await startArtifactsServer({
-      seam,
+      seam: hostSeam,
       port: artifactsPort,
       // Reads of a specific revision go through jj; the live file is still read
       // from disk, which is what makes an in-progress turn visible.
@@ -401,7 +410,7 @@ async function main(): Promise<void> {
     // `serveSessionHost` only creates a chord host: it opens no socket, so a
     // bridge that never forks an adapter pays nothing for it. It is created once
     // and accepts one link per adapter generation.
-    const objectHost = serveSessionHost(seam);
+    const objectHost = serveSessionHost(hostSeam);
 
     webSupervisor = supervise({
       start: () =>
@@ -463,7 +472,7 @@ async function main(): Promise<void> {
 
     const handled = await runDurableCommand({
       client,
-      seam,
+      seam: chatSeam,
       router,
       state,
       secrets,
@@ -513,7 +522,7 @@ async function main(): Promise<void> {
       // other subscriber.
 
       const turnStarted = Date.now();
-      const settled = await seam.awaitSubmission(delivered.submissionId);
+      const settled = await chatSeam.awaitSubmission(delivered.submissionId);
       const turnMs = Date.now() - turnStarted;
 
       if (settled.status !== "done" || settled.text === "") {
@@ -544,7 +553,7 @@ async function main(): Promise<void> {
       if (config.topicSummary) {
         void applyDurableTopicSummary({
           state,
-          seam,
+          seam: chatSeam,
           client,
           chatKey,
           display,
@@ -645,14 +654,14 @@ async function main(): Promise<void> {
         // (one entry per surface message) that the wire format already assumes.
         entriesSince: async (conversationId, since, limit) => {
           const window = await entriesAfter(
-            { history: (id, pageLimit, offset) => seam.history(id, { limit: pageLimit, offset }) },
+            { history: (id, pageLimit, offset) => chatSeam.history(id, { limit: pageLimit, offset }) },
             conversationId,
             since,
             { pageSize: limit, maxPages: 1 },
           );
           return window.entries;
         },
-        busy: async (conversationId) => (await seam.snapshot(conversationId))?.busy === true,
+        busy: async (conversationId) => (await chatSeam.snapshot(conversationId))?.busy === true,
         // The painting half, when the surface is not in-process: poll the snapshot while a turn
         // runs. Three updates a second is finer than the 250ms debounce the Chat placeholder already
         // applies to its own text, so a poll is not a compromise on how an answer appears — and it
@@ -726,7 +735,7 @@ async function main(): Promise<void> {
 
             // In-process: the sink subscribes, paints and reports the settle edge itself.
             const sink = await attachViewSink({
-              seam,
+              seam: chatSeam,
               conversationId,
               stream,
               onSettle: () => void painter?.poke(),
@@ -853,7 +862,7 @@ async function main(): Promise<void> {
   // keeps the titler from competing with a running turn.
   if (config.topicSummary) {
     void nameUntitledConversations({
-      seam,
+      seam: chatSeam,
       config: {
         baseUrl: config.topicSummaryBaseUrl,
         model: config.topicSummaryModel,
