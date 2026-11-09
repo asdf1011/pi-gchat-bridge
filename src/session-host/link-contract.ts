@@ -72,6 +72,23 @@ export const ModelInfoSchema = Type.Object({
   thinkingLevels: Type.Optional(Type.Array(Type.String())),
 });
 
+/** Where the host is running. Diagnostics, and the `/engine` report. */
+export const HostInfoSchema = Type.Object({
+  dbPath: Type.String(),
+  cwd: Type.String(),
+  startedAt: Type.Number(),
+});
+
+/** An adapter's verdict about a conversation — the notification validator's record. */
+export const AdapterVerdictSchema = Type.Object({
+  verdict: Type.Union([Type.Literal("YES"), Type.Literal("NO")]),
+  reason: Type.String(),
+  notificationPosted: Type.Optional(Type.Boolean()),
+  postFailed: Type.Optional(Type.Boolean()),
+  error: Type.Optional(Type.String()),
+  at: Type.Number(),
+});
+
 /** One provider's quota, as `/quota` shows it. Mirrors `ProviderQuota` at the seam. */
 export const ProviderQuotaSchema = Type.Object({
   provider: Type.String(),
@@ -289,6 +306,25 @@ export const ConversationContract = remote("pi-bridge.conversation", {
           Type.Object({ commentId: Type.String(), text: Type.String() }),
           Type.Object({ id: Type.Optional(Type.String()), error: Type.Optional(Type.String()) }),
         ),
+        /**
+         * Write an adapter-authored entry into the conversation: a notice, not a model turn.
+         *
+         * `data` is the adapter's own shape. The host stores it and hands it back to readers; it is
+         * deliberately untyped here, because the seam's job is to carry it, not to interpret it.
+         */
+        write: method(
+          Type.Object({
+            kind: Type.String(),
+            data: Type.Unknown(),
+            model: Type.Optional(Type.Array(Type.Unknown())),
+          }),
+          Type.Number(),
+        ),
+        /** The first user/assistant exchange, for a title. Extracted host-side, as it always is. */
+        firstTurn: method(
+          Type.Object({}),
+          Type.Union([Type.Object({ userText: Type.String(), assistantText: Type.String() }), Type.Null()]),
+        ),
         /** Summarise the history now. Instructions are free text. */
         compact: method(Type.Object({ instructions: Type.Optional(Type.String()) }), Type.Null()),
         /** Stop whatever is running. True when something was stopped. */
@@ -370,6 +406,27 @@ export const SessionContract = remote("pi-bridge.session", {
          * can only run where the host is.
          */
         quota: method(Type.Object({}), Type.Array(ProviderQuotaSchema)),
+        /** Where the host is running: storage path, working directory, start time. */
+        info: method(Type.Object({}), HostInfoSchema),
+        /** Store-wide token and cost totals, as the host tallies them. */
+        usage: method(
+          Type.Object({}),
+          Type.Object({
+            models: Type.Record(Type.String(), Type.Unknown()),
+            tools: Type.Record(Type.String(), Type.Unknown()),
+          }),
+        ),
+        /**
+         * The notification validator's record for a name.
+         *
+         * Keyed by name rather than conversation because that is what the adapter has: a Chat thread
+         * is validated before it is necessarily a conversation.
+         */
+        recordVerdict: method(Type.Object({ name: Type.String(), verdict: AdapterVerdictSchema }), Type.Null()),
+        verdict: method(
+          Type.Object({ name: Type.String() }),
+          Type.Union([AdapterVerdictSchema, Type.Null()]),
+        ),
       },
     },
   },

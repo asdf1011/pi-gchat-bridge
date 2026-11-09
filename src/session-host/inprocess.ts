@@ -205,7 +205,7 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
   }
 
   return {
-    info(): HostInfo {
+    async info(): Promise<HostInfo> {
       return { dbPath: host.dbPath, cwd: host.cwdPath, startedAt: Date.now() };
     },
 

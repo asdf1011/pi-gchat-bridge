@@ -16,10 +16,11 @@
  * ordinary method calls. That is why `attach` needs no callback plumbing: chord
  * has been doing it all along.
  *
- * Deliberately not published yet: everything no adapter calls. `info`, `unbind`,
- * `usage`, `awaitSubmission`, `write`, the claim/verdict operations and
- * `firstTurn` throw `notImplemented` over the link, and each becomes a contract
- * method the day an adapter in another process needs it.
+ * Deliberately not published yet: everything no adapter calls. `unbind` and
+ * `awaitSubmission` throw `notImplemented` over the link, and each becomes a
+ * contract method the day an adapter in another process needs it — `awaitSubmission`
+ * is the one waiting for a consumer, since the Chat adapter words its failure notices
+ * from a settled turn.
  *
  * The settings group — `state`, `models`, `setModel`, `bind`, `label`, `compact`,
  * `abort` — was published when the command surface started calling it: a `/status`
@@ -104,6 +105,13 @@ export function serveSessionHost(seam: SessionHost): Host {
     bind: async ({ name, conversation }) => (await seam.bind(name, conversation)) ?? null,
     label: ({ name, label }) => seam.label(name, label),
     quota: () => seam.quota() as Promise<ProviderQuota[]>,
+    info: () => seam.info(),
+    usage: () => seam.usage(),
+    recordVerdict: async ({ name, verdict }: { name: string; verdict: AdapterVerdict }) => {
+      await seam.recordVerdict(name, verdict);
+      return null;
+    },
+    verdict: async ({ name }: { name: string }) => (await seam.verdict(name)) ?? null,
   }));
 
   // The factory is synchronous by contract; the wiring it needs is asynchronous,
@@ -152,6 +160,13 @@ export function serveSessionHost(seam: SessionHost): Host {
         return null;
       },
       abort: () => seam.abort(conversation),
+      write: ({ kind, data, model }: { kind: string; data: unknown; model?: readonly unknown[] }) =>
+        seam.write(conversation, {
+          kind,
+          data,
+          ...(model === undefined ? {} : { model }),
+        }),
+      firstTurn: async () => (await seam.firstTurn(conversation)) ?? null,
       // The wire shape is deliberately loose (TypeBox cannot express a
       // discriminated union of content parts cheaply), so the cast back to the
       // seam's `MessageContent` is where the two meet.
@@ -246,10 +261,9 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
   const session = once(async () => host.get(SessionContract, {}));
 
   return {
-    info(): HostInfo {
-      // Not published: an adapter in another process has no business knowing the
-      // storage path, and the two live adapters never ask.
-      throw notImplemented("info");
+    info: async () => {
+      const root = await session();
+      return (await host.root((ctx) => root.info({}, ctx))) as HostInfo;
     },
 
     list: async (options?: { limit?: number; offset?: number }) => {
@@ -520,23 +534,54 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
         ref.release();
       }
     },
-    usage: () => {
-      throw notImplemented("usage");
+    usage: async () => {
+      const root = await session();
+      return (await host.root((ctx) => root.usage({}, ctx))) as {
+        models: Record<string, unknown>;
+        tools: Record<string, unknown>;
+      };
     },
     awaitSubmission: (): Promise<Settled> => {
       throw notImplemented("awaitSubmission");
     },
-    write: (_id: number, _entry: AdapterEntry): Promise<number> => {
-      throw notImplemented("write");
+    write: async (conversationId: number, entry: AdapterEntry) => {
+      const ref = await conversationRef(host, conversationId, session);
+      if (!ref) throw new Error(`no such conversation: ${conversationId}`);
+      try {
+        return (await host.root((ctx) =>
+          ref.write(
+            {
+              kind: entry.kind,
+              data: entry.data,
+              ...(entry.model === undefined ? {} : { model: entry.model }),
+            },
+            ctx,
+          ),
+        )) as number;
+      } finally {
+        ref.release();
+      }
     },
-    recordVerdict: (_name: string, _verdict: AdapterVerdict) => {
-      throw notImplemented("recordVerdict");
+    recordVerdict: async (name: string, verdict: AdapterVerdict) => {
+      const root = await session();
+      await host.root((ctx) => root.recordVerdict({ name, verdict }, ctx));
     },
-    verdict: () => {
-      throw notImplemented("verdict");
+    verdict: async (name: string) => {
+      const root = await session();
+      return ((await host.root((ctx) => root.verdict({ name }, ctx))) as AdapterVerdict | null) ?? undefined;
     },
-    firstTurn: () => {
-      throw notImplemented("firstTurn");
+    firstTurn: async (conversationId: number) => {
+      const ref = await conversationRef(host, conversationId, session);
+      if (!ref) return undefined;
+      try {
+        const found = (await host.root((ctx) => ref.firstTurn({}, ctx))) as {
+          userText: string;
+          assistantText: string;
+        } | null;
+        return found ?? undefined;
+      } finally {
+        ref.release();
+      }
     },
   };
 }

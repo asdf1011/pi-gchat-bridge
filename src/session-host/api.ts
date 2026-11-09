@@ -359,7 +359,14 @@ export interface HostInfo {
  * every method is `async` even where the implementation is immediate.
  */
 export interface SessionHost {
-  info(): HostInfo;
+  /**
+   * Where the host is running: storage path, working directory, start time.
+   *
+   * `async` like everything else here, and it was not: a link cannot answer synchronously, and a
+   * contract whose methods are *almost* all async is one an adapter cannot be written against
+   * without knowing which side of a process boundary it is on.
+   */
+  info(options?: { signal?: AbortSignal }): Promise<HostInfo>;
 
   /**
    * Conversations, most recently used first.

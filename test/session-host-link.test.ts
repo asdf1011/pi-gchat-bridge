@@ -289,3 +289,41 @@ test("a submission's origin crosses the link, and comes back in history", async 
   const overLink = await linked.history(created.conversationId, { limit: 10, offset: 0 });
   assert.equal((overLink ?? []).find((message) => message.role === "user")?.origin, "webui");
 });
+
+/* --- What the Chat bridge needs before it can live in its own process ------ */
+
+test("info and usage cross the link", async () => {
+  const { inProcess, linked } = await bothEnds();
+  const info = await linked.info();
+  assert.equal(info.dbPath, (await inProcess.info()).dbPath);
+  assert.equal(typeof info.cwd, "string");
+
+  const usage = await linked.usage();
+  assert.equal(typeof usage.models, "object");
+  assert.equal(typeof usage.tools, "object");
+});
+
+test("an adapter-written entry and the first turn come back over the link", async () => {
+  // Both are what a Chat bridge needs to word a notice and to title a thread.
+  const { inProcess, linked } = await bothEnds();
+  const created = await linked.getOrCreate("threads/write", { model: { provider: "deepseek", modelId: "flash" } });
+
+  const id = await linked.write(created.conversationId, { kind: "app.notice", data: { note: "hello" } });
+  assert.ok(id > 0, "the entry has an id");
+
+  const turn = await linked.firstTurn(created.conversationId);
+  // No assistant has answered, so there is no first turn yet — the same `undefined` the seam promises.
+  assert.equal(turn, undefined);
+  assert.equal(await inProcess.firstTurn(created.conversationId), undefined);
+});
+
+test("a verdict recorded over the link is the host's verdict", async () => {
+  const { inProcess, linked } = await bothEnds();
+  await inProcess.getOrCreate("threads/verdict", { model: { provider: "deepseek", modelId: "flash" } });
+
+  const verdict = { verdict: "NO" as const, reason: "routine chatter", at: 1_700_000_000_000 };
+  await linked.recordVerdict("threads/verdict", verdict);
+  assert.deepEqual(await inProcess.verdict("threads/verdict"), verdict, "written on the host");
+  assert.deepEqual(await linked.verdict("threads/verdict"), verdict, "and read back over the link");
+  assert.equal(await linked.verdict("threads/none"), undefined, "no verdict is undefined, not null");
+});

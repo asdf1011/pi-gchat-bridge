@@ -95,7 +95,7 @@ export interface DurableCommandContext {
 
 /** The global default model/thinking, from pi's settings.json (shared with the TUI and cron). */
 export async function defaultSettings(seam: SessionHost): Promise<DefaultSettings> {
-  const { cwd } = seam.info();
+  const { cwd } = await seam.info();
   const settings = SettingsManager.create(cwd, getAgentDir(), { projectTrusted: false });
   const provider = settings.getDefaultProvider();
   const modelId = settings.getDefaultModel();
@@ -115,7 +115,7 @@ export async function applyDefaultSettings(
   seam: SessionHost,
   request: { provider: string; modelId: string; thinkingLevel?: string },
 ): Promise<DefaultSettingsResult> {
-  const cwd = seam.info().cwd;
+  const cwd = (await seam.info()).cwd;
   const model = (await listModels(seam)).find(
     (entry) => entry.provider === request.provider && entry.id === request.modelId,
   );
@@ -256,7 +256,7 @@ const SLASH_COMMANDS: SlashCommand[] = [
       const status = binding ? await conversationStatus(seam, chatKey) : undefined;
       const lines = [
         "**engine=durable**",
-        `db: \`${escapeHtml(seam.info().dbPath)}\``,
+        `db: \`${escapeHtml((await seam.info()).dbPath)}\``,
         `subscription: \`${escapeHtml(process.env.PUBSUB_SUBSCRIPTION ?? "(unset)")}\``,
         `spaces: \`${escapeHtml(process.env.ALLOWED_SPACES || "(all)")}\``,
         `this thread: ${binding ? `conversation ${status?.conversationId} · ${escapeHtml(status?.model ?? "?")}` : "no conversation yet"}`,
