@@ -34,6 +34,30 @@ export interface ModelInfo {
   thinkingLevels?: string[];
 }
 
+/**
+ * One provider's quota, as a `/quota` card or command shows it.
+ *
+ * Defined here rather than in `quota.ts` because it crosses the seam: the probe reads `models.json`
+ * and the providers' own APIs, which is host work, so an adapter in another process asks for the
+ * result rather than running the check. Everything in it is plain data by construction.
+ */
+export interface ProviderQuota {
+  provider: string;
+  /** Model ids this provider offers (plus the topic titler's, when it shares this provider). */
+  models: string[];
+  /** True when any model bills per token, so a top-up link is worth showing. */
+  paid: boolean;
+  topUpUrl?: string;
+  /** True when a quota API was actually queried. */
+  queried: boolean;
+  /** Provider says the account can make calls (undefined = unknown/not queried). */
+  available?: boolean;
+  /** Formatted balance / quota line. */
+  balance?: string;
+  /** Free-local note, "no quota API" note, or error detail. */
+  note?: string;
+}
+
 /** Token and cost totals, summed over every model one conversation has used. */
 export interface UsageTotals {
   input: number;
@@ -611,6 +635,16 @@ export interface SessionHost {
    * Chat adapter does, and what `/abort` had to be taught.
    */
   abort(conversationId: number, options?: { signal?: AbortSignal }): Promise<boolean>;
+
+  /**
+   * Provider quotas, for `/quota`.
+   *
+   * Host work on purpose: it reads `models.json` (the providers' connection details and keys) and
+   * calls each provider's own balance API with a hard timeout. An adapter in another process cannot
+   * do either, and a check that failed to reach the network must still be reported per provider —
+   * `note` is where that goes.
+   */
+  quota(options?: { signal?: AbortSignal }): Promise<readonly ProviderQuota[]>;
 
   /** Store-wide token and cost totals. */
   usage(options?: { signal?: AbortSignal }): Promise<{ models: Record<string, unknown>; tools: Record<string, unknown> }>;

@@ -48,6 +48,7 @@ import { filesChangedSince } from "../durable/observed-files.js";
 import { armSteerWatch } from "../durable/steer-watch.js";
 import type { BridgeHost } from "../durable/host.js";
 import { logger } from "../logger.js";
+import { checkProviderQuotas } from "../quota.js";
 import { projectView, type ProjectedView, type ViewLike } from "./projection.js";
 import type {
   AdapterEntry,
@@ -63,6 +64,7 @@ import type {
   TranscriptMessage,
   MessageContent,
   NamedConversation,
+  ProviderQuota,
   HostInfo,
   SessionHost,
   SubmitRequest,
@@ -541,6 +543,12 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
 
     async abort(conversationId: number): Promise<boolean> {
       return host.abort(conversationId);
+    },
+
+    async quota(): Promise<readonly ProviderQuota[]> {
+      // The same check the Chat card has always used — one mechanism, two callers. It reads
+      // `models.json` and calls the providers, which is why it is here and not in an adapter.
+      return checkProviderQuotas(await host.listModels());
     },
 
     async usage(): Promise<{ models: Record<string, unknown>; tools: Record<string, unknown> }> {

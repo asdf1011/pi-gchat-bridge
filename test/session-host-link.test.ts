@@ -259,3 +259,11 @@ test("a command surface over the link is the deployment that was failing", async
   assert.equal(applied.kind, "text");
   assert.equal((await linked.resolve("threads/cmd"))?.model, "anthropic/claude-sonnet-4");
 });
+
+test("quota crosses the link, because the probe belongs where the host is", async () => {
+  // `models.json`, the provider keys and the balance APIs are all host-side, so an adapter in another
+  // process asks for the answer rather than running the check itself.
+  const { linked } = await bothEnds();
+  const quotas = await linked.quota();
+  assert.ok(Array.isArray(quotas), "an array, even when no provider answers");
+});

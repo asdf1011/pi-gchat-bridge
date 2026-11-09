@@ -54,7 +54,6 @@ import type { HandleResult } from "../receiver.js";
 import type { StateStore } from "../state.js";
 import type { IncomingMessage } from "../types.js";
 import type { SessionHost } from "../session-host/api.js";
-import { checkProviderQuotas } from "../quota.js";
 import type { ConversationSettingsResult, DefaultSettings, DefaultSettingsResult, SessionInfo } from "../agent-sessions.js";
 import {
   applyModelPick,
@@ -474,8 +473,9 @@ const SLASH_COMMANDS: SlashCommand[] = [
     pattern: /^\/quota\b/,
     // Read-only, like /status: no interrupt, and it never touches a session.
     run: async ({ client, seam, spaceName, threadName, display }) => {
-      const models = await listModels(seam);
-      const quotas = await checkProviderQuotas(models);
+      // The seam, not a local check: the probe needs `models.json` and the providers' APIs, so it
+      // runs where the host is. One mechanism, two callers (this card and the web `/quota`).
+      const quotas = await seam.quota();
       await client.createCardMessage(spaceName, quotaCard(quotas), "Provider quota.", threadName);
       logger.info(
         `[chat] ${display}: posted quota card (${quotas.length} providers, queried ${quotas.filter((q) => q.queried).length})`,

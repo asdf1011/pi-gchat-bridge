@@ -262,7 +262,7 @@ export function statusCard(info: {
 /** Per-provider quota report for /quota. One section per provider: status,
  *  balance (when the provider exposes a quota API), models queried through it,
  *  and a Top up button for anything that bills per token. */
-export function quotaCard(quotas: ProviderQuota[]): unknown[] {
+export function quotaCard(quotas: readonly ProviderQuota[]): unknown[] {
   const statusLine = (q: ProviderQuota): string => {
     if (q.available === true) return "✅ available";
     if (q.available === false) return "❌ unavailable";

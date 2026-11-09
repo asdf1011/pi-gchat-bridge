@@ -54,6 +54,7 @@ import type {
   HostInfo,
   ModelInfo,
   NamedConversation,
+  ProviderQuota,
   SessionHost,
   Settled,
   SubmitRequest,
@@ -102,6 +103,7 @@ export function serveSessionHost(seam: SessionHost): Host {
       }),
     bind: async ({ name, conversation }) => (await seam.bind(name, conversation)) ?? null,
     label: ({ name, label }) => seam.label(name, label),
+    quota: () => seam.quota() as Promise<ProviderQuota[]>,
   }));
 
   // The factory is synchronous by contract; the wiring it needs is asynchronous,
@@ -480,6 +482,10 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
     },
     unbind: () => {
       throw notImplemented("unbind");
+    },
+    quota: async () => {
+      const root = await session();
+      return (await host.root((ctx) => root.quota({}, ctx))) as readonly ProviderQuota[];
     },
     label: async (name: string, text: string) => {
       const root = await session();

@@ -72,6 +72,18 @@ export const ModelInfoSchema = Type.Object({
   thinkingLevels: Type.Optional(Type.Array(Type.String())),
 });
 
+/** One provider's quota, as `/quota` shows it. Mirrors `ProviderQuota` at the seam. */
+export const ProviderQuotaSchema = Type.Object({
+  provider: Type.String(),
+  models: Type.Array(Type.String()),
+  paid: Type.Boolean(),
+  topUpUrl: Type.Optional(Type.String()),
+  queried: Type.Boolean(),
+  available: Type.Optional(Type.Boolean()),
+  balance: Type.Optional(Type.String()),
+  note: Type.Optional(Type.String()),
+});
+
 export const AgentConfigSchema = Type.Object({
   model: Type.Object({ provider: Type.String(), modelId: Type.String() }),
   thinkingLevel: Type.Optional(Type.String()),
@@ -342,6 +354,14 @@ export const SessionContract = remote("pi-bridge.session", {
         ),
         /** Set a conversation's display label. Adapter-facing text only. */
         label: method(Type.Object({ name: Type.String(), label: Type.String() }), Type.Boolean()),
+        /**
+         * Provider quotas.
+         *
+         * Session-level, because the answer is about the deployment's providers rather than about a
+         * conversation — and because the check reads `models.json` and calls the providers, so it
+         * can only run where the host is.
+         */
+        quota: method(Type.Object({}), Type.Array(ProviderQuotaSchema)),
       },
     },
   },

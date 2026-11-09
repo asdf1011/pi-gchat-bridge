@@ -55,6 +55,10 @@ function fakeSeam(overrides: Partial<Record<keyof SessionHost, unknown>> = {}): 
     // The view is where "is something running" comes from: `/abort` asks it, because `abort` itself
     // is idempotent and only reports whether the conversation exists.
     snapshot: async () => ({ liveText: "", busy: false, lastAssistantText: "", tools: [] }),
+    quota: async () => [
+      { provider: "deepseek", models: ["flash"], paid: true, queried: true, available: true, balance: "12.40 CNY", topUpUrl: "https://platform.deepseek.com/top_up" },
+      { provider: "local", models: ["tiny"], paid: false, queried: false, note: "no quota API" },
+    ],
     label: async (...args: unknown[]) => {
       calls.label.push(args);
       return true;
@@ -231,4 +235,21 @@ test("an empty line is help, because a surface may submit one", async () => {
   const { seam } = fakeSeam();
   const response = await runCommand(seam, subject, { text: "   " });
   assert.equal(response.kind, "list");
+});
+
+test("/quota is a list of providers, with what each one has left", async () => {
+  // The command existed in Chat and not here, which is how a command set drifts: one surface grows a
+  // command and the others quietly do not have it. The check itself is the seam's, since it reads
+  // `models.json` and calls the providers.
+  const { seam } = fakeSeam();
+  const response = await runCommand(seam, subject, { text: "/quota" });
+  assert.equal(response.kind, "list");
+  assert.ok(response.kind === "list");
+  assert.deepEqual(
+    response.rows.map((row) => row.label),
+    ["deepseek (paid)", "local (free)"],
+  );
+  assert.match(response.rows[0]!.detail ?? "", /12\.40 CNY/);
+  assert.match(response.rows[0]!.detail ?? "", /top_up/, "a paid provider says where to add credit");
+  assert.match(response.rows[1]!.detail ?? "", /no quota API/, "and an unqueried one says why");
 });

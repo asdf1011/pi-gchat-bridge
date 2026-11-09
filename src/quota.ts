@@ -20,24 +20,13 @@ import http from "node:http";
 import https from "node:https";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
-/** Quota probe result for one provider. */
-export interface ProviderQuota {
-  provider: string;
-  /** Model ids this provider offers (plus the topic titler's, when it shares this provider). */
-  models: string[];
-  /** True when any model bills per token (cost > 0). */
-  paid: boolean;
-  /** Where to add credit (paid providers only). */
-  topUpUrl?: string;
-  /** True when a quota API was actually queried. */
-  queried: boolean;
-  /** Provider says the account can make calls (undefined = unknown/not queried). */
-  available?: boolean;
-  /** Formatted balance / quota line for the card. */
-  balance?: string;
-  /** Free-local note, "no quota API" note, or error detail. */
-  note?: string;
-}
+/**
+ * The result shape is the seam's, not this module's: `/quota` crosses the link, and a shape defined
+ * on both sides is a shape that drifts.
+ */
+import type { ProviderQuota } from "./session-host/api.js";
+
+export type { ProviderQuota };
 
 /** Console pages where credit can be added, per provider. */
 const TOP_UP_URLS: Record<string, string> = {

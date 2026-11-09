@@ -84,6 +84,7 @@ const text = (body: string, goto?: number): CommandResponse => ({ kind: "text", 
 const HELP: readonly { command: string; about: string }[] = [
   { command: "/status", about: "the model, thinking level, usage and size of this conversation" },
   { command: "/model", about: "choose the model and thinking level" },
+  { command: "/quota", about: "provider balances, and which ones bill per token" },
   { command: "/sessions", about: "recent conversations in this store" },
   { command: "/resume <id>", about: "carry on in one of them" },
   { command: "/new", about: "start a fresh conversation here" },
@@ -235,6 +236,27 @@ export async function runCommand(
       ...(thinking === undefined ? {} : { thinkingLevel: thinking }),
     });
     return text(`Model: ${applied.model}${applied.thinkingLevel ? ` (thinking ${applied.thinkingLevel})` : ""}`);
+  }
+
+  if (command === "/quota") {
+    // Read-only and slow-ish (a provider API per provider, with a timeout), which is why the seam
+    // runs it rather than an adapter: the keys and the connection details live where the host is.
+    const quotas = await seam.quota();
+    return {
+      kind: "list",
+      title: "Provider quota",
+      empty: "No providers are configured, so there is nothing to check.",
+      rows: quotas.map((quota) => ({
+        label: quota.provider + (quota.paid ? " (paid)" : " (free)"),
+        detail: [
+          quota.balance ?? quota.note ?? (quota.queried ? "" : "no quota API"),
+          quota.models.slice(0, 3).join(", ") + (quota.models.length > 3 ? "…" : ""),
+          quota.paid && quota.topUpUrl ? quota.topUpUrl : "",
+        ]
+          .filter(Boolean)
+          .join(" · "),
+      })),
+    };
   }
 
   if (command === "/sessions") {
