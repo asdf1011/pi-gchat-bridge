@@ -702,7 +702,8 @@ let historyComplete = false;
 /** A page is in the air: a scroll must not ask for a second copy. */
 let loadingEarlier = false;
 /** How many messages the server has already given us, counting back from the end. */
-let historyOffset = 0;
+/** The oldest entry id held, which every earlier page is anchored on. */
+let beforeAnchor = 0;
 
 const earlierButton = document.createElement('button');
 earlierButton.type = 'button';
@@ -785,17 +786,17 @@ async function loadEarlier() {
   paintEarlier();
   const id = current;
   try {
-    const url = rel('api/c/' + id + '/history?limit=' + HISTORY_PAGE + '&offset=' + historyOffset);
-    const rows = await (await fetch(url)).json();
+    const url = rel('api/c/' + id + '/history?limit=' + HISTORY_PAGE + '&before=' + beforeAnchor);
+    const page = await (await fetch(url)).json();
     // The user may have switched conversations while this was in flight. Dropping
     // the page is right: its messages belong to a conversation that is no longer
     // on screen, and appending them would mix two transcripts.
     if (id !== current) return;
-    const older = Array.isArray(rows) ? rows : [];
-    historyOffset += older.length;
-    // A short page is the beginning. Empty is the same signal, and stops the
-    // button asking again forever.
-    historyComplete = older.length < HISTORY_PAGE;
+    const older = Array.isArray(page?.messages) ? page.messages : [];
+    // The anchor moves to the oldest id now held, and `atStart` — not a short page — is what says
+    // there is nothing older. A page can be short for reasons other than the beginning.
+    if (older.length > 0) beforeAnchor = page?.before ?? older[0]?.entryId ?? beforeAnchor;
+    historyComplete = page?.atStart === true || older.length === 0;
     prependEarlier(older);
   } catch {
     // Leave `historyComplete` alone so the next scroll tries again: a dropped
@@ -851,17 +852,19 @@ function paint() {
  */
 async function loadHistory() {
   if (!current) return;
-  historyOffset = 0;
+  beforeAnchor = 0;
   historyComplete = false;
   loadingEarlier = false;
   painted = false;
   const id = current;
   try {
-    const rows = await (await fetch(rel('api/c/' + id + '/history?limit=' + HISTORY_PAGE))).json();
+    // No anchor: the newest page. Every page after this one is anchored on the oldest id held, so a
+    // turn that appends while somebody is scrolling cannot shift it.
+    const page = await (await fetch(rel('api/c/' + id + '/history?limit=' + HISTORY_PAGE + '&before=0'))).json();
     if (id !== current) return;
-    transcript = Array.isArray(rows) ? rows : [];
-    historyOffset = transcript.length;
-    historyComplete = transcript.length < HISTORY_PAGE;
+    transcript = Array.isArray(page?.messages) ? page.messages : [];
+    beforeAnchor = page?.before ?? 0;
+    historyComplete = page?.atStart === true || transcript.length === 0;
   } catch {
     if (id !== current) return;
     transcript = [];

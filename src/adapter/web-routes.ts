@@ -28,6 +28,7 @@ import {
 import { renderMarkdown } from "./markdown.js";
 import { runCommand } from "./command-surface.js";
 import { currentAddress, MAX_COMMENT_CHARS, modelText } from "../durable/comments.js";
+import { entriesBefore } from "../durable/entries.js";
 import type { SessionHost } from "../session-host/api.js";
 import { logger } from "../logger.js";
 
@@ -200,22 +201,40 @@ export async function handleWebRequest(
     // backwards from here on scroll, so the first paint stays small on a phone
     // even for a thread with a thousand entries.
     const limit = clamp(Number(url.searchParams.get("limit") ?? 50) || 50, 1, 200);
-    // Counted back from the newest message, which is the direction the pane
-    // pages in. Zero means "the most recent page".
-    const offset = Math.max(0, Number(url.searchParams.get("offset") ?? 0) || 0);
-    const messages = await seam.history(Number(history[1]), { limit, offset });
-    if (messages === undefined) {
+    // **Anchored, not offset.** An offset is counted back from the newest message, so a turn that
+    // appends while somebody is scrolling shifts the page underneath them — the same message arrives
+    // twice, or one is skipped. An anchor id cannot move: the pane says "the oldest I hold", and gets
+    // exactly what precedes it. `before=0` is the first paint: no anchor, so the newest page.
+    const before = Math.max(0, Number(url.searchParams.get("before") ?? 0) || 0);
+    const conversationId = Number(history[1]);
+    const prefix = await entriesBefore(
+      { history: (id, pageLimit, pageOffset) => seam.history(id, { limit: pageLimit, offset: pageOffset }) },
+      conversationId,
+      before,
+      { pageSize: limit },
+    );
+    const probe = await seam.history(conversationId, { limit: 1, offset: 0 });
+    if (probe === undefined) {
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: false, error: `no such conversation: ${history[1]}` }));
       return true;
     }
+    const messages = prefix.entries;
     // Rendered here, not in the browser: the renderer escapes every byte of
     // source before it emits a tag, so what reaches the page's innerHTML can
     // only be our markup. Doing it client-side would mean shipping either a
     // second renderer or an unsanitised `innerHTML` — and this origin can submit
     // messages, so an injected script would be able to run tools.
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(messages.map((m) => ({ ...m, html: renderMarkdown(m.text, WEB_RENDER_OPTIONS) }))));
+    res.end(
+      JSON.stringify({
+        messages: messages.map((m) => ({ ...m, html: renderMarkdown(m.text, WEB_RENDER_OPTIONS) })),
+        // The oldest id in this page, which is the anchor for the next one; and whether there is
+        // anything older at all, which is a different question from "this page was short".
+        before: messages[0]?.entryId ?? before,
+        atStart: prefix.atStart,
+      }),
+    );
     return true;
   }
 

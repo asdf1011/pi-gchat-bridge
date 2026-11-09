@@ -25,7 +25,19 @@ function fakeSeam(
   options: { conversations?: NamedConversation[]; artifacts?: unknown[]; history?: unknown[] } = {},
 ): SessionHost {
   return {
-    history: async (id: number) => (id === 1 ? (options.history ?? []) : undefined),
+    // Ids are assigned, because paging is anchored on them: a fixture without ids is a fixture the
+    // route cannot page, which is exactly what the route should refuse to invent.
+    history: async (id: number, page?: { limit?: number; offset?: number }) => {
+      if (id !== 1) return undefined;
+      const all = (options.history ?? []).map((message, index) => {
+        const row = message as { entryId?: number };
+        return { ...(message as object), entryId: row.entryId ?? index + 1 };
+      });
+      const limit = page?.limit ?? 50;
+      const offset = page?.offset ?? 0;
+      const end = Math.max(0, all.length - offset);
+      return all.slice(Math.max(0, end - limit), end);
+    },
     image: async (id: number, entryId: number, index: number) =>
       id === 1 && entryId === 5 && index === 0
         ? { mimeType: "image/png", data: Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString("base64") }
@@ -208,10 +220,9 @@ test("history comes back bounded, so an idle conversation is not a blank pane", 
   });
   const served = await serve(seam);
   try {
-    const rows = (await (await fetch(`${served.base}/web/api/c/1/history`)).json()) as {
-      role: string;
-      text: string;
-    }[];
+    const rows = ((await (await fetch(`${served.base}/web/api/c/1/history`)).json()) as {
+      messages: { role: string; text: string }[];
+    }).messages;
     assert.deepEqual(rows.map((row) => row.role), ["user", "assistant"]);
     assert.match(rows[1].text, /stale/);
 
@@ -235,11 +246,9 @@ test("history arrives rendered, and the rendering cannot carry a script", async 
   });
   const served = await serve(seam);
   try {
-    const rows = (await (await fetch(`${served.base}/web/api/c/1/history`)).json()) as {
-      role: string;
-      text: string;
-      html: string;
-    }[];
+    const rows = ((await (await fetch(`${served.base}/web/api/c/1/history`)).json()) as {
+      messages: { role: string; text: string; html: string }[];
+    }).messages;
     // Markdown becomes real markup, and code spans stay code.
     assert.match(rows[0].html, /<h2>Heading<\/h2>/);
     assert.match(rows[0].html, /<code>npm test<\/code>/);

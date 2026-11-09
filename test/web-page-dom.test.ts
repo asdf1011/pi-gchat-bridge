@@ -46,7 +46,7 @@ interface Harness {
   /** Every fetch the page made, with method and body. */
   requests: { url: string; method: string; body?: string }[];
   /** Each history request's paging parameters, in order. */
-  historyRequests: { limit: number; offset: number }[];
+  historyRequests: { limit: number; before: number }[];
   /** Console errors the page produced — an empty list is the pass condition. */
   errors: string[];
   /** Resolve pending microtasks so the page's async work completes. */
@@ -89,7 +89,7 @@ async function loadPage(
   const requests: Harness["requests"] = [];
   const errors: string[] = [];
   /** Every history request, so a test can assert how it paged. */
-  const historyRequests: { limit: number; offset: number }[] = [];
+  const historyRequests: { limit: number; before: number }[] = [];
 
   // The stubs must exist BEFORE the page's script runs, and jsdom runs an inline
   // <script> during parsing. `beforeParse` is the only hook early enough — putting
@@ -155,18 +155,29 @@ async function loadPage(
           return { ok: Boolean(found), status: found ? 200 : 404, json: async () => found ?? {} };
         }
         if (url.includes("/history")) {
-          // Paged the way the real route pages: `offset` counts back from the
-          // newest message. Honouring it matters — a stub that always returned
-          // the full list would report every first page as "short" and the page
-          // would decide it had reached the beginning of the conversation.
-          const all = options.history ?? [];
+          // Paged the way the real route pages **now**: anchored on an entry id, not on an offset.
+          // `before=0` is the first paint (the newest page), and each earlier page asks for what
+          // precedes the oldest id it holds. Ids are assigned here when a fixture omits them, so the
+          // anchor is always something the page can name.
+          const all = (options.history ?? []).map((message, index) => ({
+            ...message,
+            entryId: message.entryId ?? index + 1,
+          }));
           const query = new URL(url, "http://127.0.0.1").searchParams;
           const limit = Number(query.get("limit") ?? 50) || 50;
-          const offset = Math.max(0, Number(query.get("offset") ?? 0) || 0);
-          historyRequests.push({ limit, offset });
-          const end = Math.max(0, all.length - offset);
-          const start = Math.max(0, end - limit);
-          return { ok: true, status: 200, json: async () => all.slice(start, end) };
+          const before = Math.max(0, Number(query.get("before") ?? 0) || 0);
+          historyRequests.push({ limit, before });
+          const older = before === 0 ? all : all.filter((message) => message.entryId < before);
+          const page = older.slice(Math.max(0, older.length - limit));
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              messages: page,
+              before: page[0]?.entryId ?? before,
+              atStart: older.length <= limit,
+            }),
+          };
         }
         if (url.endsWith("api/environment")) {
           return {
@@ -644,7 +655,7 @@ test("the pane opens at the newest page, not the whole conversation", async () =
 
     // One page, and it is the *last* one: the newest messages.
     assert.equal(h.historyRequests.length, 1, "one request to open");
-    assert.equal(h.historyRequests[0]!.offset, 0, "the newest page");
+    assert.equal(h.historyRequests[0]!.before, 0, "the first paint has no anchor");
     const shown = renderedTexts(h);
     assert.equal(shown.length, 50);
     assert.equal(shown[0], "message 70", "starts one page back from the end");
@@ -671,10 +682,10 @@ test("scrolling to the top brings in the page before it", async () => {
     log.dispatchEvent(new h.dom.window.Event("scroll"));
     await h.settle();
 
-    // The second page, offset by what is already held — counted in messages, not
-    // pages, so a short page cannot make it re-request the same window.
+    // The second page is anchored on the oldest id held — not on a count, so a turn appending while
+    // somebody scrolls cannot shift it.
     assert.equal(h.historyRequests.length, 2);
-    assert.equal(h.historyRequests[1]!.offset, 50);
+    assert.equal(h.historyRequests[1]!.before, 71, "anchored on the oldest message already shown");
     const shown = renderedTexts(h);
     assert.equal(shown.length, 100, "both pages are in the log");
     assert.equal(shown[0], "message 20");
@@ -753,7 +764,7 @@ test("an empty conversation asks nothing and shows no pager", async () => {
   }
 });
 
-test("paging state is per conversation, so a reload does not resume someone else's offset", async () => {
+test("paging state is per conversation, so a reload does not resume someone else's anchor", async () => {
   let h: Harness | undefined;
   try {
     h = await loadPage({
@@ -763,23 +774,23 @@ test("paging state is per conversation, so a reload does not resume someone else
     const win = h.dom.window;
     const log = win.document.getElementById("log")!;
 
-    // Page 7 back once, so its offset has advanced past the first page.
+    // Page 7 back once, so its anchor has moved.
     log.scrollTop = 0;
     log.dispatchEvent(new win.Event("scroll"));
     await h.settle();
-    assert.equal(h.historyRequests.at(-1)!.offset, 50);
+    assert.equal(h.historyRequests.at(-1)!.before, 71);
 
     // Switching conversations is a full navigation in this page (the index links
     // to `/<id>/`), so the equivalent of "opening another one" is a fresh load.
-    // What matters is that every load starts from `offset: 0`: a counter carried
-    // over would ask for a window measured against a different thread.
+    // What matters is that every load starts with no anchor: one carried over would name an entry id
+    // from a different thread.
     const second = await loadPage({
       conversations: [{ conversationId: 9, chatKey: "k2", model: "m" }],
       pathname: "/9/",
       history: transcriptOf(120),
     });
     try {
-      assert.equal(second.historyRequests[0]!.offset, 0, "a new conversation starts at its newest page");
+      assert.equal(second.historyRequests[0]!.before, 0, "a new conversation starts at its newest page");
       assert.equal(second.historyRequests.length, 1, "and asks for exactly one page");
     } finally {
       second.close();
