@@ -510,3 +510,35 @@ test("the CLI's watch follows by long poll and remembers its position", async ()
     await served.close();
   }
 });
+
+test("an observing poll waits for the view to change, not just for entries", async () => {
+  // The point of `observe`: a bridge painting a turn gets the draft when it changes, so a live update
+  // is not stuck behind a 25-second `wait` — which is what waiting only on turn boundaries did.
+  let live = "first";
+  const { seam } = streamSeam([{ conversationId: 1, entries: [] }]);
+  const replaced = seam as unknown as Record<string, unknown>;
+  replaced.snapshot = async () => ({ liveText: live, busy: true, lastAssistantText: "", tools: [] });
+  replaced.attach = async (_id: number, onFrame: (view: unknown) => void) => {
+    // The first frame is the state the caller already has; the second is the news.
+    setTimeout(() => onFrame({ liveText: "first", busy: true, tools: [] }), 10);
+    setTimeout(() => {
+      live = "second"; // the view moved, which is what the next read must see
+      onFrame({ liveText: "second", busy: true, tools: [] });
+    }, 60);
+    return { detach() {} };
+  };
+
+  const served = await serveEvents(seam, [{ conversationId: 1, address: "spaces/S/threads/T" }]);
+  try {
+    const started = Date.now();
+    const body = (await (
+      await fetch(`${served.baseUrl}/v1/poll?since=0&wait=5&conversation=1&observe=1`)
+    ).json()) as { view?: { liveText?: string }; waitedMs: number };
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed < 2000, `answered when the view changed, not when wait expired (${elapsed}ms)`);
+    // Read after waking, so the answer is the newest state rather than the frame that woke us.
+    assert.equal(body.view?.liveText, "second");
+  } finally {
+    await served.close();
+  }
+});

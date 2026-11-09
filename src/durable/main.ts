@@ -34,7 +34,7 @@ import { runDurableCommand } from "../adapter/commands.js";
 import { defaultSettings } from "../adapter/commands.js";
 import { ActivityFeed } from "./activity.js";
 import { Painter } from "./painter.js";
-import { httpPoll, httpSnapshot } from "../adapter/poll-client.js";
+import { httpPoll } from "../adapter/poll-client.js";
 import { entriesAfter } from "./entries.js";
 import type { ProjectedView } from "../session-host/projection.js";
 import { chatTarget } from "../session-key.js";
@@ -691,28 +691,44 @@ async function main(): Promise<void> {
         watch:
           config.viewMode !== "in-process"
             ? (conversationId: number, handlers: { frame(projected: unknown): void; settled(): void }) => {
+                // A long poll that observes *this* conversation: the answer is the draft, and it
+                // arrives when the draft changes rather than on a fixed cadence. One request in
+                // flight at a time, no separate snapshot call, and the entries it carries are
+                // handed to the same delivery path — deduplicated by the cursor, which is why the
+                // poll beside it can run without the two disagreeing.
                 const stop = new AbortController();
                 let wasBusy: boolean | undefined;
                 void (async () => {
+                  let backoff = 1_000;
                   while (!stop.signal.aborted) {
                     try {
-                      const view = await httpSnapshot({
+                      const result = await httpPoll({
                         baseUrl: config.selfUrl === "" ? `http://127.0.0.1:${config.healthPort}` : config.selfUrl,
+                        // The cursor is global, so the same position serves both polls; `ingest`
+                        // skips anything already delivered.
+                        since: ledger.cursor,
+                        waitSeconds: 25,
                         conversationId,
+                        observe: true,
                         ...(config.webToken ? { token: config.webToken } : {}),
                         signal: stop.signal,
                       });
-                      if (!view) break;
-                      // Settle is a transition, not a state: an idle conversation stays idle, and
-                      // reporting every idle poll would re-read the transcript continuously.
-                      if (wasBusy === true && !view.busy) handlers.settled();
-                      wasBusy = view.busy;
-                      handlers.frame(view);
+                      if (result.entries.length > 0) await instance.ingest(result.entries);
+                      const view = result.view ?? undefined;
+                      if (view) {
+                        // Settle is a transition, not a state: an idle conversation stays idle, and
+                        // reporting every idle answer would re-read the transcript forever.
+                        if (wasBusy === true && !view.busy) handlers.settled();
+                        wasBusy = view.busy;
+                        handlers.frame(view);
+                      }
+                      backoff = 1_000;
                     } catch (error) {
                       if (stop.signal.aborted) return;
-                      logger.warn(`[paint] snapshot ${conversationId} failed: ${(error as Error).message}`);
+                      logger.warn(`[paint] observing ${conversationId} failed: ${(error as Error).message}`);
+                      await new Promise((resolve) => setTimeout(resolve, backoff));
+                      backoff = Math.min(30_000, backoff * 2);
                     }
-                    await new Promise((resolve) => setTimeout(resolve, 300));
                   }
                 })();
                 return { detach: () => stop.abort() };

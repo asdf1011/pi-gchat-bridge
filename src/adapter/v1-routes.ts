@@ -247,16 +247,28 @@ export async function handleV1(
     };
 
     let entries = await read();
+    const observed = observe && only !== undefined;
+    let view = observed ? await deps.seam.snapshot(only) : undefined;
+
     if (entries.length === 0 && waitMs > 0) {
-      // Something to wait for: the activity feed, because a turn boundary is the only moment entries
-      // appear. Blind without it — a deployment with no feed still honours `wait`, it just sleeps.
+      // What to wait for, when a client asks to observe: the *view* as well as the log.
+      //
+      // Entries only appear at a turn's boundaries, so waiting on them alone would hold a live-update
+      // request for the full `wait` and then answer with a draft that is twenty-five seconds old.
+      // The view is a plain snapshot, so the wait is "until it differs from the one I am about to
+      // send" — a state change, not an event, which is exactly the shape of what is being watched.
+      const baseline = view === undefined ? "" : JSON.stringify(view);
+      // A frame function rather than a feed event: the activity feed announces turn boundaries and
+      // deliberately carries no data, and this needs the data.
       await new Promise<void>((resolve) => {
         let done = false;
+        let attached: { detach(): void } | undefined;
         const finish = (): void => {
           if (done) return;
           done = true;
           clearTimeout(timer);
           unsubscribe();
+          attached?.detach();
           resolve();
         };
         const timer = setTimeout(finish, waitMs);
@@ -266,13 +278,28 @@ export async function handleV1(
               if (target.includes(event.conversationId)) finish();
             })
           : () => {};
+        if (observed && only !== undefined) {
+          void deps.seam
+            .attach(only, (frame) => {
+              // The first frame of an attach is the current state, which is what `baseline` already
+              // is; only a different one is news.
+              if (JSON.stringify(frame) !== baseline) finish();
+            })
+            .then((handle) => {
+              attached = handle ?? undefined;
+              if (done) attached?.detach();
+            })
+            .catch(() => {
+              // No view to watch: the timeout is the answer, as it is for a deployment with no feed.
+            });
+        }
       });
       if (batchMs > 0) await new Promise((resolve) => setTimeout(resolve, batchMs));
       entries = await read();
+      if (observed) view = await deps.seam.snapshot(only);
     }
 
     const cursor = entries.length > 0 ? (entries[entries.length - 1] as EntryView).entryId : since;
-    const view = observe && only !== undefined ? await deps.seam.snapshot(only) : undefined;
     const waitedMs = Date.now() - startedAt;
 
     // Caching turns on one property: **the answer to "everything after X" is a prefix of an
