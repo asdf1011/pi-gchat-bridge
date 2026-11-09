@@ -211,6 +211,21 @@ const COMMENT_SCRIPT = `
     }
   }
 
+  /** The selected text without the furniture: line numbers and comment markers are not the quote. */
+  function quoteOf(range) {
+    try {
+      var fragment = range.cloneContents();
+      var junk = fragment.querySelectorAll(".no, sup.cmark");
+      for (var i = 0; i < junk.length; i += 1) {
+        if (junk[i].parentNode) junk[i].parentNode.removeChild(junk[i]);
+      }
+      var text = fragment.textContent || "";
+      if (text.trim()) return text.trim();
+    } catch (e) {}
+    // Nothing clonable: fall back to what the selection itself says.
+    return String(window.getSelection()).trim();
+  }
+
   /** The selection as a message, or null when there is nothing worth commenting on. */
   function describe() {
     var selection = window.getSelection();
@@ -230,7 +245,9 @@ const COMMENT_SCRIPT = `
       file: FRAME.file,
       line: start,
       endLine: end,
-      quote: String(selection).slice(0, 400)
+      // Not the selection's own string: a selection spanning lines also spans the gutter, so the
+      // quote would read "first line, 3second line" — line numbers pasted into the comment.
+      quote: quoteOf(range).slice(0, 400)
     };
     // Characters only within one line: a two-dimensional span has no format.
     if (start === end && startSpan && endSpan) {
@@ -464,13 +481,28 @@ export const RENDER_SCRIPT = `
   }
 
   /** The selection as a message, or null when there is nothing worth commenting on. */
+  /** The selected text without the furniture: line numbers and comment markers are not the quote. */
+  function quoteOf(range) {
+    try {
+      var fragment = range.cloneContents();
+      var junk = fragment.querySelectorAll(".no, sup.cmark");
+      for (var i = 0; i < junk.length; i += 1) {
+        if (junk[i].parentNode) junk[i].parentNode.removeChild(junk[i]);
+      }
+      var text = fragment.textContent || "";
+      if (text.trim()) return text.trim();
+    } catch (e) {}
+    // Nothing clonable: fall back to what the selection itself says.
+    return String(window.getSelection()).trim();
+  }
+
   function describe() {
     var selection = window.getSelection();
     if (!selection || selection.isCollapsed || selection.rangeCount === 0) return null;
-    var quote = String(selection).trim();
+    var range = selection.getRangeAt(0);
+    var quote = quoteOf(range);
     if (!quote) return null;
     var firstLine = quote.split("\\n")[0].trim();
-    var range = selection.getRangeAt(0);
     return {
       range: range,
       message: {
