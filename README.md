@@ -322,7 +322,8 @@ decision for a bridge with shell access.
 ## Testing
 
 ```bash
-npm test
+npm test            # only what your change can affect (seconds)
+npm run test:all    # the whole suite, isolated processes (about three minutes)
 ```
 
 Runs the unit test suite (Node's built-in runner via `tsx`). It covers the pure
@@ -330,6 +331,24 @@ logic: projection of a durable view into a Chat reply, the Chat sink, the
 router's dedupe/steering contract, the command layer's query semantics, the
 web sink, and failure notices. Tests never open the live database or call a
 model — the harness is reached through structural fakes.
+
+`npm test` is change-aware, in the smallest useful way: each test file has a key
+made of everything it transitively imports plus the tooling that changes what a
+test *means* (`tsconfig`, `package.json`, non-`.ts` files read at runtime such as
+`page.html`), and a file whose key is unchanged since it last passed is skipped.
+`npm run test:all` ignores that cache and runs everything in isolated processes —
+use it before believing a green run, and after touching something the analysis
+cannot see.
+
+```bash
+node scripts/changed-tests.mjs --list      # what would run, run nothing
+node scripts/changed-tests.mjs --explain test/ledger.test.ts   # why is this running?
+```
+
+If a change seems to have skipped too much, `--explain` names the file's whole
+dependency closure and says when an import could not be resolved statically —
+those files always run. Delete `node_modules/.cache/bridge-tests/` to forget
+everything.
 
 ```bash
 npm run evals                             # local-model evals (topic titles)

@@ -11,11 +11,12 @@
     "dev": "tsx watch src/index.ts",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.e2e.json",
     "build": "tsc",
-    "test": "tsx --test test/*.test.ts",
+    "test": "node scripts/changed-tests.mjs",
     "evals": "node evals/run.mjs",
     "evals:regrade": "node evals/regrade.mjs",
     "test:e2e": "playwright test",
-    "test:e2e:ui": "playwright test --ui"
+    "test:e2e:ui": "playwright test --ui",
+    "test:all": "tsx --test test/*.test.ts"
   },
   "dependencies": {
     "@earendil-works/chord": "^1.4.0",
