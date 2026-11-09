@@ -615,7 +615,11 @@ async function main(): Promise<void> {
     // threads get their turns posted here and the handler keeps its hands off them
     // (same predicate, same process, so the two cannot disagree).
     {
-      logger.info("[paint] posting for every Chat conversation — the handler will not");
+      logger.info(
+        `[paint] posting for every Chat conversation — the handler will not; painting ${
+          config.viewMode === "poll" ? "by polling the snapshot (the extracted shape)" : "in-process"
+        }`,
+      );
       // The address a conversation lives at. Read per use rather than cached: bindings
       // are rewritten on every message, and a stale key here would post into the wrong
       // thread — the failure this whole arrangement exists to make impossible.
