@@ -34,6 +34,7 @@ import { runDurableCommand } from "../adapter/commands.js";
 import { defaultSettings } from "../adapter/commands.js";
 import { ActivityFeed } from "./activity.js";
 import { Painter } from "./painter.js";
+import { observeTurn } from "./observe.js";
 import { httpPoll } from "../adapter/poll-client.js";
 import { entriesAfter } from "./entries.js";
 import type { ProjectedView } from "../session-host/projection.js";
@@ -691,57 +692,23 @@ async function main(): Promise<void> {
         watch:
           config.viewMode !== "in-process"
             ? (conversationId: number, handlers: { frame(projected: unknown): void; settled(): void }) => {
-                // A long poll that observes *this* conversation: the answer is the draft, and it
-                // arrives when the draft changes rather than on a fixed cadence. One request in
-                // flight at a time, no separate snapshot call, and the entries it carries are
-                // handed to the same delivery path — deduplicated by the cursor, which is why the
-                // poll beside it can run without the two disagreeing.
+                // One request in flight, held until the draft or the log moves. The entries it
+                // carries go through the same delivery path as the poll beside it; the cursor is
+                // what keeps the two from posting anything twice.
                 const stop = new AbortController();
-                let wasBusy: boolean | undefined;
-                // A prompt that never becomes a turn: nothing else will end this watcher, so a
-                // deadline does. Without it a historical prompt — a catch-up after a bridge was away
-                // — would poll once every 25 seconds for ever.
-                let sawBusy = false;
-                const openedAt = Date.now();
-                void (async () => {
-                  let backoff = 1_000;
-                  while (!stop.signal.aborted) {
-                    try {
-                      const result = await httpPoll({
-                        baseUrl: config.selfUrl === "" ? `http://127.0.0.1:${config.healthPort}` : config.selfUrl,
-                        // The cursor is global, so the same position serves both polls; `ingest`
-                        // skips anything already delivered.
-                        since: ledger.cursor,
-                        waitSeconds: 25,
-                        conversationId,
-                        observe: true,
-                        ...(config.webToken ? { token: config.webToken } : {}),
-                        signal: stop.signal,
-                      });
-                      if (result.entries.length > 0) await instance.ingest(result.entries);
-                      const view = result.view ?? undefined;
-                      if (view) {
-                        // Settle is a transition, not a state: an idle conversation stays idle, and
-                        // reporting every idle answer would re-read the transcript forever.
-                        if (view.busy) sawBusy = true;
-                        if (wasBusy === true && !view.busy) handlers.settled();
-                        wasBusy = view.busy;
-                        handlers.frame(view);
-                      }
-                      if (!sawBusy && Date.now() - openedAt > 30_000) {
-                        logger.info(`[paint] conversation ${conversationId}: no turn started — stopping the watch`);
-                        handlers.settled();
-                        return;
-                      }
-                      backoff = 1_000;
-                    } catch (error) {
-                      if (stop.signal.aborted) return;
-                      logger.warn(`[paint] observing ${conversationId} failed: ${(error as Error).message}`);
-                      await new Promise((resolve) => setTimeout(resolve, backoff));
-                      backoff = Math.min(30_000, backoff * 2);
-                    }
-                  }
-                })();
+                observeTurn(
+                  {
+                    baseUrl: config.selfUrl === "" ? `http://127.0.0.1:${config.healthPort}` : config.selfUrl,
+                    conversationId,
+                    ...(config.webToken ? { token: config.webToken } : {}),
+                    since: () => ledger.cursor,
+                    onEntries: (entries) => instance.ingest(entries),
+                    onFrame: (view) => handlers.frame(view),
+                    onSettled: () => handlers.settled(),
+                    log: (line) => logger.info(line),
+                  },
+                  stop.signal,
+                );
                 return { detach: () => stop.abort() };
               }
             : undefined,
