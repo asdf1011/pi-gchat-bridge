@@ -18,7 +18,7 @@ import test, { after } from "node:test";
 
 import { Ledger } from "../src/durable/ledger.js";
 import { Painter, type PaintStream, type PaintSurface } from "../src/durable/painter.js";
-import type { MessageLike } from "../src/durable/delivery-pass.js";
+import type { MessageLike } from "../src/durable/entries.js";
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "paint-"));
 after(() => fs.rmSync(scratch, { recursive: true, force: true }));
