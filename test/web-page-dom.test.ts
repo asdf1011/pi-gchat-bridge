@@ -1191,3 +1191,27 @@ test("a stream the browser has given up on is reopened by the page", async () =>
     h?.close();
   }
 });
+
+test("the composer takes focus only when the click asked for it", async () => {
+  // Focus follows intent. Selecting text in the document no longer opens this bar at all; the button
+  // beside the selection sends `intent: "comment"`, and that is the reader saying they want to write
+  // — so focusing (and raising the keyboard) is right. A selection message without the intent keeps
+  // the old rule, which is that the field must not steal focus mid-read.
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ pathname: "/7/", conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    const doc = h.dom.window.document;
+    const field = doc.getElementById("comment-text") as HTMLTextAreaElement;
+    // The bar lives inside the artifacts pane, and jsdom refuses to focus an element it considers
+    // unrendered. Opening the pane is what the reader has already done by the time they select text.
+    (doc.getElementById("artifacts") as HTMLElement).hidden = false;
+
+    await fromFrame(h, { t: "pi-artifact-select", file: "notes.md", quote: "crumbs" });
+    assert.notEqual(doc.activeElement, field, "a bare selection never focuses");
+
+    await fromFrame(h, { t: "pi-artifact-select", file: "notes.md", quote: "crumbs", intent: "comment" });
+    assert.equal(doc.activeElement, field, "a deliberate comment does");
+  } finally {
+    h?.close();
+  }
+});

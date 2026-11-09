@@ -1496,6 +1496,13 @@ function showCommentBar(selection) {
     commentError.hidden = true;
   }
   commentBar.hidden = false;
+  // Focus follows intent. The document only sends `intent: "comment"` when somebody clicked the
+  // affordance beside their selection — an explicit "I want to write something" — and focusing then
+  // is right: it opens the keyboard, which is what they asked for. Selection alone never focuses,
+  // because that raises the keyboard mid-read and collapses the very selection being commented on.
+  if (selection.intent === 'comment') {
+    commentText.focus();
+  }
 }
 
 function closeCommentBar() {

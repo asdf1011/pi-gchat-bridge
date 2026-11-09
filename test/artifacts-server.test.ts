@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
 
-import { startArtifactsServer } from "../src/adapter/artifacts-server.js";
+import { RENDER_SCRIPT, startArtifactsServer } from "../src/adapter/artifacts-server.js";
 import { canonicalPath, type ArtifactFile } from "../src/durable/artifacts.js";
 import type { SessionHost } from "../src/session-host/api.js";
 
@@ -321,5 +321,31 @@ test("rendered Markdown is commentable: the layer is injected, not built into th
     assert.match(body, /data-file="notes.md"/);
   } finally {
     await harness.close();
+  }
+});
+
+test("both documents carry the same comment affordance", async () => {
+  // The source view and the rendered view each carry a script, because they have different notions
+  // of what a selection means (line numbers versus a text run). The affordance is the part that must
+  // behave identically, and it is duplicated text — so this is the test that notices when only one
+  // copy gets fixed.
+  const root = tempDir();
+  const harness = await serve(root, ["notes.md"]);
+  try {
+    fs.writeFileSync(path.join(root, "notes.md"), "plain prose\n");
+    const block = (html: string): string => {
+      const from = html.indexOf("function showAffordance");
+      const to = html.indexOf("affordance = button;", from);
+      assert.ok(from !== -1 && to !== -1, "the affordance is in the document");
+      return html.slice(from, to);
+    };
+    // The rendered document only carries a script when it has something to highlight, so the second
+    // copy is taken from the exported script itself.
+    const source = block(await (await fetch(`${harness.base}/c/1/notes.md?view=source`)).text());
+    const rendered = block(RENDER_SCRIPT);
+    assert.equal(source, rendered);
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });

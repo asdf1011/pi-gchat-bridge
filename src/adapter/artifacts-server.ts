@@ -211,21 +211,17 @@ const COMMENT_SCRIPT = `
     }
   }
 
-  function report() {
+  /** The selection as a message, or null when there is nothing worth commenting on. */
+  function describe() {
     var selection = window.getSelection();
-    if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
-      // A selection that went away is the reader dismissing the composer, so say
-      // so: the parent closes the bar, unless something has been typed into it.
-      parent.postMessage({ t: "pi-artifact-clear", file: FRAME.file }, "*");
-      return;
-    }
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0) return null;
     var range = selection.getRangeAt(0);
     var startLine = lineElement(range.startContainer);
     var endLine = lineElement(range.endContainer);
-    if (!startLine || !endLine) return;
+    if (!startLine || !endLine) return null;
     var start = Number(startLine.getAttribute("data-line"));
     var end = Number(endLine.getAttribute("data-line"));
-    if (!start || !end) return;
+    if (!start || !end) return null;
 
     var startSpan = textSpan(startLine);
     var endSpan = textSpan(endLine);
@@ -245,15 +241,78 @@ const COMMENT_SCRIPT = `
         message.charEnd = to;
       }
     }
-    parent.postMessage(message, "*");
+    return { range: range, message: message };
+  }
+
+  // --- The comment affordance -------------------------------------------------
+  //
+  // Selecting text no longer opens the composer. People select text to read it, and a box appearing
+  // over the page is a distraction; so a small button appears beside the selection and *that* is what
+  // opens the comment box. The click carries the intent, which is what lets the pane focus the field:
+  // the reader said they wanted to write something, rather than being interrupted mid-read.
+  var affordance = null;
+
+  function hideAffordance() {
+    if (!affordance) return;
+    if (affordance.parentNode) affordance.parentNode.removeChild(affordance);
+    affordance = null;
+  }
+
+  function showAffordance(range, message) {
+    hideAffordance();
+    var rect;
+    try {
+      rect = range.getBoundingClientRect();
+    } catch (e) {
+      rect = null;
+    }
+    // A zero rect is what a headless DOM reports; pinning the button top-left there is better than
+    // throwing, because the tests drive exactly this path.
+    var top = Math.max(4, ((rect && rect.top) || 8) - 34);
+    var left = Math.max(4, Math.min((window.innerWidth || 800) - 44, ((rect && rect.right) || 8) + 6));
+    var button = document.createElement("button");
+    button.type = "button";
+    button.className = "cm-add";
+    button.title = "Comment on this";
+    button.setAttribute("aria-label", "Comment on the selected text");
+    button.textContent = "Comment";
+    button.style.position = "fixed";
+    button.style.top = top + "px";
+    button.style.left = left + "px";
+    button.style.zIndex = "2147483647";
+    // Without this the press itself collapses the selection, and the click would report nothing.
+    button.addEventListener("mousedown", function (event) { event.preventDefault(); });
+    button.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      hideAffordance();
+      message.intent = "comment";
+      parent.postMessage(message, "*");
+    });
+    document.body.appendChild(button);
+    affordance = button;
   }
 
   var timer = null;
   document.addEventListener("selectionchange", function () {
     if (timer) clearTimeout(timer);
-    // A little settled time: selectionchange fires per character while a
-    // selection is being dragged, and the parent only needs the result.
-    timer = setTimeout(report, 220);
+    // A little settled time: selectionchange fires per character while a selection is being
+    // dragged, and only the settled result is worth a button.
+    timer = setTimeout(function () {
+      var built = describe();
+      if (!built) {
+        hideAffordance();
+        // A selection that went away is the reader dismissing the composer, so say so: the parent
+        // closes the bar, unless something has been typed into it.
+        parent.postMessage({ t: "pi-artifact-clear", file: FRAME.file }, "*");
+        return;
+      }
+      showAffordance(built.range, built.message);
+    }, 220);
+  });
+  document.addEventListener("scroll", hideAffordance, true);
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape") hideAffordance();
   });
 
   document.addEventListener("click", function (event) {
@@ -404,22 +463,68 @@ export const RENDER_SCRIPT = `
     return seen;
   }
 
-  function report() {
+  /** The selection as a message, or null when there is nothing worth commenting on. */
+  function describe() {
     var selection = window.getSelection();
-    if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
-      parent.postMessage({ t: "pi-artifact-clear", file: FRAME.file }, "*");
-      return;
-    }
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0) return null;
     var quote = String(selection).trim();
-    if (!quote) return;
+    if (!quote) return null;
     var firstLine = quote.split("\\n")[0].trim();
     var range = selection.getRangeAt(0);
-    parent.postMessage({
-      t: "pi-artifact-select",
-      file: FRAME.file,
-      quote: quote.slice(0, 400),
-      occurrence: occurrenceOf(firstLine, range.startContainer, range.startOffset)
-    }, "*");
+    return {
+      range: range,
+      message: {
+        t: "pi-artifact-select",
+        file: FRAME.file,
+        quote: quote.slice(0, 400),
+        occurrence: occurrenceOf(firstLine, range.startContainer, range.startOffset)
+      }
+    };
+  }
+
+  // The comment affordance: see the source view's copy for why selecting text no longer opens the
+  // composer. Two documents, one behaviour — kept literally identical so they cannot drift.
+  var affordance = null;
+
+  function hideAffordance() {
+    if (!affordance) return;
+    if (affordance.parentNode) affordance.parentNode.removeChild(affordance);
+    affordance = null;
+  }
+
+  function showAffordance(range, message) {
+    hideAffordance();
+    var rect;
+    try {
+      rect = range.getBoundingClientRect();
+    } catch (e) {
+      rect = null;
+    }
+    // A zero rect is what a headless DOM reports; pinning the button top-left there is better than
+    // throwing, because the tests drive exactly this path.
+    var top = Math.max(4, ((rect && rect.top) || 8) - 34);
+    var left = Math.max(4, Math.min((window.innerWidth || 800) - 44, ((rect && rect.right) || 8) + 6));
+    var button = document.createElement("button");
+    button.type = "button";
+    button.className = "cm-add";
+    button.title = "Comment on this";
+    button.setAttribute("aria-label", "Comment on the selected text");
+    button.textContent = "Comment";
+    button.style.position = "fixed";
+    button.style.top = top + "px";
+    button.style.left = left + "px";
+    button.style.zIndex = "2147483647";
+    // Without this the press itself collapses the selection, and the click would report nothing.
+    button.addEventListener("mousedown", function (event) { event.preventDefault(); });
+    button.addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      hideAffordance();
+      message.intent = "comment";
+      parent.postMessage(message, "*");
+    });
+    document.body.appendChild(button);
+    affordance = button;
   }
 
   function mark(comment) {
@@ -464,7 +569,19 @@ export const RENDER_SCRIPT = `
   var timer = null;
   document.addEventListener("selectionchange", function () {
     if (timer) clearTimeout(timer);
-    timer = setTimeout(report, 220);
+    timer = setTimeout(function () {
+      var built = describe();
+      if (!built) {
+        hideAffordance();
+        parent.postMessage({ t: "pi-artifact-clear", file: FRAME.file }, "*");
+        return;
+      }
+      showAffordance(built.range, built.message);
+    }, 220);
+  });
+  document.addEventListener("scroll", hideAffordance, true);
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape") hideAffordance();
   });
 
   document.addEventListener("click", function (event) {
@@ -522,6 +639,10 @@ function sourceDocument(input: {
   mark.cm.resolved { background: #8affa055; }
   sup.cmark { color: inherit; background: #ffd54a99; border-radius: 999px; padding: 0 .35em;
               margin-left: .15em; font-size: .8em; cursor: pointer; text-decoration: none; }
+  /* The affordance a settled selection shows: a small button beside the text, never a panel. */
+  .cm-add { font: inherit; line-height: 1; padding: .3em .5em; border-radius: 6px;
+            border: 1px solid #8886; background: Canvas; color: inherit; cursor: pointer;
+            box-shadow: 0 1px 4px #0003; }
 </style>
 </head>
 <body data-file="${escapeHtml(input.key)}">
@@ -557,6 +678,9 @@ function renderedDocument(key: string, bodyHtml: string, input: {
   mark.cm.orphaned { background: #ff8a8a55; }
   sup.cmark { color: inherit; background: #ffd54a99; border-radius: 999px; padding: 0 .35em;
               margin-left: .15em; font-size: .8em; cursor: pointer; }
+  .cm-add { font: inherit; line-height: 1; padding: .3em .5em; border-radius: 6px;
+            border: 1px solid #8886; background: Canvas; color: inherit; cursor: pointer;
+            box-shadow: 0 1px 4px #0003; }
   .comment-meta { font: .8em var(--mono, monospace); opacity: .65; }
 </style>`;
   const payload = `<script type="application/json" id="comment-data" nonce="${input.nonce}">${JSON.stringify(data).replace(/</g, "\\u003c")}</script>`;

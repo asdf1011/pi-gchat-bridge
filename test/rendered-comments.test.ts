@@ -64,3 +64,58 @@ test("a fenced block is left alone, because a comment there belongs to the sourc
   assert.equal(dom.window.document.querySelector("mark.cm"), null);
   dom.window.close();
 });
+
+/* --- the comment affordance --------------------------------------------------------- */
+
+/** Select a text node's contents and let the document's debounce settle. */
+async function selectText(dom: JSDOM, selector: string): Promise<void> {
+  const doc = dom.window.document;
+  const range = doc.createRange();
+  range.selectNodeContents(doc.querySelector(selector)!);
+  const selection = dom.window.getSelection()!;
+  selection.removeAllRanges();
+  selection.addRange(range);
+  doc.dispatchEvent(new dom.window.Event("selectionchange"));
+  // Poll rather than sleep a fixed 260ms: the settle is a timer inside the document, and under a
+  // loaded harness a fixed wait is how this kind of test goes intermittently red.
+  for (let i = 0; i < 100 && !doc.querySelector("button.cm-add"); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+test("a selection shows a button, and the button is what opens the composer", async () => {
+  // The point of the change: reading and selecting must not summon a comment box. A small button
+  // appears beside the text; clicking it is the explicit request to write, and it carries that
+  // intent so the pane knows it may focus the field.
+  const dom = render("<p>selectable prose</p>", []);
+  const posted: unknown[] = [];
+  dom.window.parent.postMessage = (data: unknown) => posted.push(data);
+
+  await selectText(dom, "p");
+  const button = dom.window.document.querySelector("button.cm-add");
+  assert.ok(button, "an affordance appears beside the selection");
+  assert.equal(posted.some((m) => (m as { t: string }).t === "pi-artifact-select"), false, "selecting alone opens nothing");
+
+  button!.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+  const opened = posted.find((m) => (m as { t: string }).t === "pi-artifact-select") as { intent?: string };
+  assert.ok(opened, "the click asks for the composer");
+  assert.equal(opened.intent, "comment", "and says the reader meant to write");
+  assert.equal(dom.window.document.querySelector("button.cm-add"), null, "the button goes once used");
+  dom.window.close();
+});
+
+test("an empty selection takes the button away again", async () => {
+  const dom = render("<p>selectable prose</p>", []);
+  await selectText(dom, "p");
+  assert.ok(dom.window.document.querySelector("button.cm-add"));
+
+  dom.window.getSelection()!.removeAllRanges();
+  dom.window.document.dispatchEvent(new dom.window.Event("selectionchange"));
+  const gone = dom.window.document.querySelector("button.cm-add");
+  for (let i = 0; i < 100 && dom.window.document.querySelector("button.cm-add"); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.ok(gone === null || dom.window.document.querySelector("button.cm-add") === null,
+    "a dismissed selection leaves nothing behind");
+  dom.window.close();
+});
