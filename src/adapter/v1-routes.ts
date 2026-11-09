@@ -31,7 +31,7 @@
  */
 import type http from "node:http";
 
-import { entriesAfter } from "../durable/entries.js";
+import { entriesAfter, entriesBefore } from "../durable/entries.js";
 import type { SessionHost } from "../session-host/api.js";
 
 export interface ConversationAddress {
@@ -159,6 +159,36 @@ export async function handleV1(
     const probe = await deps.seam.history(conversationId, { limit: 1, offset: 0 });
     if (probe === undefined) {
       json(res, 404, { ok: false, error: `no such conversation: ${conversationId}` });
+      return true;
+    }
+
+    // `before=<entryId>` reads the same log the other way, for "show earlier": a surface has the
+    // oldest entry it holds and asks what came before it. Without it a reader paging backwards has to
+    // know offsets, which are counted from the newest and shift under a running turn.
+    const beforeParam = url.searchParams.get("before");
+    if (beforeParam !== null) {
+      const before = Math.max(0, Number(beforeParam) || 0);
+      const prefix = await entriesBefore(
+        { history: (id, pageLimit, offset) => deps.seam.history(id, { limit: pageLimit, offset }) },
+        conversationId,
+        before,
+        { pageSize: limit },
+      );
+      json(res, 200, {
+        conversationId,
+        before,
+        atStart: prefix.atStart,
+        entries: prefix.entries.map(
+          (entry): EntryView => ({
+            conversationId,
+            entryId: entry.entryId,
+            role: entry.role,
+            text: entry.text,
+            ...(entry.at === undefined ? {} : { at: entry.at }),
+            ...(entry.origin === undefined ? {} : { origin: entry.origin }),
+          }),
+        ),
+      });
       return true;
     }
 

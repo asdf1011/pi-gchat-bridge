@@ -114,3 +114,70 @@ export async function entriesAfter(
 export function logUnreadable(conversationId: number, error: unknown): void {
   logger.warn(`[entries] conversation ${conversationId}: ${(error as Error).message}`);
 }
+
+/** One page-walk backwards from an entry: what came before it. */
+export interface EntryPrefix {
+  /** Entries in ascending order, grouped by entry id — the newest `limit` before `before`. */
+  entries: EntryRef[];
+  /**
+   * True when the walk reached the beginning of the transcript.
+   *
+   * This is the flag a reader paging backwards actually needs: "there is nothing older" is a
+   * different statement from "this page was short", and a surface offering "show earlier" has to
+   * know which one it is looking at.
+   */
+  atStart: boolean;
+}
+
+/**
+ * Read entries *before* a given one, newest last.
+ *
+ * The forward read is a prefix of an append-only log, which is why a cursor works. This is the same
+ * log read the other way, and it needs one thing the forward read does not: a place to stop, because
+ * "everything before X" grows without bound as X moves back.
+ *
+ * Walks from the newest page, dropping anything at or after `before`, until it has `limit` entries
+ * or runs out — so the cost is bounded by the pages it visits, not by the age of the conversation.
+ */
+export async function entriesBefore(
+  deps: EntriesDeps,
+  conversationId: number,
+  before: number,
+  options: { pageSize?: number; maxPages?: number } = {},
+): Promise<EntryPrefix> {
+  const limit = options.pageSize ?? 50;
+  const maxPages = options.maxPages ?? 10;
+  const byEntry = new Map<number, EntryRef>();
+  let atStart = false;
+
+  for (let page = 0; page < maxPages; page += 1) {
+    const messages = await deps.history(conversationId, limit, page * limit);
+    if (!messages || messages.length === 0) {
+      atStart = true;
+      break;
+    }
+    if (messages.length < limit) atStart = true;
+    for (const message of messages) {
+      if (message.entryId === undefined) continue;
+      if (message.entryId >= before) continue;
+      // The last message of an entry wins, as in the forward read: that is the answer, and the origin
+      // it carries is the surface that asked.
+      byEntry.set(message.entryId, {
+        conversationId,
+        entryId: message.entryId,
+        role: message.role,
+        text: message.text,
+        ...(message.at === undefined ? {} : { at: message.at }),
+        ...(message.origin === undefined ? {} : { origin: message.origin }),
+      });
+    }
+    if (atStart) break;
+    if (byEntry.size >= limit) break;
+  }
+
+  const entries = [...byEntry.values()].sort((a, b) => a.entryId - b.entryId);
+  // The newest `limit` of what was found: a page that ran past its budget must still answer with
+  // the entries nearest the anchor, or "show earlier" would jump.
+  const trimmed = entries.slice(Math.max(0, entries.length - limit));
+  return { entries: trimmed, atStart: atStart && trimmed[0]?.entryId === entries[0]?.entryId };
+}

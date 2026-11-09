@@ -549,3 +549,42 @@ test("an observing poll waits for the view to change, not just for entries", asy
     await served.close();
   }
 });
+
+test("entries can be read backwards, with a flag that says when the start is reached", async () => {
+  // What the pane needs for "show earlier": the entries before the oldest one it holds. Offsets are
+  // counted from the newest and move under a running turn, so an anchor id is the only stable way to
+  // ask, and `atStart` is the answer to "is there anything older" without a second request.
+  const seam = {
+    history: async (_id: number, options?: { limit?: number; offset?: number }) => {
+      const all = Array.from({ length: 10 }, (_, index) => ({
+        entryId: index + 1,
+        role: (index % 2 === 0 ? "user" : "assistant") as "user" | "assistant",
+        text: `entry ${index + 1}`,
+      }));
+      const limit = options?.limit ?? 50;
+      const offset = options?.offset ?? 0;
+      const end = Math.max(0, all.length - offset);
+      return all.slice(Math.max(0, end - limit), end);
+    },
+  } as unknown as SessionHost;
+  const served = await serveEvents(seam, [{ conversationId: 7, address: "spaces/S/threads/T" }]);
+  try {
+    const page = (await (
+      await fetch(`${served.baseUrl}/v1/conversations/7/entries?before=5&limit=3`)
+    ).json()) as { entries: { entryId: number }[]; atStart: boolean };
+    assert.deepEqual(
+      page.entries.map((entry) => entry.entryId),
+      [2, 3, 4],
+      "the three entries immediately before the anchor, oldest first",
+    );
+    assert.equal(page.atStart, false, "there is older content");
+
+    const first = (await (
+      await fetch(`${served.baseUrl}/v1/conversations/7/entries?before=3&limit=5`)
+    ).json()) as { entries: { entryId: number }[]; atStart: boolean };
+    assert.deepEqual(first.entries.map((entry) => entry.entryId), [1, 2]);
+    assert.equal(first.atStart, true, "and this page reaches the beginning");
+  } finally {
+    await served.close();
+  }
+});
