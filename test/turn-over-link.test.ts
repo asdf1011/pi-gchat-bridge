@@ -185,3 +185,114 @@ test("a watch that never sees a turn ends itself instead of polling for ever", a
     await served.close();
   }
 });
+
+/* --- The same turn, with the painter on the far side of a link ---------------- */
+
+test("a painter driven over a link paints a turn end to end", async () => {
+  // The composition that failed twice in production: the painter asking a *linked* seam what
+  // happened. Both failures were in the hops, not the operations — an `origin` the wire dropped, and
+  // a `busy` read before the turn existed — so this drives the whole thing through one link pair and
+  // asserts what the thread would have shown.
+  const { createHost, memoryLinkPair } = await import("@earendil-works/chord");
+  const { serveSessionHost, linkSessionHost } = await import("../src/session-host/link.js");
+  const { Painter } = await import("../src/durable/painter.js");
+  const { Ledger } = await import("../src/durable/ledger.js");
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+
+  const host = turnHost();
+  const server = serveSessionHost(host.seam);
+  const [down, up] = memoryLinkPair();
+  server.accept(down, { principal: "chat-adapter", kind: "client" });
+  const client = createHost({
+    self: "chat-adapter",
+    name: "chat-adapter",
+    kind: "client",
+    upstream: { link: up, principal: "session-host" },
+  });
+  const seam = linkSessionHost({ host: client });
+
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "turn-link-"));
+  const ledger = await Ledger.load(path.join(directory, "ledger.json"));
+  ledger.adopt(1, "new");
+
+  const streams: { calls: string[] }[] = [];
+  const posted: string[] = [];
+  const painter = new Painter({
+    surface: "gchat",
+    ledger,
+    owns: () => true,
+    conversations: async () => [{ conversationId: 7 }],
+    entriesSince: async (conversationId, since, limit) => {
+      const rows = (await seam.history(conversationId, { limit: 50, offset: 0 })) ?? [];
+      return rows
+        .filter((row) => (row.entryId ?? 0) > since && (row.entryId ?? 0) > 0)
+        .slice(0, limit)
+        .map((row) => ({
+          conversationId,
+          entryId: row.entryId ?? 0,
+          role: row.role,
+          text: row.text,
+          ...(row.origin === undefined ? {} : { origin: row.origin }),
+        }));
+    },
+    busy: async (conversationId) => (await seam.snapshot(conversationId))?.busy === true,
+    // The watcher a linked adapter would have: a subscription on the conversation's view, with the
+    // settle edge taken from `busy` going true → false.
+    watch: (conversationId, handlers) => {
+      let wasBusy: boolean | undefined;
+      const abort = { done: false };
+      void seam.attach(conversationId, (frame) => {
+        const view = frame as { busy: boolean; liveText: string; tools: unknown };
+        if (wasBusy === true && !view.busy) handlers.settled();
+        wasBusy = view.busy;
+        handlers.frame(view);
+      });
+      return { detach: () => void (abort.done = true) };
+    },
+    surfaceClient: {
+      open: async () => {
+        const record = { calls: [] as string[] };
+        streams.push(record);
+        return {
+          stream: {
+            text: (full: string) => record.calls.push(`text:${full.length}`),
+            tool: (name: string) => record.calls.push(`tool:${name}`),
+            clearTool: () => record.calls.push("clear"),
+            finish: async (text: string) => record.calls.push(`finish:${text.length}`),
+            abandon: async () => record.calls.push("abandon"),
+          },
+          paint: () => {},
+          detach: () => {},
+        };
+      },
+      post: async (_conversationId: number, text: string) => {
+        posted.push(text);
+      },
+    },
+    log: () => {},
+  });
+
+  try {
+    await host.prompt("hello", "webui");
+    await painter.tick();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(streams.length, 1, "a placeholder opened on the first running frame");
+
+    await host.answer("the answer", 101);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await painter.tick();
+
+    // The answer reached the thread, quoting the prompt that came from the other surface — the exact
+    // thing the dropped `origin` broke, asserted through a link rather than in memory.
+    assert.deepEqual(posted, [], "it was finished in place, not posted twice");
+    assert.ok(
+      streams[0]!.calls.some((call) => call.startsWith("finish:")),
+      `the placeholder was finished: ${JSON.stringify(streams[0]!.calls)}`,
+    );
+  } finally {
+    await painter.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
