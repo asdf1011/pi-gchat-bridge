@@ -6,10 +6,28 @@
  * `BRIDGE_WEB_ENGINE=link` is on. The routes only ever touch `SessionHost`, so
  * moving them is a deployment change rather than a port.
  *
- * It handles `/` (redirect), `/web/` (the page), and the three API routes. It
+ * It handles `/` (redirect), `/web/` (the page), and the API routes the page calls. It
  * deliberately does **not** handle `/healthz` or `/notify`: those belong to the
  * session host, and an adapter process should never be able to answer a health
  * probe on its behalf.
+ *
+ * ## Why these routes are not `/v1`
+ *
+ * The page cannot call `/v1`. It is served by the adapter, on the adapter's own port, and
+ * `/v1` is served by the session host on another — so a fetch to `/v1/...` would be a
+ * cross-origin request to a process that has no CORS and whose caller holds no token. The
+ * pane is same-origin with exactly one thing, and this is it.
+ *
+ * That leaves one rule for this file: **its semantics must be the protocol's**, even when
+ * its shapes are the pane's. Paging is anchored on an entry id for that reason (§history),
+ * because the protocol's read is a prefix of an append-only log and an offset is not — the
+ * bug was a message arriving twice while a turn appended. Anything added here should ask
+ * "what does `/v1` say this means?" first.
+ *
+ * The one thing that legitimately lives here and not in `/v1` is *rendering*: Markdown is
+ * rendered server-side because the renderer escapes every byte before emitting a tag, and
+ * this origin can submit messages. A client-side renderer, or a raw `innerHTML`, would be an
+ * injection path that can drive tools. That is presentation, and it is this adapter's job.
  */
 import { randomUUID } from "node:crypto";
 import type http from "node:http";
