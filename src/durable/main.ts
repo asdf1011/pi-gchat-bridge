@@ -653,9 +653,11 @@ async function main(): Promise<void> {
       // The address a conversation lives at. Read per use rather than cached: bindings
       // are rewritten on every message, and a stale key here would post into the wrong
       // thread — the failure this whole arrangement exists to make impossible.
+      // Through the seam, not the host: this is adapter code, and the fork is the point at which
+      // reaching into the host's own documents stops compiling.
       const addressOf = async (conversationId: number): Promise<string | undefined> => {
-        const bindings = await host.bindings().catch(() => ({ byChatKey: {} }));
-        return Object.entries(bindings.byChatKey).find(([, b]) => b.conversationId === conversationId)?.[0];
+        const bound = await chatSeam.list().catch(() => []);
+        return bound.find((row) => row.conversationId === conversationId)?.name;
       };
       painter = new Painter({
         surface: "gchat",
@@ -664,12 +666,12 @@ async function main(): Promise<void> {
         // conversation has no thread for this bridge to keep up.
         owns: () => true,
         conversations: async () => {
-          const bindings = await host.bindings().catch(() => ({ byChatKey: {} }));
-          return Object.entries(bindings.byChatKey)
-            .filter(([chatKey]) => chatKey.startsWith("spaces/"))
-            .map(([, binding]) => ({
-              conversationId: binding.conversationId,
-              lastActivityAt: binding.updatedAt ?? binding.createdAt,
+          const bound = await chatSeam.list().catch(() => []);
+          return bound
+            .filter((row) => row.name.startsWith("spaces/"))
+            .map((row) => ({
+              conversationId: row.conversationId,
+              ...(row.lastActivityAt === undefined ? {} : { lastActivityAt: row.lastActivityAt }),
             }));
         },
         // The painter walks forward from its cursor, so this asks the seam the same question the
