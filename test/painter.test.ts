@@ -490,3 +490,37 @@ test("a prompt that is merely being caught up on opens no observer", async () =>
   assert.equal(observers, 0, "no placeholder for history");
   await painter.close();
 });
+
+test("the quote survives the prompt and the answer arriving in different batches", async () => {
+  // The deployment's shape, and the reason the quote disappeared: a poll delivers the prompt while the
+  // turn is still running, the cursor moves past it (it must, or the prompt returns for ever), and the
+  // answer arrives minutes later with nothing beside it. Looking only at the batch found no prompt.
+  const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
+  ledger.adopt(10, "new");
+  const { painter, posted } = painterFor(ledger, {});
+
+  await painter.ingest([{ conversationId: 1, entryId: 11, role: "user", text: "a question", origin: "webui" }]);
+  assert.equal(posted.length, 0, "a prompt alone paints nothing");
+  assert.equal(ledger.cursor, 11, "and the cursor has moved past it, as a delivery watermark must");
+
+  await painter.ingest([{ conversationId: 1, entryId: 12, role: "assistant", text: "an answer", origin: "webui" }]);
+  assert.deepEqual(posted.map((row) => row.text), ["> a question\n\nan answer"]);
+  await painter.close();
+});
+
+test("a prompt is quoted once, not by the next answer as well", async () => {
+  const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
+  ledger.adopt(10, "new");
+  const { painter, posted } = painterFor(ledger, {});
+
+  await painter.ingest([{ conversationId: 1, entryId: 11, role: "user", text: "one", origin: "webui" }]);
+  await painter.ingest([{ conversationId: 1, entryId: 12, role: "assistant", text: "first", origin: "webui" }]);
+  // A second turn from Chat: its answer is Chat's own, so nothing is quoted — and the browser prompt
+  // above must not be carried into it.
+  await painter.ingest([{ conversationId: 1, entryId: 13, role: "user", text: "two", origin: "gchat" }]);
+  await painter.ingest([{ conversationId: 1, entryId: 14, role: "assistant", text: "second", origin: "gchat" }]);
+
+  // Both answers are posted — the painter is the only poster — but only the browser's carries a quote.
+  assert.deepEqual(posted.map((row) => row.text), ["> one\n\nfirst", "second"]);
+  await painter.close();
+});

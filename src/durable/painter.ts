@@ -173,6 +173,16 @@ interface Open {
 
 export class Painter {
   private open = new Map<number, Open>();
+  /**
+   * The prompt of the turn each conversation is in, when it came from *another* surface.
+   *
+   * Held because the answer usually arrives in a *later* batch than its prompt: the poll delivers the
+   * prompt as it is typed, the cursor advances past it — it has to, or the poll would deliver it for
+   * ever — and the answer lands minutes later, alone. Looking only at the batch found nothing to
+   * quote, which is why the quote appeared in tests (where a prompt and its answer arrive together)
+   * and never in a real thread.
+   */
+  private pendingPrompt = new Map<number, { entryId: number; text: string }>();
   /** Open views, one per *running turn* — never held between turns. */
   private watching = new Map<number, { detach(): void }>();
   /**
@@ -358,7 +368,10 @@ export class Painter {
     const conversationId = entry.conversationId;
 
     if (this.isAnswer(entry)) {
-      const prompt = this.promptFor(earlier, entry);
+      // The batch first (a prompt and its answer delivered together), then what was remembered when
+      // the prompt was consumed on its own — which is the ordinary case for a turn that takes minutes.
+      const prompt = this.promptFor(earlier, entry) ?? this.pendingPrompt.get(conversationId);
+      this.pendingPrompt.delete(conversationId);
       const body = prompt ? `${quotePrompt(prompt.text)}\n\n${entry.text}` : entry.text;
       const open = this.open.get(conversationId);
       if (open) {
@@ -381,6 +394,10 @@ export class Painter {
     }
 
     if (entry.role === "user") {
+      if (entry.origin !== undefined && entry.origin !== this.deps.surface) {
+        // Another surface's prompt: the answer will quote it, and the answer is not in this batch.
+        this.pendingPrompt.set(conversationId, { entryId: entry.entryId, text: entry.text });
+      }
       // A prompt means a turn. Only a turn *still running* deserves a placeholder: the `busy` check
       // is what separates "someone just typed" from "a prompt we are catching up on".
       if (await this.deps.busy(conversationId).catch(() => false)) await this.openTurn(conversationId);
@@ -453,6 +470,9 @@ export class Painter {
 
   /** The turn is over: no view, and no stream waiting to be finished. */
   private endTurn(conversationId: number): void {
+    // A turn that ended without an answer leaves nothing to quote; a later answer must not pick up
+    // this prompt as if it were its own.
+    this.pendingPrompt.delete(conversationId);
     const watcher = this.watching.get(conversationId);
     if (watcher) {
       watcher.detach();
