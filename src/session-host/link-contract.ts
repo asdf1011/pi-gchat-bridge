@@ -112,6 +112,14 @@ export const TranscriptMessageSchema = Type.Object({
   text: Type.String(),
   at: Type.Optional(Type.Number()),
   entryId: Type.Optional(Type.Number()),
+  /**
+   * The surface this entry came from, when it was stamped.
+   *
+   * Carried because the seam's `TranscriptMessage` carries it: a client that reads history to decide
+   * what to paint (the painter does exactly that) cannot ask "was this prompt already in my thread?"
+   * without it. Absent means unknown, and unknown is handled conservatively.
+   */
+  origin: Type.Optional(Type.String()),
   images: Type.Optional(Type.Array(Type.Object({ mimeType: Type.String() }))),
 });
 

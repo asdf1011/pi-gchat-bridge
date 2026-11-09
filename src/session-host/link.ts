@@ -159,15 +159,18 @@ export function serveSessionHost(seam: SessionHost): Host {
         requestId,
         content,
         whenBusy,
+        origin,
       }: {
         requestId?: string;
         content: unknown;
         whenBusy?: string;
+        origin?: string;
       }): Promise<SubmitResult> =>
         seam.submit(conversation, {
           ...(requestId === undefined ? {} : { requestId }),
           content: content as SubmitRequest["content"],
           ...(whenBusy === undefined ? {} : { whenBusy: whenBusy as SubmitRequest["whenBusy"] }),
+          ...(origin === undefined ? {} : { origin }),
         }),
       artifacts: async () => [...((await seam.artifacts(conversation)) ?? [])],
       history: async ({ limit, offset }: { limit: number; offset: number }) => [
@@ -324,6 +327,11 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
               ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
               content: request.content as never,
               ...(request.whenBusy === undefined ? {} : { whenBusy: request.whenBusy }),
+              // The surface that asked. Without it the host cannot stamp the prompt, and a painter
+              // on another surface cannot tell its own messages from a browser's — which is exactly
+              // what silently stopped the "quoted prompt" above an answer: every submission arrived
+              // unstamped, so an answer no longer knew what it was replying to.
+              ...(request.origin === undefined ? {} : { origin: request.origin }),
             },
             ctx,
           ),

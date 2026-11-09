@@ -267,3 +267,25 @@ test("quota crosses the link, because the probe belongs where the host is", asyn
   const quotas = await linked.quota();
   assert.ok(Array.isArray(quotas), "an array, even when no provider answers");
 });
+
+test("a submission's origin crosses the link, and comes back in history", async () => {
+  // The bug this is for: the client built the submit payload without `origin`, so every submission
+  // reached the host unstamped. On the far side that looks like "this prompt came from nowhere", and
+  // the painter's rule — quote a prompt that came from *another* surface — silently stopped applying,
+  // which is why answers stopped showing what they were replying to.
+  const { inProcess, linked } = await bothEnds();
+  const created = await linked.getOrCreate("threads/origin", { model: { provider: "deepseek", modelId: "flash" } });
+
+  const accepted = await linked.submit(created.conversationId, { content: "from the browser", origin: "webui" });
+  assert.ok("submissionId" in accepted, JSON.stringify(accepted));
+
+  // Stamped on the host, which is the thing that matters: `recordOrigin` runs there.
+  const direct = await inProcess.history(created.conversationId, { limit: 10, offset: 0 });
+  const prompt = (direct ?? []).find((message) => message.role === "user");
+  assert.ok(prompt, "the prompt is in the transcript");
+  assert.equal(prompt!.origin, "webui");
+
+  // And it survives the wire, so a client reading history to decide what to paint gets it too.
+  const overLink = await linked.history(created.conversationId, { limit: 10, offset: 0 });
+  assert.equal((overLink ?? []).find((message) => message.role === "user")?.origin, "webui");
+});
