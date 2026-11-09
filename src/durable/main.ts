@@ -33,7 +33,7 @@ import { runDurableCommand } from "../adapter/commands.js";
 import { defaultSettings } from "../adapter/commands.js";
 import { ActivityFeed } from "./activity.js";
 import { Painter } from "./painter.js";
-import { httpActivitySource, httpPoll, httpViewSource, StreamLadder } from "../adapter/view-client.js";
+import { httpPoll, httpSnapshot } from "../adapter/poll-client.js";
 import type { ProjectedView } from "../session-host/projection.js";
 import { chatTarget } from "../session-key.js";
 import { splitMessage } from "../stream.js";
@@ -640,71 +640,40 @@ async function main(): Promise<void> {
         },
         history: (conversationId, limit, offset) => seam.history(conversationId, { limit, offset }),
         busy: async (conversationId) => (await seam.snapshot(conversationId))?.busy === true,
-        // Held per conversation, across turns: this is what makes a turn *starting* pushed
-        // rather than polled, and it is the shape the extracted bridge will have.
-        ...(config.viewMode === "stream"
-          ? {
-              // One activity stream for every conversation this bridge serves — the chat bridge's
-              // shape. It is what tells the painter a turn started in a thread it is not watching,
-              // which is the job the sweep used to do.
-              activity: (handlers: { started(id: number): void; settled(id: number): void }) => {
-                const ladder = new StreamLadder({
-                  source: httpActivitySource({
-                    baseUrl: config.selfUrl === "" ? `http://127.0.0.1:${config.healthPort}` : config.selfUrl,
-                    ...(config.webToken ? { token: config.webToken } : {}),
-                  }),
-                  onEvent: (_kind, event) => {
-                    const activity = event as { conversationId?: unknown; kind?: unknown };
-                    if (typeof activity.conversationId !== "number") return;
-                    if (activity.kind === "started") handlers.started(activity.conversationId);
-                    else if (activity.kind === "settled") handlers.settled(activity.conversationId);
-                  },
-                  // Degraded: the sweep comes back, which is §18's fallback and the only polling
-                  // left in the healthy path's absence.
-                  poll: async () => {
-                    await painter?.tick();
-                  },
-                  heartbeatMs: 15_000,
-                  onMode: (mode) => logger.info(`[paint] activity ${mode}`),
-                });
-                void ladder.run();
-                logger.info(
-                  "[paint] activity: subscribed to every conversation (push; the sweep runs only if this degrades)",
-                );
-                return { detach: () => ladder.stop() };
-              },
-              watch: (
-                conversationId: number,
-                handlers: { frame(projected: unknown): void; settled(): void },
-              ) => {
-                // Settle is a transition, not a state: a stream that is idle stays idle, and
-                // reporting every idle frame would re-read the transcript continuously.
+        // The painting half, when the surface is not in-process: poll the snapshot while a turn
+        // runs. Three updates a second is finer than the 250ms debounce the Chat placeholder already
+        // applies to its own text, so a poll is not a compromise on how an answer appears — and it
+        // needs no connection, no heartbeat and no reconnect.
+        watch:
+          config.viewMode !== "in-process"
+            ? (conversationId: number, handlers: { frame(projected: unknown): void; settled(): void }) => {
+                const stop = new AbortController();
                 let wasBusy: boolean | undefined;
-                const ladder = new StreamLadder({
-                  source: httpViewSource({
-                    baseUrl: config.selfUrl === "" ? `http://127.0.0.1:${config.healthPort}` : config.selfUrl,
-                    conversationId,
-                    ...(config.webToken ? { token: config.webToken } : {}),
-                  }),
-                  onEvent: (_kind, view) => {
-                    const busy = (view as { busy?: unknown }).busy === true;
-                    if (wasBusy === true && !busy) handlers.settled();
-                    wasBusy = busy;
-                    handlers.frame(view);
-                  },
-                  // Degraded: read the entries, which is what the bridge would otherwise do on
-                  // its own timer. That is the §18 fallback, and it is the only polling left.
-                  poll: async () => {
-                    await painter?.poke();
-                  },
-                  heartbeatMs: 15_000,
-                  onMode: (mode) => logger.info(`[paint] conversation ${conversationId}: view ${mode}`),
-                });
-                void ladder.run();
-                return { detach: () => ladder.stop() };
-              },
-            }
-          : {}),
+                void (async () => {
+                  while (!stop.signal.aborted) {
+                    try {
+                      const view = await httpSnapshot({
+                        baseUrl: config.selfUrl === "" ? `http://127.0.0.1:${config.healthPort}` : config.selfUrl,
+                        conversationId,
+                        ...(config.webToken ? { token: config.webToken } : {}),
+                        signal: stop.signal,
+                      });
+                      if (!view) break;
+                      // Settle is a transition, not a state: an idle conversation stays idle, and
+                      // reporting every idle poll would re-read the transcript continuously.
+                      if (wasBusy === true && !view.busy) handlers.settled();
+                      wasBusy = view.busy;
+                      handlers.frame(view);
+                    } catch (error) {
+                      if (stop.signal.aborted) return;
+                      logger.warn(`[paint] snapshot ${conversationId} failed: ${(error as Error).message}`);
+                    }
+                    await new Promise((resolve) => setTimeout(resolve, 300));
+                  }
+                })();
+                return { detach: () => stop.abort() };
+              }
+            : undefined,
         surfaceClient: {
           // The stream and its subscription are one act: a Chat placeholder cannot be
           // patched before it exists, and creating it later would be a second message.
@@ -721,7 +690,7 @@ async function main(): Promise<void> {
             stream.register(key);
             const paint = viewFramePainter(stream);
 
-            if (config.viewMode === "stream") {
+            if (config.viewMode === "poll") {
               // The watcher paints; nothing to attach here.
               return {
                 stream: {
@@ -795,13 +764,12 @@ async function main(): Promise<void> {
       //     that claimed to start and never finished — normally an empty set, so normally no
       //     reads. A blanket sweep here would be a second mechanism doing nothing until something
       //     broke, which is a fair thing to refuse.
-      const streamed = config.viewMode === "stream";
+      const polled = config.viewMode === "poll";
       paintTimer = setInterval(
-        () => void (streamed ? instance.checkStuck() : instance.tick()),
-        streamed ? 60_000 : Math.min(config.ledgerIntervalMs, 15_000),
+        () => void instance.tick(),
+        polled ? 60_000 : Math.min(config.ledgerIntervalMs, 15_000),
       );
       paintTimer.unref();
-      instance.start();
 
       // --- The delivery path: long-poll the log -------------------------------------
       //

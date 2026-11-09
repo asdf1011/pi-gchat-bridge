@@ -367,34 +367,6 @@ test("a poke with no position adopts at the head, and paints nothing", async () 
   assert.equal(ledger.cursor, 10, "and its cursor is untouched");
 });
 
-test("with an activity stream the sweep still runs, as a safety net", async () => {
-  // It was tempting to switch the sweep off once turns were pushed, and doing that turned a
-  // missed event into a lost reply: two answers sat unposted while each mechanism believed the
-  // other had it. The net stays until the push path has a much longer record than this.
-  const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
-  ledger.adopt(10, "new");
-  let reads = 0;
-  const painter = new Painter({
-    surface: "gchat",
-    ledger,
-    owns: () => true,
-    conversations: async () => [{ conversationId: 1, lastActivityAt: Date.now() }],
-    history: async () => {
-      reads += 1;
-      return [];
-    },
-    busy: async () => false,
-    surfaceClient: fakeSurface().surface,
-    activity: () => ({ detach() {} }),
-    watch: () => ({ detach() {} }),
-    log: () => {},
-  });
-
-  await painter.tick();
-  assert.ok(reads > 0, "the sweep still looks, so a missed event costs a minute rather than a message");
-  await painter.close();
-});
-
 test("a conversation with no subscription is still swept, so a dormant thread is not lost", async () => {
   // The other half: no subscription (dormant, or in-process mode) means the sweep is the only
   // thing that can notice a new turn there. Discovery is what the tick is for now.
@@ -420,157 +392,6 @@ test("a conversation with no subscription is still swept, so a dormant thread is
   await painter.close();
 });
 
-test("a turn is announced, painted from its frames, and settled by one read", async () => {
-  // The shape activity gives the painter: a view exists for the *turn*, not for the conversation,
-  // so nothing is held between turns and nothing is polled while one runs.
-  const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
-  ledger.adopt(10, "new");
-  const fake = fakeSurface();
-  type Handlers = { started(id: number): void; settled(id: number): void };
-  let handlers: Handlers | undefined;
-  let views = 0;
-  type Frame = { frame(p: unknown): void; settled(): void };
-  let frame: Frame | undefined;
-  const messages: MessageLike[] = [{ role: "user", text: "hi", origin: "gchat", entryId: 11, at: 1 }];
-  const painter = new Painter({
-    surface: "gchat",
-    ledger,
-    owns: () => true,
-    conversations: async () => [{ conversationId: 1, lastActivityAt: Date.now() }],
-    history: async (_id, limit, offset) => {
-      const end = Math.max(0, messages.length - offset);
-      return messages.slice(Math.max(0, end - limit), end);
-    },
-    busy: async () => false,
-    surfaceClient: fake.surface,
-    activity: (h) => {
-      handlers = h;
-      return { detach() {} };
-    },
-    watch: (_id, h) => {
-      views += 1;
-      frame = h;
-      return {
-        detach() {
-          views -= 1;
-        },
-      };
-    },
-    log: () => {},
-  });
-
-  painter.start();
-  handlers!.started(1);
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(views, 1, "one view, opened because a turn started");
-
-  // Two frames of the same burst: still one placeholder.
-  frame!.frame({ busy: true, liveText: "a", tools: [] });
-  frame!.frame({ busy: true, liveText: "ab", tools: [] });
-  await new Promise((resolve) => setImmediate(resolve));
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(fake.streams.length, 1, "two frames, one placeholder");
-
-  // It ends: the answer is read once and the placeholder becomes it.
-  messages.push({ role: "assistant", text: "the answer", origin: "gchat", entryId: 12, at: 1 });
-  frame!.settled();
-  await until(() => views === 0);
-  assert.equal(fake.streams[0]!.calls.at(-1), "finish:10", "finished in place, not posted again");
-  assert.deepEqual(fake.posted, []);
-  assert.equal(ledger.cursor, 12);
-  assert.equal(views, 0, "and the view is gone: nothing held between turns");
-  await painter.close();
-});
-
-test("a turn announced before any position exists paints nothing that predates it", async () => {
-  // A view can arrive for a thread this bridge has no position for — a dormant conversation where
-  // someone typed in the browser. Painting without adopting would leave the answer unpostable.
-  const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
-  type Handlers = { started(id: number): void; settled(id: number): void };
-  let handlers: Handlers | undefined;
-  const painter = new Painter({
-    surface: "gchat",
-    ledger,
-    owns: () => true,
-    conversations: async () => [{ conversationId: 1, lastActivityAt: Date.now() }],
-    history: async () => [{ role: "user", text: "old", origin: "webui", entryId: 40, at: 1 }],
-    busy: async () => true,
-    surfaceClient: fakeSurface().surface,
-    activity: (h) => {
-      handlers = h;
-      return { detach() {} };
-    },
-    watch: () => ({ detach() {} }),
-    log: () => {},
-  });
-
-  painter.start();
-  handlers!.started(1);
-  await new Promise((resolve) => setImmediate(resolve));
-
-  // No position yet, so the announced turn is not painted at all — the view would show a turn whose
-  // history has not been positioned, and painting it would treat everything before it as fresh.
-  assert.equal(ledger.hasPosition(), false, "a turn cannot invent a position");
-  await painter.close();
-
-  // The sweep takes the position, and only then does painting begin: nothing that predates it is
-  // repainted, because the cursor starts at the head.
-  await painter.tick();
-  assert.equal(ledger.cursor, 40, "adopted at the head");
-  assert.equal(ledger.adoptedReason, "new");
-});
-
-test("with activity, the periodic check reads only turns that never settled", async () => {
-  // The answer to "why any periodic work at all": not to find turns (events do that) and not to
-  // duplicate a liveness check (the heartbeat does that) — but to notice an event that arrived and
-  // was mishandled, which no heartbeat can see. In the normal case the set is empty and this costs
-  // no reads at all.
-  const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
-  ledger.adopt(10, "new");
-  let reads = 0;
-  type Handlers = { started(id: number): void; settled(id: number): void };
-  let handlers: Handlers | undefined;
-  const painter = new Painter({
-    surface: "gchat",
-    ledger,
-    owns: () => true,
-    conversations: async () => [{ conversationId: 1, lastActivityAt: Date.now() }],
-    history: async () => {
-      reads += 1;
-      return [];
-    },
-    busy: async () => true,
-    surfaceClient: fakeSurface().surface,
-    activity: (h) => {
-      handlers = h;
-      return { detach() {} };
-    },
-    watch: () => ({ detach() {} }),
-    stuckAfterMs: 10,
-    log: () => {},
-  });
-
-  painter.start();
-  await painter.checkStuck();
-  assert.equal(reads, 0, "nothing in flight, so nothing to check");
-
-  handlers!.started(1);
-  await new Promise((resolve) => setImmediate(resolve));
-  await new Promise((resolve) => setTimeout(resolve, 20));
-
-  const quiet = await painter.checkStuck();
-  assert.deepEqual(quiet.checked, [1], "the turn that claimed to start is checked");
-  assert.ok(reads > 0, "and checking it means reading its entries, once");
-
-  // Settling clears it, so the next check is empty again.
-  handlers!.settled(1);
-  await new Promise((resolve) => setImmediate(resolve));
-  reads = 0;
-  await painter.checkStuck();
-  assert.equal(reads, 0, "a turn that ends is not checked again");
-  await painter.close();
-});
-
 test("entries handed over by a poll are consumed in order, and the cursor keeps up", async () => {
   // The poll path, as the painter sees it: a batch arrives already ordered and already past the
   // cursor; anything at or below the cursor is skipped, so a poll and a sweep can overlap safely.
@@ -592,5 +413,80 @@ test("entries handed over by a poll are consumed in order, and the cursor keeps 
     { conversationId: 1, entryId: 12, role: "assistant", text: "the answer", origin: "webui" },
   ]);
   assert.equal(posted.length, 1, "already-consumed entries are not re-posted");
+  await painter.close();
+});
+
+test("a running turn opens one observer, and its settle edge posts the answer", async () => {
+  // The painter's whole push half now: a prompt arrives (by poll or sweep), `busy` says the turn is
+  // still running, so one observer is opened for it. Frames paint; the settle edge reads the answer.
+  const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
+  ledger.adopt(10, "new");
+  const fake = fakeSurface();
+  type Handlers = { frame(p: unknown): void; settled(): void };
+  let handlers: Handlers | undefined;
+  let observers = 0;
+  const messages: MessageLike[] = [];
+  let busy = true;
+  const painter = new Painter({
+    surface: "gchat",
+    ledger,
+    owns: () => true,
+    conversations: async () => [{ conversationId: 1 }],
+    history: async (_id, limit, offset) => {
+      const end = Math.max(0, messages.length - offset);
+      return messages.slice(Math.max(0, end - limit), end);
+    },
+    busy: async () => busy,
+    surfaceClient: fake.surface,
+    watch: (_id, h) => {
+      observers += 1;
+      handlers = h;
+      return { detach() {} };
+    },
+    log: () => {},
+  });
+
+  await painter.ingest([{ conversationId: 1, entryId: 11, role: "user", text: "go", origin: "gchat" }]);
+  assert.equal(observers, 1, "one observer for the running turn");
+
+  handlers!.frame({ busy: true, liveText: "work", tools: [] });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(fake.streams.length, 1, "a placeholder, opened by the frame");
+
+  busy = false;
+  messages.push({ role: "assistant", text: "the answer", origin: "gchat", entryId: 12, at: 1 });
+  handlers!.settled();
+  await until(() => ledger.cursor === 12);
+  assert.equal(fake.streams[0]!.calls.at(-1), "finish:10", "finished in place, not posted again");
+  assert.deepEqual(fake.posted, []);
+  await painter.close();
+});
+
+test("a prompt that is merely being caught up on opens no observer", async () => {
+  // The `busy` check is the whole distinction: replaying a settled turn must not create a
+  // placeholder for a turn that ended before the bridge looked.
+  const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
+  ledger.adopt(10, "new");
+  let observers = 0;
+  const painter = new Painter({
+    surface: "gchat",
+    ledger,
+    owns: () => true,
+    conversations: async () => [{ conversationId: 1 }],
+    history: async () => [],
+    busy: async () => false,
+    surfaceClient: fakeSurface().surface,
+    watch: () => {
+      observers += 1;
+      return { detach() {} };
+    },
+    log: () => {},
+  });
+
+  await painter.ingest([
+    { conversationId: 1, entryId: 11, role: "user", text: "old prompt", origin: "gchat" },
+    { conversationId: 1, entryId: 12, role: "assistant", text: "old answer", origin: "gchat" },
+  ]);
+  assert.equal(observers, 0, "no placeholder for history");
   await painter.close();
 });

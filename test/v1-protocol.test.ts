@@ -357,6 +357,11 @@ test("a poll returns what is after the cursor, and does not wait for more", asyn
       entries: { entryId: number; text: string }[];
     };
     assert.deepEqual(body.entries.map((entry) => entry.entryId), [11]);
+    assert.equal(
+      (body.entries[0] as unknown as { conversationId?: number }).conversationId,
+      1,
+      "an unfiltered poll labels each entry; without it a global reader routes on undefined",
+    );
     assert.equal(body.cursor, 11, "the cursor is the last thing handed over, so a client can resume");
   } finally {
     await served.close();

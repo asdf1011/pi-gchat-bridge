@@ -62,6 +62,15 @@ export interface V1Deps {
 }
 
 export interface EntryView {
+  /**
+   * Which conversation the entry belongs to.
+   *
+   * The log is global, so a reader of `GET /v1/poll` gets entries from every conversation it
+   * serves and cannot otherwise tell them apart. Without it the painter consumed each prompt as
+   * `conversationId: undefined` and asked the host about a conversation that does not exist —
+   * which failed the whole Session, not just that entry.
+   */
+  conversationId: number;
   entryId: number;
   role: "user" | "assistant";
   text: string;
@@ -160,6 +169,7 @@ export async function handleV1(
       .slice(0, limit)
       .map(
         (entry): EntryView => ({
+          conversationId,
           entryId: entry.entryId,
           role: entry.role,
           text: entry.text,
@@ -221,6 +231,7 @@ export async function handleV1(
         merged.push(
           ...window.entries.map(
             (entry): EntryView => ({
+              conversationId: entry.conversationId,
               entryId: entry.entryId,
               role: entry.role,
               text: entry.text,

@@ -119,16 +119,6 @@ export interface PainterDeps {
   busy(conversationId: number): Promise<boolean>;
   surfaceClient: PaintSurface;
   /**
-   * Subscribe to the server's activity, for every conversation this painter owns.
-   *
-   * This is what replaces "ask every minute": the server says when a turn starts and settles, so
-   * the painter opens a view for the *turn* rather than holding one per conversation. Optional —
-   * a deployment without it falls back to the sweep, which is what in-process mode does.
-   */
-  activity?(handlers: { started(conversationId: number): void; settled(conversationId: number): void }):
-    | { detach(): void }
-    | undefined;
-  /**
    * Open a live view for one turn, and report what it says.
    *
    * This is what makes the tick a *fallback* rather than the mechanism: with a subscription
@@ -147,13 +137,6 @@ export interface PainterDeps {
       settled(): void;
     },
   ): { detach(): void } | undefined;
-  /**
-   * How long a turn may claim to be running before it is checked on.
-   *
-   * A turn normally settles in seconds; this is the threshold at which "still in flight" stops
-   * being plausible and becomes something to verify.
-   */
-  stuckAfterMs?: number;
   /** How much history one look may read before calling the position unreachable. */
   pageSize?: number;
   maxPages?: number;
@@ -182,17 +165,6 @@ export class Painter {
   /** Open views, one per *running turn* — never held between turns. */
   private watching = new Map<number, { detach(): void }>();
   /**
-   * Turns that announced themselves and have not finished.
-   *
-   * This is what makes a periodic check *targeted* rather than blanket. A heartbeat cannot see a
-   * handler that receives an event and mishandles it — the stream is healthy, the frame arrives,
-   * the code does the wrong thing — and that is the failure that lost two replies. So the painter
-   * remembers what it believes is in flight, and periodically checks only *that*, which is empty
-   * in the normal case and therefore costs nothing.
-   */
-  private inFlight = new Map<number, number>();
-  private activity: { detach(): void } | undefined;
-  /**
    * Opens in progress, by conversation.
    *
    * A view frame arrives in bursts — the snapshot on attach, then deltas — so two `frame`
@@ -218,32 +190,6 @@ export class Painter {
    */
   async poke(): Promise<void> {
     await this.tick();
-  }
-
-  /**
-   * Check on turns that announced themselves and never finished.
-   *
-   * With activity healthy this is the *only* periodic work, and in the normal case it reads
-   * nothing at all: the set is empty because every turn ended when it said it did. What it
-   * catches is the class of failure a heartbeat cannot — an event that arrived and was
-   * mishandled — which is exactly what lost two replies an hour ago.
-   */
-  async checkStuck(): Promise<{ checked: number[] }> {
-    const stuckAfter = this.deps.stuckAfterMs ?? 120_000;
-    const now = Date.now();
-    const stale = [...this.inFlight.entries()]
-      .filter(([, startedAt]) => now - startedAt >= stuckAfter)
-      .map(([conversationId]) => conversationId);
-    for (const conversationId of stale) {
-      this.log(
-        `[paint] conversation ${conversationId}: a turn claimed to start and has not settled — checking it`,
-      );
-      await this.poke();
-      // Looked at once; if it is still unsettled next time, the log says so again. Clearing it
-      // here would hide a turn that genuinely never ends.
-      this.inFlight.set(conversationId, now);
-    }
-    return { checked: stale };
   }
 
   /**
@@ -410,13 +356,10 @@ export class Painter {
       return;
     }
 
-    if (entry.role === "user" && this.deps.watch === undefined) {
-      // A turn *still running* and nothing is watching it: open the stream that paints it. The
-      // `busy` check is what separates "a turn started just now" from "a prompt we are catching up
-      // on", and only the first deserves a placeholder — a replayed prompt does not.
-      if (await this.deps.busy(conversationId).catch(() => false)) {
-        await this.ensureStream(conversationId, "polled");
-      }
+    if (entry.role === "user") {
+      // A prompt means a turn. Only a turn *still running* deserves a placeholder: the `busy` check
+      // is what separates "someone just typed" from "a prompt we are catching up on".
+      if (await this.deps.busy(conversationId).catch(() => false)) await this.openTurn(conversationId);
     }
     // Commentary, a prompt, or this surface's own words: accounted for, not painted.
     this.deps.ledger.advance(entry.entryId);
@@ -455,39 +398,21 @@ export class Painter {
    * so this is "make sure", not "open another".
    */
   /**
-   * Subscribe to activity, once.
+   * A turn started: open the view that paints it.
    *
-   * The painter's push half: `started` opens a view for that turn, `settled` reads its answer.
-   * Idempotent, so a caller cannot end up with two subscriptions.
+   * Called when a prompt is *consumed*, whichever way it arrived — a poll batch or the sweep — so
+   * there is one trigger. A position is global and taken at startup; a turn starting cannot invent
+   * one, and painting without one would leave the answer unpostable.
    */
-  start(): void {
-    if (this.activity !== undefined || !this.deps.activity) return;
-    const handle = this.deps.activity({
-      started: (conversationId) => void this.beginTurn(conversationId),
-      settled: (conversationId) => {
-        // Read the answer, then let the view go: the subscription exists for one turn.
-        void this.poke().finally(() => this.endTurn(conversationId));
-      },
-    });
-    if (handle) this.activity = handle;
-  }
-
-  /**
-   * A turn started: make sure there is a position, and open the view that paints it.
-   *
-   * Adoption happens here rather than on a sweep because a view can arrive with the first frame
-   * of a turn in a thread this bridge has never seen — and painting without a position would
-   * leave the answer unpostable.
-   */
-  private async beginTurn(conversationId: number): Promise<void> {
+  private async openTurn(conversationId: number): Promise<void> {
     if (!this.deps.owns(conversationId)) return;
-    // A position is global and taken at startup; a turn starting cannot invent one.
     if (!this.deps.ledger.hasPosition()) return;
-    this.inFlight.set(conversationId, Date.now());
     if (this.watching.has(conversationId)) return;
     const watch = this.deps.watch;
     if (!watch) {
-      // No per-turn view available: the stream is opened lazily by the sweep's fallback path.
+      // In-process mode: no observer to subscribe, so the placeholder is opened directly and the
+      // sink attached to it does the painting.
+      await this.ensureStream(conversationId, "polled");
       return;
     }
     const handle = watch(conversationId, {
@@ -503,7 +428,6 @@ export class Painter {
 
   /** The turn is over: no view, and no stream waiting to be finished. */
   private endTurn(conversationId: number): void {
-    this.inFlight.delete(conversationId);
     const watcher = this.watching.get(conversationId);
     if (watcher) {
       watcher.detach();

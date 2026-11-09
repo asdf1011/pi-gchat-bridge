@@ -91,15 +91,15 @@ export interface Config {
   /** How often the sweep runs where there is no push path — in-process mode's mechanism. */
   ledgerIntervalMs: number;
   /**
-   * How the painter watches a running turn: `in-process` or `stream`.
+   * How the painter watches a running turn: `in-process` or `poll`.
    *
    * `in-process` attaches through the seam (one function call). `stream` subscribes to this
    * process's own `GET /v1/view` over HTTP — the same bytes a separate bridge would read.
    * The switch exists to rehearse the extraction: same painter, same port, socket instead
    * of function call, so the split becomes a change of configuration rather than a rewrite.
    */
-  viewMode: "in-process" | "stream";
-  /** The base URL the stream mode talks to. Derived from the listen port by default. */
+  viewMode: "in-process" | "poll";
+  /** The base URL the poll mode talks to. Derived from the listen port by default. */
   selfUrl: string;
 }
 
@@ -176,7 +176,7 @@ export function loadConfig(): Config {
     replaceOnFinish: (process.env.BRIDGE_REPLACE_ON_FINISH ?? "1") !== "0",
     ledgerPath: (process.env.BRIDGE_LEDGER_PATH ?? "").trim(),
     ledgerIntervalMs: Number(process.env.BRIDGE_LEDGER_INTERVAL_MS ?? 60_000),
-    viewMode: (process.env.BRIDGE_VIEW ?? "").trim().toLowerCase() === "stream" ? "stream" : "in-process",
+    viewMode: (process.env.BRIDGE_VIEW ?? "").trim().toLowerCase() === "poll" ? "poll" : "in-process",
     selfUrl: (process.env.BRIDGE_SELF_URL ?? "").trim(),
   };
 }
