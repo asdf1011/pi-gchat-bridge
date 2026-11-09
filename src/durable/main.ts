@@ -176,10 +176,12 @@ async function main(): Promise<void> {
   // operation the adapter needs but the link does not publish fails here, in a log line, instead of
   // at the moment a second process starts and Chat goes quiet.
   const chatEngine = process.env.BRIDGE_CHAT_ENGINE ?? "inprocess";
+  const forked = chatEngine === "process";
   let chatSeam: SessionHost = hostSeam;
   // `serveSessionHost` opens no socket: it is a chord host, and a deployment that never links pays
   // nothing but an object.
   const objectHost = serveSessionHost(hostSeam);
+  let chatSupervisor: Supervisor<import("node:child_process").ChildProcess> | undefined;
   if (chatEngine === "link") {
     const [down, up] = memoryLinkPair();
     objectHost.accept(down, { principal: "chat-adapter", kind: "client" });
@@ -191,8 +193,48 @@ async function main(): Promise<void> {
     });
     chatSeam = linkSessionHost({ host: client });
     logger.info("[bridge] chat engine=link: the Chat adapter talks to the host over a link");
-  } else {
+  } else if (chatEngine === "inprocess") {
     logger.info("[bridge] chat engine=inprocess: the Chat adapter shares the host's seam");
+  } else if (chatEngine === "process") {
+    // The adapter in its own process. The child is forked from *this* process rather than the
+    // supervisor because the IPC channel is the link: whoever accepts it must be the session host.
+    const chatPort = Number(process.env.BRIDGE_CHAT_PORT ?? 0);
+    if (!chatPort) {
+      logger.error("[bridge] BRIDGE_CHAT_ENGINE=process needs BRIDGE_CHAT_PORT");
+      process.exit(1);
+    }
+    const entry = new URL("../chat-host.js", import.meta.url).pathname;
+    chatSupervisor = supervise({
+      start: () =>
+        fork(entry, [], {
+          stdio: ["ignore", "pipe", "inherit", "ipc"],
+          env: {
+            ...process.env,
+            // It needs the store's *directory* for the ledger and the secrets file, and nothing else
+            // about the store. `BRIDGE_DB` stays set for that reason and no other.
+            BRIDGE_CHAT_PORT: String(chatPort),
+          },
+        }),
+      onStart: (child) => {
+        child.stdout?.on("data", (chunk: Buffer) => {
+          for (const line of chunk.toString().split("\n")) {
+            if (line.startsWith("CHAT_ADAPTER_LISTENING ")) {
+              logger.info(`[bridge] chat adapter ready on ${line.slice("CHAT_ADAPTER_LISTENING ".length)}`);
+            }
+          }
+        });
+        // Each generation gets its own link: a dead child's channel is gone.
+        objectHost.accept(ipcLink(child as unknown as Parameters<typeof ipcLink>[0]), {
+          principal: "chat-adapter",
+          kind: "client",
+        });
+      },
+      log: (message) => logger.warn(message),
+    });
+    logger.info(`[bridge] chat engine=process: the adapter is forked, and /notify is on ${chatPort}`);
+  } else {
+    logger.error(`[bridge] BRIDGE_CHAT_ENGINE=${chatEngine} is not one of inprocess, link, process`);
+    process.exit(1);
   }
 
   const defaults = await defaultSettings(hostSeam);
@@ -292,6 +334,20 @@ async function main(): Promise<void> {
           //
           // The engine check is on purpose: this listener is the durable host's,
           // and only it holds a `router`/`seam` pair for the durable harness.
+          if (forked && req.method === "POST" && url.pathname === "/notify") {
+            // It moved with the adapter, because it needs a Chat client and this process is not
+            // supposed to have one. Said plainly, and with where to look, because a silent 404 here
+            // is how scheduled notifications stopped once before.
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify({
+                ok: false,
+                error: "notify moved to the Chat adapter",
+                hint: `POST /notify on BRIDGE_CHAT_PORT (${process.env.BRIDGE_CHAT_PORT ?? "unset"})`,
+              }),
+            );
+            return;
+          }
           if (req.method === "POST" && url.pathname === "/notify") {
             const body = await readBody(req, 1_000_000);
             if (body === null) {
@@ -466,7 +522,7 @@ async function main(): Promise<void> {
   }
 
   // The painter, started as one thing: the cursor and the mouth it feeds.
-  const chatPainter = await startChatPainter({ seam: chatSeam, config, client, dbPath });
+  const chatPainter = forked ? undefined : await startChatPainter({ seam: chatSeam, config, client, dbPath });
 
   // `RECEIVER=none` runs the bridge for `/web` only — no Pub/Sub, no service
   // account, no Chat app. It exists because `PubSubReceiver.start()` refuses to
@@ -506,7 +562,8 @@ async function main(): Promise<void> {
   const shutdown = async (): Promise<void> => {
     chatPainter?.stop();
     logger.info("[bridge] shutting down...");
-    await receiver.stop();
+    if (!forked) await receiver.stop();
+    chatSupervisor?.stop();
     artifactsServer?.close();
     webSupervisor?.stop();
     // Closing the harness waits for running task code to return and leaves the
@@ -519,21 +576,16 @@ async function main(): Promise<void> {
 
   // The Chat adapter's message path, in its own module: the same function the fork will run in
   // another process, given a seam instead of a `BridgeHost`.
-  const handler = chatHandler({
-    seam: chatSeam,
-    config,
-    client,
-    router,
-    state,
-    secrets,
-  });
-  await receiver.start(handler);
+  if (!forked) {
+    const handler = chatHandler({ seam: chatSeam, config, client, router, state, secrets });
+    await receiver.start(handler);
+  }
   logger.info("[bridge] running on the durable engine. Ctrl+C to stop.");
 
   // Name whatever has no title yet, in the background. Detached on purpose: a
   // hundred titles must not delay the first Chat message, and one title at a time
   // keeps the titler from competing with a running turn.
-  if (config.topicSummary) {
+  if (config.topicSummary && !forked) {
     void nameUntitledConversations({
       seam: chatSeam,
       config: {
