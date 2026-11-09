@@ -195,7 +195,19 @@ while [ "$waited" -lt "$MAXWAIT" ]; do
     fi
     log "idle for ${QUIET}s — restarting bridge pid $current"
     kill "$current" 2>/dev/null
-    exit 0
+    # Wait for the replacement to answer, and say whether it did. Exiting on the kill is how a
+    # restart that *did not come back* leaves no trace: the log shows a kill and nothing else, and
+    # the only way to tell is to go and look. Ninety seconds is the supervisor's own re-exec plus a
+    # startup, with room for a drain.
+    for attempt in $(seq 1 18); do
+      sleep 5
+      if curl -sf --max-time 5 "http://127.0.0.1:${PORT:-8081}/healthz" >/dev/null 2>&1; then
+        log "HEALTHY after restart (pid $(bridge_pid), attempt ${attempt})"
+        exit 0
+      fi
+    done
+    log "UNHEALTHY 90s after the kill — the bridge did not come back; check bridge-durable.log"
+    exit 1
   fi
 done
 

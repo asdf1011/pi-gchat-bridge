@@ -598,9 +598,6 @@ async function main(): Promise<void> {
         ? path.join(path.dirname(dbPath), "bridge-ledger.json")
         : config.ledgerPath;
     const ledger = await Ledger.load(ledgerFile);
-    logger.info(
-      `[ledger] shadow mode, positions in ${ledgerFile}${ledger.recovered ? " (adopting afresh: the file was unreadable)" : ""}`,
-    );
     // The shadow pass is gone. It existed to prove a cursor against real transcripts while the
     // legacy path still posted; the painter posts now, so the pass was left observing a mouth that
     // was already the same object — and worse, *confirming* entries the painter had not painted
