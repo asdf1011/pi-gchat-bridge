@@ -305,8 +305,7 @@ decision for a bridge with shell access.
 | `BRIDGE_WEB_TOKEN` | — | Bearer token for web writes; empty = no check (rely on the proxy) |
 | `BRIDGE_WEB_ENGINE` | `inprocess` | `link` serves `/web` from a forked adapter (`dist/web-host.js`) on `BRIDGE_WEB_PORT` |
 | `BRIDGE_WEB_PORT` | — | Where the web adapter listens. The tunnel's ingress points here, not at `PORT` |
-| `BRIDGE_CHAT_ENGINE` | `inprocess` | `process` forks the Chat adapter (`dist/chat-host.js`) on `BRIDGE_CHAT_PORT`; `link` is the same seam without the fork |
-| `BRIDGE_CHAT_PORT` | — | Where the Chat adapter listens — **and where `/notify` is served**. `cron/.env` points there |
+| `BRIDGE_CHAT_PORT` | — (required) | Where the Chat adapter (`dist/chat-host.js`) listens — **and where `/notify` is served**. `cron/.env` points there. A request to `PORT`/notify answers with this address |
 | `BRIDGE_SESSIONS_DIR` | `./sessions` | Legacy JSONL sessions — read by the importer and the old engine only |
 | `BRIDGE_STATE_FILE` | `./state.json` | Legacy dedupe state — superseded by the store's submission ids |
 | `PORT` | `8080` | Health endpoint (0 disables) |

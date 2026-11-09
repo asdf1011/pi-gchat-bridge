@@ -17,24 +17,17 @@ import http from "node:http";
 import path from "node:path";
 
 
-import { ChatClient, collectImageAttachments } from "../chat-client.js";
 import { fork } from "node:child_process";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "../config.js";
 import { logger } from "../logger.js";
-import { PubSubReceiver } from "../pubsub-receiver.js";
-import type { MessageReceiver } from "../receiver.js";
-import { StateStore } from "../state.js";
+import { serveSessionHost } from "../session-host/link.js";
 import { ReplyStream } from "../stream.js";
 import type { IncomingMessage } from "../types.js";
-import { createHost, memoryLinkPair } from "@earendil-works/chord";
 import { attachViewSink, viewFramePainter } from "../adapter/view-sink.js";
-import { DurableRouter } from "../adapter/router.js";
 import { runDurableCommand } from "../adapter/commands.js";
 import { defaultSettings } from "../adapter/commands.js";
 import { ActivityFeed } from "./activity.js";
-import { startChatPainter } from "./chat-painter.js";
-import { chatHandler } from "./chat-handler.js";
 import { httpPoll } from "../adapter/poll-client.js";
 import { entriesAfter } from "./entries.js";
 import type { ProjectedView } from "../session-host/projection.js";
@@ -43,25 +36,21 @@ import { splitMessage } from "../stream.js";
 import { Ledger } from "./ledger.js";
 import { BridgeHost } from "./host.js";
 import { BridgeLockedError } from "./lock.js";
-import { handleDurableNotify } from "./notify.js";
 import { handleV1 } from "../adapter/v1-routes.js";
 import { handleWebRequest, readBody } from "../adapter/web-routes.js";
 import { startArtifactsServer } from "../adapter/artifacts-server.js";
 import { artifactRoots } from "./artifacts.js";
 import { initArtifactRepo } from "./artifact-vcs.js";
 import { inProcessSessionHost } from "../session-host/inprocess.js";
-import { linkSessionHost, serveSessionHost } from "../session-host/link.js";
 import type { SessionHost } from "../session-host/api.js";
 import { supervise, type Supervisor } from "../session-host/supervisor.js";
 import { ipcLink } from "@earendil-works/chord";
 import { SecretRegistry } from "./extensions/redact.js";
 import { secretsFromEnvironment } from "./extensions/secret-redactor.js";
 import { applyDurableTopicSummary } from "./topic.js";
-import { nameUntitledConversations } from "./naming.js";
 import { identify } from "./identity.js";
 import { failureNotice } from "./failure-notice.js";
 import { AgentRouter } from "../agent-sessions.js";
-import { NullReceiver } from "../receiver.js";
 import { SecretStore } from "../secret-store.js";
 
 /**
@@ -99,8 +88,6 @@ async function main(): Promise<void> {
     }
     throw error;
   });
-  const client = new ChatClient(config.serviceAccountPath);
-  const state = new StateStore(config.stateFile);
 
   // --- The seam, and which side of the boundary is asking. ---
   //
@@ -173,38 +160,22 @@ async function main(): Promise<void> {
   // `BRIDGE_CHAT_ENGINE=link` gives it a *linked* seam in this same process: two chord objects, a
   // memory pair between them, and the adapter reaching the host the way it will when it is finally
   // forked. That is the extraction with the fork left out, and it is worth the round trip: an
-  // operation the adapter needs but the link does not publish fails here, in a log line, instead of
-  // at the moment a second process starts and Chat goes quiet.
-  const chatEngine = process.env.BRIDGE_CHAT_ENGINE ?? "inprocess";
-  const forked = chatEngine === "process";
-  /** Where the forked adapter listens; 0 unless it is forked. Read by the `/notify` forward. */
-  let chatPort = 0;
-  let chatSeam: SessionHost = hostSeam;
-  // `serveSessionHost` opens no socket: it is a chord host, and a deployment that never links pays
-  // nothing but an object.
+  // The Chat adapter runs in its own process, always. It held the same seam in-process long enough
+  // to prove the seam was complete (that is what `BRIDGE_CHAT_ENGINE=link` was for, and it is gone
+  // now that the deployment has run on it), and what is left is the arrangement that matters:
+  // this process owns the store, and the adapter cannot touch it.
+  //
+  // The child is forked from *this* process rather than the supervisor because the IPC channel is
+  // the link: whoever accepts it must be the session host.
+  const chatPort = Number(process.env.BRIDGE_CHAT_PORT ?? 0);
+  if (!chatPort) {
+    logger.error("[bridge] BRIDGE_CHAT_PORT is not set — the Chat adapter needs somewhere to listen");
+    process.exit(1);
+  }
+  // `serveSessionHost` opens no socket: it is a chord host, and accepts one link per adapter.
   const objectHost = serveSessionHost(hostSeam);
   let chatSupervisor: Supervisor<import("node:child_process").ChildProcess> | undefined;
-  if (chatEngine === "link") {
-    const [down, up] = memoryLinkPair();
-    objectHost.accept(down, { principal: "chat-adapter", kind: "client" });
-    const client = createHost({
-      self: "chat-adapter",
-      name: "chat-adapter",
-      kind: "client",
-      upstream: { link: up, principal: "session-host" },
-    });
-    chatSeam = linkSessionHost({ host: client });
-    logger.info("[bridge] chat engine=link: the Chat adapter talks to the host over a link");
-  } else if (chatEngine === "inprocess") {
-    logger.info("[bridge] chat engine=inprocess: the Chat adapter shares the host's seam");
-  } else if (chatEngine === "process") {
-    // The adapter in its own process. The child is forked from *this* process rather than the
-    // supervisor because the IPC channel is the link: whoever accepts it must be the session host.
-    chatPort = Number(process.env.BRIDGE_CHAT_PORT ?? 0);
-    if (!chatPort) {
-      logger.error("[bridge] BRIDGE_CHAT_ENGINE=process needs BRIDGE_CHAT_PORT");
-      process.exit(1);
-    }
+  {
     const entry = new URL("../chat-host.js", import.meta.url).pathname;
     chatSupervisor = supervise({
       start: () =>
@@ -226,9 +197,7 @@ async function main(): Promise<void> {
               continue;
             }
             // Everything else the child prints is forwarded, unchanged. Its logger writes to stdout,
-            // and a piped stdout that nobody re-emits is a process whose log does not exist — which
-            // is how the first version of this fork ran for two hours with every `[chat]` and
-            // `[paint]` line it produced silently dropped.
+            // and a piped stdout that nobody re-emits is a process whose log does not exist.
             process.stdout.write(`${line}\n`);
           }
         });
@@ -240,10 +209,7 @@ async function main(): Promise<void> {
       },
       log: (message) => logger.warn(message),
     });
-    logger.info(`[bridge] chat engine=process: the adapter is forked, and /notify is on ${chatPort}`);
-  } else {
-    logger.error(`[bridge] BRIDGE_CHAT_ENGINE=${chatEngine} is not one of inprocess, link, process`);
-    process.exit(1);
+    logger.info(`[bridge] chat adapter forked; /notify is served on ${chatPort}`);
   }
 
   const defaults = await defaultSettings(hostSeam);
@@ -257,10 +223,6 @@ async function main(): Promise<void> {
     logger.error("[bridge] no model configured — set a default in ~/.pi/agent/settings.json");
     process.exit(1);
   }
-  const router = new DurableRouter(chatSeam, {
-    model: defaultModel,
-    ...(defaults.thinkingLevel ? { thinkingLevel: defaults.thinkingLevel as never } : {}),
-  });
   logger.info(`[bridge] default model ${defaultModel.provider}/${defaultModel.modelId}`);
 
   // --- Health + /notify, the same surface the SDK host exposes. ---
@@ -331,24 +293,11 @@ async function main(): Promise<void> {
             res.end(JSON.stringify({ idle: busy.length === 0, busy }));
             return;
           }
-          // POST /notify: the cron service's single write path into Chat.
-          //
-          // This route was collateral damage in the web-routes extraction
-          // (3a91b1d): the handler moved out, the /notify block was deleted with
-          // the /web routes, and nothing noticed because `handleDurableNotify` is
-          // still *imported* below (so `tsc` was happy) and its unit tests call the
-          // handler directly rather than this server. The result was a silent
-          // 404 for every scheduled notification — balance checks, release notes,
-          // reminders — while `npm test` stayed green.
-          //
-          // The engine check is on purpose: this listener is the durable host's,
-          // and only it holds a `router`/`seam` pair for the durable harness.
-          if (forked && req.method === "POST" && url.pathname === "/notify") {
-            // Served by the adapter, which is where the Chat client is. Not forwarded: `/notify`
-            // is a Chat route, and a host that keeps forwarding one is a host that still knows about
-            // Chat. The callers point at the adapter (`cron/.env`), and this answer says so for
-            // anyone who has not been told — a silent 404 here is how scheduled notifications
-            // stopped once before.
+          // /notify is served by the Chat adapter, which is where the Chat client is. This process
+          // answers with where to look rather than a bare 404: a silent one here is how scheduled
+          // notifications stopped once before, and the cron jobs now point at the adapter
+          // (`cron/.env`), so this only catches an address somebody still has from before.
+          if (req.method === "POST" && url.pathname === "/notify") {
             res.writeHead(404, { "Content-Type": "application/json" });
             res.end(
               JSON.stringify({
@@ -357,80 +306,6 @@ async function main(): Promise<void> {
                 hint: `POST http://${config.bindAddress}:${chatPort}/notify`,
               }),
             );
-            return;
-          }
-          // POST /notify: the cron service's single write path into Chat.
-          //
-          // This route was collateral damage in the web-routes extraction
-          // (3a91b1d): the handler moved out, the /notify block was deleted with
-          // the /web routes, and nothing noticed because `handleDurableNotify` is
-          // still *imported* below (so `tsc` was happy) and its unit tests call the
-          // handler directly rather than this server. The result was a silent
-          // 404 for every scheduled notification — balance checks, release notes,
-          // reminders — while `npm test` stayed green.
-          //
-          // The engine check is on purpose: this listener is the durable host's,
-          // and only it holds a `router`/`seam` pair for the durable harness.
-          if (forked && req.method === "POST" && url.pathname === "/notify") {
-            // Forwarded, not moved. The handler needs a Chat client and now lives in the adapter
-            // process, but the *address* is what several cron scripts already hold — one of them
-            // hardcoded — so keeping it is worth one hop. `cron/.env` and `watch-ns-delegation.sh`
-            // both point at this port, and a deploy should not be able to break scheduled
-            // notifications by moving a listener.
-            const body = await readBody(req, 1_000_000);
-            if (body === null) {
-              res.writeHead(413, { "Content-Type": "application/json" });
-              res.end(JSON.stringify({ ok: false, error: "request body too large" }));
-              return;
-            }
-            const forwarded = await fetch(`http://127.0.0.1:${chatPort}/notify`, {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                ...(req.headers.authorization ? { Authorization: req.headers.authorization } : {}),
-              },
-              body,
-            }).catch((error: unknown) => {
-              logger.error(`[bridge] /notify forward failed: ${(error as Error).message}`);
-              return undefined;
-            });
-            if (!forwarded) {
-              res.writeHead(502, { "Content-Type": "application/json" });
-              res.end(JSON.stringify({ ok: false, error: "the Chat adapter is not reachable" }));
-              return;
-            }
-            res.writeHead(forwarded.status, { "Content-Type": "application/json" });
-            res.end(await forwarded.text());
-            return;
-          }
-          if (req.method === "POST" && url.pathname === "/notify") {
-            const body = await readBody(req, 1_000_000);
-            if (body === null) {
-              res.writeHead(413, { "Content-Type": "application/json" });
-              res.end(JSON.stringify({ ok: false, error: "request body too large" }));
-              return;
-            }
-            let json: unknown;
-            try {
-              json = JSON.parse(body);
-            } catch {
-              res.writeHead(400, { "Content-Type": "application/json" });
-              res.end(JSON.stringify({ ok: false, error: "invalid JSON body" }));
-              return;
-            }
-            const result = await handleDurableNotify(
-              {
-                client,
-                seam: chatSeam,
-                router,
-                notifyToken: config.notifyToken || undefined,
-                defaultAgent: { model: defaultModel },
-              },
-              json,
-              req.headers.authorization,
-            );
-            res.writeHead(result.status, { "Content-Type": "application/json" });
-            res.end(JSON.stringify(result.json));
             return;
           }
           // The browser front end lives in one module so the same routes can be
@@ -581,24 +456,6 @@ async function main(): Promise<void> {
     logger.info("[bridge] web engine=link: /web is served by a supervised adapter process");
   }
 
-  // The painter, started as one thing: the cursor and the mouth it feeds.
-  const chatPainter = forked ? undefined : await startChatPainter({ seam: chatSeam, config, client, dbPath });
-
-  // `RECEIVER=none` runs the bridge for `/web` only — no Pub/Sub, no service
-  // account, no Chat app. It exists because `PubSubReceiver.start()` refuses to
-  // start without a subscription, so a web-only deployment (and the browser
-  // tests) would otherwise exit immediately.
-  const receiver: MessageReceiver =
-    process.env.RECEIVER === "none"
-      ? new NullReceiver()
-      : new PubSubReceiver(
-          config.serviceAccountPath,
-          config.pubsubSubscription,
-          state,
-          config.allowedSpaces,
-          config.allowedUsers,
-        );
-
   // --- The bridge's own delivery cursor, in shadow mode -------------------------
   //
   // Step one of moving delivery off the server (§17 of the design doc): the bridge
@@ -620,9 +477,7 @@ async function main(): Promise<void> {
    */
 
   const shutdown = async (): Promise<void> => {
-    chatPainter?.stop();
     logger.info("[bridge] shutting down...");
-    if (!forked) await receiver.stop();
     chatSupervisor?.stop();
     artifactsServer?.close();
     webSupervisor?.stop();
@@ -634,36 +489,9 @@ async function main(): Promise<void> {
   process.on("SIGINT", () => void shutdown());
   process.on("SIGTERM", () => void shutdown());
 
-  // The Chat adapter's message path, in its own module: the same function the fork will run in
-  // another process, given a seam instead of a `BridgeHost`.
-  if (!forked) {
-    const handler = chatHandler({ seam: chatSeam, config, client, router, state, secrets });
-    await receiver.start(handler);
-  }
   logger.info("[bridge] running on the durable engine. Ctrl+C to stop.");
 
-  // Name whatever has no title yet, in the background. Detached on purpose: a
-  // hundred titles must not delay the first Chat message, and one title at a time
-  // keeps the titler from competing with a running turn.
-  if (config.topicSummary && !forked) {
-    void nameUntitledConversations({
-      seam: chatSeam,
-      config: {
-        baseUrl: config.topicSummaryBaseUrl,
-        model: config.topicSummaryModel,
-        timeoutMs: config.topicSummaryTimeoutMs,
-        ...(config.topicSummaryApiKey ? { apiKey: config.topicSummaryApiKey } : {}),
-      },
-      // One title at a time, with a gap between them: the titler shares this
-      // machine's cores with the conversations it is naming, and a title arriving
-      // a minute late is fine.
-      intervalMs: 5_000,
-      maxPerPass: 10,
-    }).then(
-      (count) => logger.info(`[naming] pass finished: ${count} conversation(s) named`),
-      (error: unknown) => logger.error(`[naming] pass failed: ${(error as Error).message}`),
-    );
-  }
+
 }
 
 main().catch((error) => {

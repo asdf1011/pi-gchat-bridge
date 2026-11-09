@@ -238,18 +238,23 @@ test("a configured token is enforced through the route", async () => {
  * compiled output so it fails in `npm test` (which runs from `src`) as well as
  * after a build.
  */
-test("the durable host still wires POST /notify to handleDurableNotify", async () => {
+test("the Chat adapter serves /notify, and the host says where it went", async () => {
+  // The route moved with the Chat client, so the guard moved with it. What it is guarding against
+  // is unchanged and has happened once: a `/notify` that quietly stops existing, discovered by a
+  // scheduled job failing weeks later.
   const fs = await import("node:fs/promises");
-  const source = await fs.readFile(new URL("../src/durable/main.ts", import.meta.url), "utf8");
-
-  assert.match(source, /url\.pathname === "\/notify"/, "the /notify path is not routed in main.ts");
+  const adapter = await fs.readFile(new URL("../src/chat-host.ts", import.meta.url), "utf8");
+  assert.match(adapter, /url\.pathname === "\/notify"/, "the /notify path is not routed in the adapter");
   assert.match(
-    source,
+    adapter,
     /handleDurableNotify\(\s*\{/,
     "handleDurableNotify is imported but never called — the route was dropped",
   );
-  // The call must sit inside the HTTP handler, not merely exist somewhere.
-  const handlerAt = source.indexOf("http.createServer");
-  const callAt = source.indexOf("handleDurableNotify(", handlerAt);
+  const handlerAt = adapter.indexOf("http.createServer");
+  const callAt = adapter.indexOf("handleDurableNotify(", handlerAt);
   assert.ok(handlerAt >= 0 && callAt > handlerAt, "handleDurableNotify must be called from the HTTP handler");
+
+  const host = await fs.readFile(new URL("../src/durable/main.ts", import.meta.url), "utf8");
+  assert.match(host, /url\.pathname === "\/notify"/, "the host should answer for the moved route");
+  assert.match(host, /notify is served by the Chat adapter/, "...with where to look, not a bare 404");
 });
