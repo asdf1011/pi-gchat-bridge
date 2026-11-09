@@ -400,7 +400,19 @@ export class Painter {
       }
       // A prompt means a turn. Only a turn *still running* deserves a placeholder: the `busy` check
       // is what separates "someone just typed" from "a prompt we are catching up on".
-      if (await this.deps.busy(conversationId).catch(() => false)) await this.openTurn(conversationId);
+      //
+      // The check is asked twice, and that is not belt-and-braces: the entry is written before the
+      // turn starts, so a delivery that lands in the gap between the two sees an idle conversation
+      // and skips the placeholder — which is what a short turn looks like from the outside, "the
+      // answer arrived without the thinking line". A prompt that arrives *now* belongs to a turn
+      // that starts within a few hundred milliseconds, so one short wait answers it properly.
+      let running = await this.deps.busy(conversationId).catch(() => false);
+      if (!running) {
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        running = await this.deps.busy(conversationId).catch(() => false);
+      }
+      if (running) await this.openTurn(conversationId);
+      else this.log(`[paint] conversation ${conversationId}: prompt ${entry.entryId} arrived with no turn running — no placeholder`);
     }
     // Commentary, a prompt, or this surface's own words: accounted for, not painted.
     this.deps.ledger.advance(entry.entryId);

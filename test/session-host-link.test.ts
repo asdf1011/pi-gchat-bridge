@@ -341,3 +341,4 @@ test("awaitSubmission crosses the link, and a settled turn comes back as data", 
   // shape the handler words a notice from, and it must arrive as a value over the wire.
   assert.equal(settled.status, "unanswered");
 });
+

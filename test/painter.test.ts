@@ -524,3 +524,37 @@ test("a prompt is quoted once, not by the next answer as well", async () => {
   assert.deepEqual(posted.map((row) => row.text), ["> one\n\nfirst", "second"]);
   await painter.close();
 });
+
+test("a prompt that arrives before its turn starts still gets a placeholder", async () => {
+  // The race the second `busy` check exists for: the prompt entry is committed first and the turn
+  // starts a moment later, so a delivery that lands in between sees an idle conversation. What that
+  // looks like from outside is a short answer arriving with no "thinking…" line above it.
+  const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
+  ledger.adopt(10, "new");
+  const fake = fakeSurface();
+  let asked = 0;
+  let watches = 0;
+  const painter = new Painter({
+    surface: "gchat",
+    ledger,
+    owns: () => true,
+    conversations: async () => [{ conversationId: 1 }],
+    entriesSince: async () => [],
+    // Idle on the first look, running on the second — the gap between "typed" and "started".
+    busy: async () => {
+      asked += 1;
+      return asked > 1;
+    },
+    // Subscribing is what a turn gets in this mode; the placeholder opens on its first frame.
+    watch: () => {
+      watches += 1;
+      return { detach() {} };
+    },
+    surfaceClient: fake.surface,
+  });
+
+  await painter.ingest([{ conversationId: 1, entryId: 11, role: "user", text: "hi", origin: "gchat" }]);
+  assert.equal(asked, 2, "the question was asked again");
+  assert.equal(watches, 1, "and the turn is being watched for its frames");
+  await painter.close();
+});
