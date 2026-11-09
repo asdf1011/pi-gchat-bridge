@@ -159,3 +159,72 @@ test("an unbound conversation is undefined, not an error", async () => {
   assert.equal(await linked.attach(999_999, () => {}), undefined);
   assert.equal(await linked.artifacts(999_999), undefined);
 });
+
+/* --- Settings and commands --------------------------------------------------
+ *
+ * These exist because a `/status` typed into a web conversation *is* an adapter
+ * calling the seam: with `BRIDGE_WEB_ENGINE=link` the command surface answered
+ * "not published over the link yet" in the deployment while passing in tests.
+ */
+
+test("settings cross the link, and a conversation that is gone is undefined", async () => {
+  const { inProcess, linked } = await bothEnds();
+  const created = await linked.getOrCreate("threads/S", { model: { provider: "deepseek", modelId: "flash" } });
+
+  const overLink = await linked.state(created.conversationId);
+  const direct = await inProcess.state(created.conversationId);
+  assert.ok(overLink, "the host answered");
+  assert.ok(direct);
+  // The same numbers, not a copy: `usage` and `entries` are derived host-side. Compared without the
+  // undefined-valued keys, which the wire simply does not carry.
+  const defined = (value: object) =>
+    Object.fromEntries(Object.entries(value).filter(([, each]) => each !== undefined));
+  assert.deepEqual(defined(overLink), defined(direct));
+  assert.equal(overLink.model, "deepseek/flash");
+
+  assert.equal(await linked.state(999_999), undefined, "gone is a value, as the seam promises");
+});
+
+test("the model list is the host's, not the client's idea of it", async () => {
+  const { inProcess, linked } = await bothEnds();
+  assert.deepEqual(await linked.models(), await inProcess.models());
+});
+
+test("setModel over the link moves the host's binding, not a copy of it", async () => {
+  const { inProcess, linked } = await bothEnds();
+  await linked.getOrCreate("threads/M", { model: { provider: "deepseek", modelId: "flash" } });
+
+  const applied = await linked.setModel("threads/M", {
+    provider: "anthropic",
+    modelId: "claude-sonnet-4",
+    thinkingLevel: "high",
+  });
+  assert.deepEqual(applied, { model: "anthropic/claude-sonnet-4", thinkingLevel: "high" });
+  // Read back on the far side: a model change is one commit over the binding and the
+  // conversation's agent, so both have to move together.
+  assert.equal((await inProcess.resolve("threads/M"))?.model, "anthropic/claude-sonnet-4");
+  assert.equal((await inProcess.state((await inProcess.resolve("threads/M"))!.conversationId))?.thinkingLevel, "high");
+});
+
+test("bind and label cross the link, and a missing conversation is null on the wire", async () => {
+  const { inProcess, linked } = await bothEnds();
+  const first = await linked.getOrCreate("threads/one", { model: { provider: "deepseek", modelId: "flash" } });
+
+  assert.equal(await linked.label("threads/one", "research notes"), true);
+  assert.equal((await inProcess.resolve("threads/one"))?.label, "research notes");
+
+  const bound = await linked.bind("threads/two", first.conversationId);
+  assert.equal(bound?.conversationId, first.conversationId);
+  assert.equal(await linked.bind("threads/three", 999_999), undefined, "nothing to bind to");
+});
+
+test("abort over the link is idempotent, and gone is false", async () => {
+  const { linked } = await bothEnds();
+  const created = await linked.getOrCreate("threads/A2", { model: { provider: "deepseek", modelId: "flash" } });
+  // Aborting an idle conversation succeeds: the seam's boolean is about the conversation existing,
+  // not about a turn having been there. "Was anything running" is the view's question, and the
+  // command surface asks it there.
+  assert.equal(await linked.abort(created.conversationId), true);
+  assert.equal(await linked.abort(created.conversationId), true, "twice is the same as once");
+  assert.equal(await linked.abort(999_999), false);
+});

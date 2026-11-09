@@ -42,6 +42,36 @@ export const NamedConversationSchema = Type.Object({
   lastActivityAt: Type.Optional(Type.Number()),
 });
 
+/** Token and cost totals, summed over every model one conversation has used. */
+export const UsageTotalsSchema = Type.Object({
+  input: Type.Number(),
+  output: Type.Number(),
+  cacheRead: Type.Number(),
+  cacheWrite: Type.Number(),
+  total: Type.Number(),
+  cost: Type.Number(),
+});
+
+/** What a status view needs about one conversation: counts and names, never entries. */
+export const ConversationStateSchema = Type.Object({
+  conversationId: Type.Number(),
+  model: Type.String(),
+  provider: Type.String(),
+  modelId: Type.String(),
+  thinkingLevel: Type.Optional(Type.String()),
+  supportedLevels: Type.Optional(Type.Array(Type.String())),
+  usage: Type.Optional(UsageTotalsSchema),
+  entries: Type.Number(),
+});
+
+/** A model as a picker lists it. */
+export const ModelInfoSchema = Type.Object({
+  provider: Type.String(),
+  id: Type.String(),
+  label: Type.String(),
+  thinkingLevels: Type.Optional(Type.Array(Type.String())),
+});
+
 export const AgentConfigSchema = Type.Object({
   model: Type.Object({ provider: Type.String(), modelId: Type.String() }),
   thinkingLevel: Type.Optional(Type.String()),
@@ -180,6 +210,14 @@ export const ConversationContract = remote("pi-bridge.conversation", {
           }),
           SubmitResultSchema,
         ),
+        /**
+         * The conversation's settings and totals, for `/status` and a status card.
+         *
+         * Named `settings` rather than `state` because `state` is already the word for chord's
+         * replicated view in this same contract, and two meanings of one word in one object is how a
+         * reader loses an afternoon. Null rather than absent: chord has no `undefined`.
+         */
+        settings: method(Type.Object({}), Type.Union([ConversationStateSchema, Type.Null()])),
         artifacts: method(Type.Object({}), Type.Array(ArtifactSchema)),
         history: method(
           Type.Object({ limit: Type.Number(), offset: Type.Number() }),
@@ -231,6 +269,10 @@ export const ConversationContract = remote("pi-bridge.conversation", {
           Type.Object({ commentId: Type.String(), text: Type.String() }),
           Type.Object({ id: Type.Optional(Type.String()), error: Type.Optional(Type.String()) }),
         ),
+        /** Summarise the history now. Instructions are free text. */
+        compact: method(Type.Object({ instructions: Type.Optional(Type.String()) }), Type.Null()),
+        /** Stop whatever is running. True when something was stopped. */
+        abort: method(Type.Object({}), Type.Boolean()),
       },
     },
   },
@@ -269,6 +311,37 @@ export const SessionContract = remote("pi-bridge.session", {
          * from "empty", and the seam promises `undefined` for the former.
          */
         has: method(Type.Object({ conversation: Type.Number() }), Type.Boolean()),
+        /**
+         * The models a picker may offer, with their thinking levels.
+         *
+         * Session-level rather than per conversation because the list is a property of the
+         * deployment, not of a thread — and one request serves every card and every command.
+         */
+        models: method(Type.Object({}), Type.Array(ModelInfoSchema)),
+        /**
+         * Change the model (and thinking level) a *named* conversation runs with.
+         *
+         * Keyed by name, like `create` and `bind`, because a model change has to update the
+         * binding record and the conversation's agent in one commit — the binding is the adapter's
+         * name → conversation mapping, and a card that changed only the conversation would disagree
+         * with the next lookup by name.
+         */
+        setModel: method(
+          Type.Object({
+            name: Type.String(),
+            provider: Type.String(),
+            modelId: Type.String(),
+            thinkingLevel: Type.Optional(Type.String()),
+          }),
+          Type.Object({ model: Type.String(), thinkingLevel: Type.Optional(Type.String()) }),
+        ),
+        /** Point a name at an existing conversation, keeping the previous label. */
+        bind: method(
+          Type.Object({ name: Type.String(), conversation: Type.Number() }),
+          Type.Union([NamedConversationSchema, Type.Null()]),
+        ),
+        /** Set a conversation's display label. Adapter-facing text only. */
+        label: method(Type.Object({ name: Type.String(), label: Type.String() }), Type.Boolean()),
       },
     },
   },

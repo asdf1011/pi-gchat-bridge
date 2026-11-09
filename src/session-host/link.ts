@@ -16,15 +16,19 @@
  * ordinary method calls. That is why `attach` needs no callback plumbing: chord
  * has been doing it all along.
  *
- * Deliberately not published yet: everything the two live adapters never call.
- * `state`, `models`, `setModel`, `create`, `bind`, `unbind`, `label`, `compact`,
- * `abort`, `usage`, `awaitSubmission`, `write`, the claim/verdict operations,
- * `firstTurn` and the comment operations throw `notImplemented` over the link, and
- * each becomes a contract method the day an adapter in another process needs it.
- * The comment operations are the next candidates: an artifact origin in its own
- * process would read them, and `BRIDGE_WEB_ENGINE=link` would need them to create
- * one. Until then comments work in the default `inprocess` engine only, which is
- * what `main.ts` runs.
+ * Deliberately not published yet: everything no adapter calls. `info`, `unbind`,
+ * `usage`, `awaitSubmission`, `write`, the claim/verdict operations and
+ * `firstTurn` throw `notImplemented` over the link, and each becomes a contract
+ * method the day an adapter in another process needs it.
+ *
+ * The settings group — `state`, `models`, `setModel`, `bind`, `label`, `compact`,
+ * `abort` — was published when the command surface started calling it: a `/status`
+ * or `/model` typed into a web conversation is an adapter calling the seam, and
+ * `BRIDGE_WEB_ENGINE=link` therefore needs these to be on the wire. Until then the
+ * commands worked in tests and answered "not published over the link yet" in the
+ * deployment that runs them. That is the rule doing its job in both directions: a
+ * contract method with no consumer is speculation, and an operation a running
+ * adapter calls is not.
  *
  * Two constraints that cost real debugging and are easy to walk into again:
  *
@@ -89,6 +93,15 @@ export function serveSessionHost(seam: SessionHost): Host {
     resolve: async ({ name }) => (await seam.resolve(name)) ?? null,
     getOrCreate: async ({ name, agent }) => seam.getOrCreate(name, agent),
     has: async ({ conversation }) => (await seam.snapshot(conversation)) !== undefined,
+    models: () => seam.models() as Promise<ModelInfo[]>,
+    setModel: ({ name, provider, modelId, thinkingLevel }) =>
+      seam.setModel(name, {
+        provider,
+        modelId,
+        ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
+      }),
+    bind: async ({ name, conversation }) => (await seam.bind(name, conversation)) ?? null,
+    label: ({ name, label }) => seam.label(name, label),
   }));
 
   // The factory is synchronous by contract; the wiring it needs is asynchronous,
@@ -129,6 +142,14 @@ export function serveSessionHost(seam: SessionHost): Host {
     return {
       variant: "default" as const,
       view,
+      // `state` is the word for the replicated view above, so the seam's `state` travels as
+      // `settings`: one word for two things inside one object is how a reader loses an afternoon.
+      settings: async () => (await seam.state(conversation)) ?? null,
+      compact: async ({ instructions }: { instructions?: string }) => {
+        await seam.compact(conversation, instructions);
+        return null;
+      },
+      abort: () => seam.abort(conversation),
       // The wire shape is deliberately loose (TypeBox cannot express a
       // discriminated union of content parts cheaply), so the cast back to the
       // seam's `MessageContent` is where the two meet.
@@ -420,33 +441,70 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
         ref.release();
       }
     },
-    state: () => {
-      throw notImplemented("state");
+    state: async (conversationId: number) => {
+      const ref = await conversationRef(host, conversationId, session);
+      if (!ref) return undefined;
+      try {
+        const found = (await host.root((ctx) => ref.settings({}, ctx))) as ConversationState | null;
+        return found ?? undefined;
+      } finally {
+        ref.release();
+      }
     },
-    models: () => {
-      throw notImplemented("models");
+    models: async () => {
+      const root = await session();
+      return (await host.root((ctx) => root.models({}, ctx))) as readonly ModelInfo[];
     },
-    setModel: () => {
-      throw notImplemented("setModel");
+    setModel: async (name: string, change: { provider: string; modelId: string; thinkingLevel?: string }) => {
+      const root = await session();
+      return host.root((ctx) =>
+        root.setModel(
+          {
+            name,
+            provider: change.provider,
+            modelId: change.modelId,
+            ...(change.thinkingLevel === undefined ? {} : { thinkingLevel: change.thinkingLevel }),
+          },
+          ctx,
+        ),
+      );
     },
     create: async (name: string, agent: AgentConfig) => {
       const root = await session();
       return host.root((ctx) => root.create({ name, agent }, ctx));
     },
-    bind: () => {
-      throw notImplemented("bind");
+    bind: async (name: string, conversationId: number) => {
+      const root = await session();
+      const bound = await host.root((ctx) => root.bind({ name, conversation: conversationId }, ctx));
+      return bound ?? undefined;
     },
     unbind: () => {
       throw notImplemented("unbind");
     },
-    label: () => {
-      throw notImplemented("label");
+    label: async (name: string, text: string) => {
+      const root = await session();
+      return Boolean(await host.root((ctx) => root.label({ name, label: text }, ctx)));
     },
-    compact: () => {
-      throw notImplemented("compact");
+    compact: async (conversationId: number, instructions?: string) => {
+      const ref = await conversationRef(host, conversationId, session);
+      if (!ref) return;
+      try {
+        await host.root((ctx) =>
+          ref.compact(instructions === undefined ? {} : { instructions }, ctx),
+        );
+      } finally {
+        ref.release();
+      }
     },
-    abort: () => {
-      throw notImplemented("abort");
+    abort: async (conversationId: number) => {
+      const ref = await conversationRef(host, conversationId, session);
+      // A conversation that is gone is not running anything, which is what `false` already means.
+      if (!ref) return false;
+      try {
+        return Boolean(await host.root((ctx) => ref.abort({}, ctx)));
+      } finally {
+        ref.release();
+      }
     },
     usage: () => {
       throw notImplemented("usage");
