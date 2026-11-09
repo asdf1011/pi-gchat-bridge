@@ -1562,3 +1562,43 @@ test("changing the model asks again, so the levels are that model's", async () =
     h?.close();
   }
 });
+
+test("a row about a conversation is a link here, because this page can open one", async () => {
+  // The same `/sessions` row means "navigate" on this surface and "/resume" on Chat. The row carries
+  // the conversation id; the surface chooses the verb.
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      pathname: "/7/",
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+      commandResponse: {
+        kind: "list",
+        title: "Recent conversations",
+        rows: [
+          { label: "this one", detail: "now", conversationId: 7, current: true },
+          { label: "earlier", detail: "2h ago", conversationId: 9 },
+        ],
+      },
+    });
+    await h.settle();
+    const doc = h.dom.window.document;
+    const box = doc.getElementById("text") as HTMLTextAreaElement;
+    box.value = "/sessions";
+    doc.getElementById("send")!.dispatchEvent(new h.dom.window.Event("submit", { cancelable: true }));
+    await h.settle();
+
+    const rows = [...doc.querySelectorAll("#command-body .row")] as HTMLElement[];
+    assert.equal(rows.length, 2);
+    assert.ok(rows[1]!.classList.contains("clickable"), "a conversation row is pressable");
+    assert.ok(rows[0]!.classList.contains("current"), "and the one being read is marked");
+    // Pressing it navigates; it does not send a command. (jsdom refuses the navigation itself, so
+    // what is asserted is that nothing was posted.)
+    const before = h.requests.length;
+    rows[1]!.click();
+    await h.settle();
+    assert.equal(h.requests.filter((request) => request.url.includes("/commands")).length, 1);
+    assert.equal(h.requests.length >= before, true);
+  } finally {
+    h?.close();
+  }
+});

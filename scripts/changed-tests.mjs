@@ -32,7 +32,10 @@ import { spawnSync } from "node:child_process";
 const ROOT = path.resolve(import.meta.dirname, "..");
 const TEST_DIR = path.join(ROOT, "test");
 const CACHE = path.join(ROOT, "node_modules", ".cache", "bridge-tests", "results.json");
-const TEST_TIMEOUT_MS = 20_000;
+// Generous on purpose: `artifact-vcs` drives real `jj` repositories, and a run that happens while
+// something else is building has been seen to take twice as long as usual. A timeout that fires on
+// that is noise, and noise in a test runner is how a real failure gets ignored.
+const TEST_TIMEOUT_MS = 60_000;
 
 const args = process.argv.slice(2);
 const flag = (name) => args.includes(name);

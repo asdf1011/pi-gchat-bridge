@@ -178,9 +178,15 @@ test("/sessions lists conversations, marks this one, and each row resumes its ow
   assert.equal(response.kind, "list");
   assert.ok(response.kind === "list");
   assert.equal(response.rows.length, 2);
+  // What each row is *about*; the surface decides whether that means "navigate" or "/resume".
+  assert.deepEqual(
+    response.rows.map((row) => row.conversationId),
+    [7, 9],
+  );
   assert.deepEqual(
     response.rows.map((row) => row.command),
-    ["/resume 7", "/resume 9"],
+    [undefined, undefined],
+    "the row does not dictate the verb",
   );
   assert.equal(response.rows[0]!.current, true, "the conversation being read is marked");
   assert.match(response.rows[1]!.label, /hello there/, "an unnamed conversation shows what it started with");
@@ -188,7 +194,7 @@ test("/sessions lists conversations, marks this one, and each row resumes its ow
 
 test("/resume binds by name and says where it went", async () => {
   const { seam, calls } = fakeSeam();
-  const response = await runCommand(seam, subject, { text: "/resume 9" });
+  const response = await runCommand(seam, { ...subject, surface: "gchat" }, { text: "/resume 9" });
   assert.deepEqual(calls.bind[0], ["web:here", 9]);
   assert.equal(response.kind === "text" ? response.goto : undefined, 9, "the surface is told where to go");
 });
@@ -277,4 +283,25 @@ test("a preview for a model that does not exist is the same list as typing it", 
   const { seam } = fakeSeam();
   const response = await runCommand(seam, subject, { text: "/model", values: { model: "gpt-9" }, preview: true });
   assert.equal(response.kind, "list");
+});
+
+test("/resume is withheld from a surface that opens conversations by id", async () => {
+  // Chat binds a conversation to a thread, so pointing that binding at another one is a real
+  // operation. The web pane addresses conversations by id: resuming would leave a second name on the
+  // same conversation — a duplicate row in the index, not a resume.
+  const { seam, calls } = fakeSeam();
+  const help = await runCommand(seam, { ...subject, surface: "webui" }, { text: "/help" });
+  assert.ok(help.kind === "list");
+  assert.ok(!help.rows.some((row) => row.label.startsWith("/resume")), "not offered");
+  assert.ok(help.rows.some((row) => row.label === "/sessions"), "but the list of conversations still is");
+
+  const refused = await runCommand(seam, { ...subject, surface: "webui" }, { text: "/resume 9" });
+  assert.equal(refused.kind, "text");
+  assert.match(refused.kind === "text" ? refused.text : "", /nothing to resume/);
+  assert.equal(calls.bind.length, 0, "and nothing was bound");
+
+  // The same list on Chat still has it.
+  const chatHelp = await runCommand(seam, { ...subject, surface: "gchat" }, { text: "/help" });
+  assert.ok(chatHelp.kind === "list");
+  assert.ok(chatHelp.rows.some((row) => row.label.startsWith("/resume")));
 });

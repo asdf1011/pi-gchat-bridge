@@ -477,7 +477,11 @@ export async function handleWebRequest(
     }
     let response;
     try {
-      response = await runCommand(seam, { conversationId, name: named.name }, { text, values, preview });
+      response = await runCommand(
+        seam,
+        { conversationId, name: named.name, surface: "webui" },
+        { text, values, preview },
+      );
     } catch (error) {
       // A command failing is data, not a broken route: the surface shows the reason the same way it
       // shows any other text response.

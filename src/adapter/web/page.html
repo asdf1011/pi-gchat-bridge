@@ -1349,13 +1349,18 @@ function renderCommand(shape) {
     const list = document.createElement('ul');
     for (const row of rows) {
       const item = document.createElement('li');
-      const clickable = typeof row.command === 'string' && row.command !== '';
-      const button = document.createElement(clickable ? 'button' : 'div');
-      if (clickable) button.type = 'button';
-      button.className = 'row' + (clickable ? ' clickable' : '') + (row.current ? ' current' : '');
+      const sends = typeof row.command === 'string' && row.command !== '';
+      const navigates = !sends && Number.isInteger(row.conversationId);
+      const button = document.createElement(sends || navigates ? 'button' : 'div');
+      if (sends || navigates) button.type = 'button';
+      button.className = 'row' + (sends || navigates ? ' clickable' : '') + (row.current ? ' current' : '');
       button.append(commandText('span', row.label));
       if (row.detail) button.append(commandText('span', row.detail, 'detail'));
-      if (clickable) button.onclick = () => void runCommandLine(row.command);
+      // A row about a conversation is a link, because this page can open any conversation. On a
+      // surface that cannot — a Chat thread is bound to one conversation — the same row carries a
+      // command instead, and this page never sees it.
+      if (sends) button.onclick = () => void runCommandLine(row.command);
+      else if (navigates) button.onclick = () => { window.location.href = mountRoot() + row.conversationId + '/'; };
       item.append(button);
       list.append(item);
     }

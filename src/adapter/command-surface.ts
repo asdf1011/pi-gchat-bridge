@@ -20,7 +20,16 @@ import type { ModelInfo, SessionHost } from "../session-host/api.js";
 export interface CommandRow {
   label: string;
   detail?: string;
+  /** A command the row sends when pressed, for a surface that has nothing better to do with it. */
   command?: string;
+  /**
+   * The conversation this row is about.
+   *
+   * A surface that can address conversations directly (the web pane) *navigates* to this; one that
+   * cannot (Chat, where a thread is bound to one conversation) sends `/resume <id>` instead. The row
+   * says what it is about, not what to do about it — the same rule as a choice carrying its values.
+   */
+  conversationId?: number;
   /** Marks the row that is already true — the current conversation, the current model. */
   current?: boolean;
 }
@@ -90,17 +99,26 @@ export interface CommandSubject {
   conversationId: number;
   /** The adapter's name for the conversation: what `setModel`, `bind` and `create` take. */
   name: string;
+  /**
+   * The surface asking: `gchat`, `webui`. Absent means "a surface that can address conversations
+   * directly", which is the web pane and the CLI — the safer default, since the commands that only
+   * make sense on a thread are the ones it withholds.
+   */
+  surface?: string;
 }
 
 const text = (body: string, goto?: number): CommandResponse => ({ kind: "text", text: body, ...(goto === undefined ? {} : { goto }) });
 
 /** Every command, for `/help`. One line each: what it does, not how it is spelled. */
-const HELP: readonly { command: string; about: string }[] = [
+const HELP: readonly { command: string; about: string; surfaces?: readonly string[] }[] = [
   { command: "/status", about: "the model, thinking level, usage and size of this conversation" },
   { command: "/model", about: "choose the model and thinking level" },
   { command: "/quota", about: "provider balances, and which ones bill per token" },
   { command: "/sessions", about: "recent conversations in this store" },
-  { command: "/resume <id>", about: "carry on in one of them" },
+  // Only where a conversation is *bound to a thread*: `/resume` points that binding somewhere else.
+  // A surface that addresses conversations by id navigates instead, and binding there would leave a
+  // second name pointing at the same conversation — a duplicate row in the index, not a resume.
+  { command: "/resume <id>", about: "carry on in one of them", surfaces: ["gchat"] },
   { command: "/new", about: "start a fresh conversation here" },
   { command: "/name <label>", about: "rename this conversation" },
   { command: "/compact [instructions]", about: "summarise the history now" },
@@ -204,12 +222,21 @@ export async function runCommand(
   const values = input.values ?? {};
   const command = word.toLowerCase();
 
+  // One list, filtered by where the question was asked: a command a surface cannot honour is not
+  // offered to it, rather than offered and then refused.
+  const offered =
+    subject.surface === undefined ? HELP : HELP.filter((entry) => !entry.surfaces || entry.surfaces.includes(subject.surface!));
+  const helpRows = (): CommandRow[] =>
+    offered.map((entry) => ({ label: entry.command, detail: entry.about, command: entry.command }));
+
   if (command === "/help" || command === "") {
-    return {
-      kind: "list",
-      title: "Commands",
-      rows: HELP.map((entry) => ({ label: entry.command, detail: entry.about, command: entry.command })),
-    };
+    return { kind: "list", title: "Commands", rows: helpRows() };
+  }
+
+  if (command === "/resume" && !offered.some((entry) => entry.command.startsWith("/resume"))) {
+    // Said plainly, because it is a fact about the surface rather than a mistake: there is nothing to
+    // resume when every conversation is already in the index.
+    return text("This surface opens conversations by id, so there is nothing to resume — pick one from the list.");
   }
 
   if (command === "/status") {
@@ -311,7 +338,7 @@ export async function runCommand(
         ]
           .filter(Boolean)
           .join(" · "),
-        command: `/resume ${row.conversationId}`,
+        conversationId: row.conversationId,
         current: row.conversationId === subject.conversationId,
       })),
     };
@@ -359,9 +386,5 @@ export async function runCommand(
     return text("Stopped.");
   }
 
-  return {
-    kind: "list",
-    title: `No command called ${command}`,
-    rows: HELP.map((entry) => ({ label: entry.command, detail: entry.about, command: entry.command })),
-  };
+  return { kind: "list", title: `No command called ${command}`, rows: helpRows() };
 }
