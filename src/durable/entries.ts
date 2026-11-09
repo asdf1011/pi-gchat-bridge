@@ -142,11 +142,16 @@ export interface EntryPrefix {
 export async function entriesBefore(
   deps: EntriesDeps,
   conversationId: number,
+  /**
+   * The anchor. `0` means "no anchor" — the newest page, which is what a surface paints first and
+   * cannot express with a cursor: the forward read starts at the oldest and works up.
+   */
   before: number,
   options: { pageSize?: number; maxPages?: number } = {},
 ): Promise<EntryPrefix> {
   const limit = options.pageSize ?? 50;
   const maxPages = options.maxPages ?? 10;
+  const anchor = before === 0 ? Number.POSITIVE_INFINITY : before;
   const byEntry = new Map<number, EntryRef>();
   let atStart = false;
 
@@ -159,7 +164,7 @@ export async function entriesBefore(
     if (messages.length < limit) atStart = true;
     for (const message of messages) {
       if (message.entryId === undefined) continue;
-      if (message.entryId >= before) continue;
+      if (message.entryId >= anchor) continue;
       // The last message of an entry wins, as in the forward read: that is the answer, and the origin
       // it carries is the surface that asked.
       byEntry.set(message.entryId, {

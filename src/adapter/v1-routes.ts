@@ -165,6 +165,8 @@ export async function handleV1(
     // `before=<entryId>` reads the same log the other way, for "show earlier": a surface has the
     // oldest entry it holds and asks what came before it. Without it a reader paging backwards has to
     // know offsets, which are counted from the newest and shift under a running turn.
+    // `before=0` is "no anchor": the newest page, which a surface paints first and cannot ask for
+    // with `since` (that reads forward from the oldest).
     const beforeParam = url.searchParams.get("before");
     if (beforeParam !== null) {
       const before = Math.max(0, Number(beforeParam) || 0);

@@ -588,3 +588,31 @@ test("entries can be read backwards, with a flag that says when the start is rea
     await served.close();
   }
 });
+
+test("an unanchored backward read is the newest page", async () => {
+  // What a surface paints first. `since=0` cannot ask for it — that reads forward from the oldest —
+  // so `before=0` means "no anchor", and `atStart` still answers whether older content exists.
+  const seam = {
+    history: async (_id: number, options?: { limit?: number; offset?: number }) => {
+      const all = Array.from({ length: 10 }, (_, index) => ({
+        entryId: index + 1,
+        role: (index % 2 === 0 ? "user" : "assistant") as "user" | "assistant",
+        text: `entry ${index + 1}`,
+      }));
+      const limit = options?.limit ?? 50;
+      const offset = options?.offset ?? 0;
+      const end = Math.max(0, all.length - offset);
+      return all.slice(Math.max(0, end - limit), end);
+    },
+  } as unknown as SessionHost;
+  const served = await serveEvents(seam, [{ conversationId: 7, address: "spaces/S/threads/T" }]);
+  try {
+    const page = (await (
+      await fetch(`${served.baseUrl}/v1/conversations/7/entries?before=0&limit=4`)
+    ).json()) as { entries: { entryId: number }[]; atStart: boolean };
+    assert.deepEqual(page.entries.map((entry) => entry.entryId), [7, 8, 9, 10], "the newest four, oldest first");
+    assert.equal(page.atStart, false, "there is more before them");
+  } finally {
+    await served.close();
+  }
+});
