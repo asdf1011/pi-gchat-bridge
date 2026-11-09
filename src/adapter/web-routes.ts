@@ -89,6 +89,14 @@ export interface Identity {
 
 export interface WebRouteOptions {
   seam: SessionHost;
+  /**
+   * Who may use the gated commands (`/secret`).
+   *
+   * The same allow-list the Chat adapter applies, falling back to the general one, so a single-user
+   * deployment configures it once. Empty everywhere means nobody, which fails closed.
+   */
+  secretUsers?: readonly string[];
+  allowedUsers?: readonly string[];
   /** Default model for conversations started from the web. */
   model: { provider: string; modelId: string };
   /** Bearer token required for writes. Empty disables the check. */
@@ -514,9 +522,20 @@ export async function handleWebRequest(
     }
     let response;
     try {
+      // The secret gate is decided where identity is: the same allow-list Chat uses, falling back to
+      // the general one, so a single-user deployment needs no extra configuration. A reader the proxy
+      // could not identify is refused rather than trusted.
+      const secretUsers =
+        (options.secretUsers ?? []).length > 0 ? options.secretUsers! : (options.allowedUsers ?? []);
       response = await runCommand(
         seam,
-        { conversationId, name: named.name, surface: "webui" },
+        {
+          conversationId,
+          name: named.name,
+          surface: "webui",
+          ...(who.email === undefined ? {} : { actor: who.email }),
+          secretAllowed: who.email !== undefined && secretUsers.includes(who.email),
+        },
         { text, values, preview },
       );
     } catch (error) {

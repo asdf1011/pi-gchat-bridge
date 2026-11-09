@@ -49,6 +49,7 @@ import { armSteerWatch } from "../durable/steer-watch.js";
 import type { BridgeHost } from "../durable/host.js";
 import { logger } from "../logger.js";
 import { checkProviderQuotas } from "../quota.js";
+import type { SecretStore } from "../secret-store.js";
 import { projectView, type ProjectedView, type ViewLike } from "./projection.js";
 import type {
   AdapterEntry,
@@ -88,6 +89,13 @@ export interface InProcessOptions {
   steerWaitMs?: number;
   /** Told when a filesystem observation fails. Observing is best-effort. */
   onObserveError?: (error: unknown) => void;
+  /**
+   * The deployment's secret store.
+   *
+   * The host holds it because the file sits beside the database and seeds the redaction registry;
+   * adapters reach it through the seam, which is why a surface cannot read a value even in principle.
+   */
+  secrets?: SecretStore;
   /**
    * Told that a submission was accepted — which is the moment a turn exists.
    *
@@ -551,6 +559,27 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
 
     async abort(conversationId: number): Promise<boolean> {
       return host.abort(conversationId);
+    },
+
+    async secrets(): Promise<readonly { name: string; addedBy?: string }[]> {
+      return (options.secrets?.list() ?? []).map((secret) => ({
+        name: secret.name,
+        ...(secret.addedBy === undefined ? {} : { addedBy: secret.addedBy }),
+      }));
+    },
+
+    async setSecret(name: string, value: string, addedBy: string) {
+      if (!options.secrets) return { error: "no secret store is configured on this bridge" };
+      try {
+        options.secrets.set(name, value, addedBy);
+        return { ok: true as const };
+      } catch (error) {
+        return { error: (error as Error).message };
+      }
+    },
+
+    async removeSecret(name: string): Promise<boolean> {
+      return options.secrets?.remove(name) ?? false;
     },
 
     async quota(): Promise<readonly ProviderQuota[]> {

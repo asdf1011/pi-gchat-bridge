@@ -105,6 +105,10 @@ export function serveSessionHost(seam: SessionHost): Host {
     bind: async ({ name, conversation }) => (await seam.bind(name, conversation)) ?? null,
     label: ({ name, label }) => seam.label(name, label),
     quota: () => seam.quota() as Promise<ProviderQuota[]>,
+    secrets: () => seam.secrets() as Promise<{ name: string; addedBy?: string }[]>,
+    setSecret: ({ name, value, addedBy }: { name: string; value: string; addedBy: string }) =>
+      seam.setSecret(name, value, addedBy),
+    removeSecret: ({ name }: { name: string }) => seam.removeSecret(name),
     info: () => seam.info(),
     awaitSubmission: ({ submissionId }: { submissionId: number }) => seam.awaitSubmission(submissionId),
     usage: () => seam.usage(),
@@ -509,6 +513,22 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
     quota: async () => {
       const root = await session();
       return (await host.root((ctx) => root.quota({}, ctx))) as readonly ProviderQuota[];
+    },
+    secrets: async () => {
+      const root = await session();
+      return (await host.root((ctx) => root.secrets({}, ctx))) as readonly { name: string; addedBy?: string }[];
+    },
+    setSecret: async (name: string, value: string, addedBy: string) => {
+      const root = await session();
+      const result = (await host.root((ctx) => root.setSecret({ name, value, addedBy }, ctx))) as {
+        ok?: boolean;
+        error?: string;
+      };
+      return result.ok === true ? { ok: true as const } : { error: result.error ?? "the host declined" };
+    },
+    removeSecret: async (name: string) => {
+      const root = await session();
+      return Boolean(await host.root((ctx) => root.removeSecret({ name }, ctx)));
     },
     label: async (name: string, text: string) => {
       const root = await session();

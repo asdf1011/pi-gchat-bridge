@@ -54,7 +54,11 @@ export interface CommandOption {
 export interface FormField {
   id: string;
   label: string;
-  kind: "select" | "text";
+  /**
+   * `secret` is a text field that is never echoed: a renderer must mask it and must not fill it in
+   * from a previous answer. The value travels once, on submit.
+   */
+  kind: "select" | "text" | "secret";
   value?: string;
   options?: CommandOption[];
   /** Shown under the field: units, a range, a reason. */
@@ -105,6 +109,15 @@ export interface CommandSubject {
    * make sense on a thread are the ones it withholds.
    */
   surface?: string;
+  /**
+   * Who is asking, for the commands gated on a person rather than a surface.
+   *
+   * Set by a surface that authenticated its reader (a Chat display name, a web identity header).
+   * Absent means "cannot say", which refuses the gated commands rather than allowing them.
+   */
+  actor?: string;
+  /** True when `actor` may touch the secret store. Computed where identity is known. */
+  secretAllowed?: boolean;
 }
 
 const text = (body: string, goto?: number): CommandResponse => ({ kind: "text", text: body, ...(goto === undefined ? {} : { goto }) });
@@ -121,15 +134,7 @@ const HELP: readonly { command: string; about: string; surfaces?: readonly strin
   { command: "/resume <id>", about: "carry on in one of them", surfaces: ["gchat"] },
   { command: "/new", about: "start a fresh conversation here" },
   { command: "/name <label>", about: "rename this conversation" },
-  {
-    command: "/secret",
-    about: "store a key for a tool, without it reaching the model",
-    // Chat only, and deliberately: it writes a deployment-local file, and the process that holds
-    // that file is the Chat adapter (the store is seeded into the redaction registry there). A
-    // browser tab is also the wrong place to type a key. Named rather than omitted, so the absence
-    // is a decision a reader can see instead of drift they have to find.
-    surfaces: ["gchat"],
-  },
+  { command: "/secret", about: "store a key for a tool, without it reaching the model" },
   { command: "/compact [instructions]", about: "summarise the history now" },
   { command: "/abort", about: "stop whatever is running" },
   { command: "/help", about: "this list" },
@@ -380,13 +385,57 @@ export async function runCommand(
   }
 
   if (command === "/secret") {
-    // A surface that offers it must implement it: the store lives where the file does, and this
-    // module has no business holding one. Said plainly rather than silently doing nothing, because a
-    // command that answers "ok" without storing anything is worse than one that says it cannot.
-    return text(
-      "Secrets are stored by the Chat adapter, next to the deployment's files. As a value is exactly " +
-        "what must not travel, this surface does not offer it — use `/secret` in Chat.",
-    );
+    // Permission is per person, not per surface: one store, one allow-list, so a surface that can
+    // authenticate its reader can offer this. A surface that cannot says so by leaving
+    // `secretAllowed` unset, which reads as a refusal here.
+    if (subject.secretAllowed !== true) return text("You are not allowed to use `/secret` here.");
+    const verb = (rest[0] ?? "").toLowerCase();
+    const name = (rest[1] ?? values.name ?? "").trim().toUpperCase();
+
+    // A form submitted: the value arrives once, is written straight through, and is never returned.
+    if (values.value !== undefined && values.name) {
+      const stored = await seam.setSecret(values.name.trim().toUpperCase(), values.value, subject.actor ?? "unknown");
+      if ("error" in stored) return text(`Not stored: ${stored.error}`);
+      return text(`Stored ${values.name.trim().toUpperCase()}. The value is not shown again.`);
+    }
+    if (verb === "set" || verb === "add") {
+      if (!name) return text("Which secret? `/secret set OPENAI_API_KEY`.");
+      return {
+        kind: "form",
+        prompt: `Value for ${name}`,
+        command: "/secret",
+        submit: "Store",
+        fields: [
+          { id: "name", label: "Name", kind: "text", value: name },
+          {
+            id: "value",
+            label: "Value",
+            kind: "secret",
+            hint: "Stored on the bridge. Never sent to the model, and never shown again.",
+          },
+        ],
+      };
+    }
+    if (verb === "remove" || verb === "delete") {
+      if (!name) return text("Which secret? `/secret remove NAME`.");
+      const removed = await seam.removeSecret(name);
+      return text(removed ? `Removed ${name}.` : `There is no secret called ${name}.`);
+    }
+    const stored = await seam.secrets();
+    return {
+      kind: "list",
+      title: "Secrets",
+      empty: "Nothing stored. `/secret set NAME` adds one.",
+      rows: [
+        ...stored.map((secret) => ({
+          label: secret.name,
+          ...(secret.addedBy === undefined ? {} : { detail: `added by ${secret.addedBy}` }),
+          command: `/secret remove ${secret.name}`,
+        })),
+        // Values are never readable, so the list says so once rather than looking incomplete.
+        { label: "Values are never shown", detail: "there is no read that returns one" },
+      ],
+    };
   }
 
   if (command === "/compact") {

@@ -78,6 +78,10 @@ const server = http.createServer((req, res) => {
       const handled = await handleWebRequest(req, res, url, {
         seam,
         model,
+        // Read here rather than passed down: this process is the one that identifies the reader, so
+        // it is the one that can decide whether the gated commands are theirs.
+        secretUsers: (process.env.SECRET_USERS ?? "").split(",").map((entry) => entry.trim()).filter(Boolean),
+        allowedUsers: (process.env.ALLOWED_USERS ?? "").split(",").map((entry) => entry.trim()).filter(Boolean),
         ...(token ? { token } : {}),
         ...(artifactsBaseUrl ? { artifactsBaseUrl } : {}),
         ...(artifactsDir === ""

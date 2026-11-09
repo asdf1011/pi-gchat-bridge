@@ -423,6 +423,19 @@ export const SessionContract = remote("pi-bridge.session", {
         /** Where the host is running: storage path, working directory, start time. */
         info: method(Type.Object({}), HostInfoSchema),
         /**
+         * Secret *names*, never values.
+         *
+         * There is deliberately no operation that returns a value: an adapter may write one and can
+         * never read one, so a compromised or buggy surface cannot exfiltrate what it was trusted to
+         * enter. `set` carries the value once, on the way in.
+         */
+        secrets: method(Type.Object({}), Type.Array(Type.Object({ name: Type.String(), addedBy: Type.Optional(Type.String()) }))),
+        setSecret: method(
+          Type.Object({ name: Type.String(), value: Type.String(), addedBy: Type.String() }),
+          Type.Object({ ok: Type.Optional(Type.Boolean()), error: Type.Optional(Type.String()) }),
+        ),
+        removeSecret: method(Type.Object({ name: Type.String() }), Type.Boolean()),
+        /**
          * Wait for a submission to settle.
          *
          * Session-level, not conversation-level: the id is enough — that is what makes it durable

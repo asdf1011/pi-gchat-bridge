@@ -1409,6 +1409,13 @@ function renderCommand(shape) {
           if (option.selected || option.id === field.value) choice.selected = true;
           control.append(choice);
         }
+      } else if (field.kind === 'secret') {
+        // Masked, never prefilled, and never re-rendered from a previous answer: the value exists
+        // between the keystroke and the POST and nowhere else on this page.
+        control = document.createElement('input');
+        control.type = 'password';
+        control.autocomplete = 'new-password';
+        control.value = '';
       } else {
         control = document.createElement('input');
         control.type = 'text';

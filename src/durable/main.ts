@@ -149,6 +149,9 @@ async function main(): Promise<void> {
     // it forever. This is the cap the SDK bridge had as `redirect()`; see
     // `durable/steer-watch.ts`. `BRIDGE_STEER_WAIT_MS`, 10s unless set.
     steerWaitMs: config.steerWaitMs,
+    // The store the redaction registry is seeded from: the same file, so a secret added from a surface
+    // is a secret the host can redact (after a restart — see the note in `chat-host.ts`).
+    secrets,
     onObserveError: (error) => logger.warn(`[artifacts] observation failed: ${String(error)}`),
     // A turn exists when a submission is accepted, and the host is the thing that accepted it. The
     // feed wakes the long poll; the adapter does not have to announce what the host just did.
@@ -317,6 +320,8 @@ async function main(): Promise<void> {
             (await handleWebRequest(req, res, url, {
               seam: hostSeam,
               model: defaultModel,
+              secretUsers: config.secretUsers,
+              allowedUsers: config.allowedUsers,
               ...(config.webToken ? { token: config.webToken } : {}),
               ...(config.artifactsBaseUrl ? { artifactsBaseUrl: config.artifactsBaseUrl } : {}),
               // Where a comment's file lives, for the text the model receives:

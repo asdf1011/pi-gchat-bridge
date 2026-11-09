@@ -306,22 +306,59 @@ test("/resume is withheld from a surface that opens conversations by id", async 
   assert.ok(chatHelp.rows.some((row) => row.label.startsWith("/resume")));
 });
 
-test("/secret is named, and only where it can actually store anything", async () => {
-  // The command set should not drift by omission: every command Chat has is either offered here or
-  // explicitly withheld, with the reason in the list a reader sees. `/secret` is withheld because the
-  // store is a deployment-local file held by the Chat adapter, and the value is the one thing that
-  // must never travel.
-  const { seam } = fakeSeam();
-  const chat = await runCommand(seam, { ...subject, surface: "gchat" }, { text: "/help" });
-  assert.ok(chat.kind === "list");
-  assert.ok(chat.rows.some((row) => row.label.startsWith("/secret")), "Chat offers it");
 
-  const web = await runCommand(seam, { ...subject, surface: "webui" }, { text: "/help" });
-  assert.ok(web.kind === "list");
-  assert.ok(!web.rows.some((row) => row.label.startsWith("/secret")), "and this surface does not");
+test("/secret is offered where identity is known, and lists names only", async () => {
+  // The store is one file and the allow-list is one list, so this is a per-person refusal rather than
+  // a per-surface omission: a surface that can authenticate its reader can offer it.
+  const stored: { name: string; value: string; addedBy: string }[] = [];
+  const { seam } = fakeSeam({
+    secrets: async () => stored.map((secret) => ({ name: secret.name, addedBy: secret.addedBy })),
+    setSecret: async (name: string, value: string, addedBy: string) => {
+      stored.push({ name, value, addedBy });
+      return { ok: true as const };
+    },
+    removeSecret: async (name: string) => {
+      const at = stored.findIndex((secret) => secret.name === name);
+      if (at === -1) return false;
+      stored.splice(at, 1);
+      return true;
+    },
+  });
+  const someone = { ...subject, surface: "webui", actor: "owner@example.com", secretAllowed: true };
 
-  // Asking anyway says where it lives rather than pretending or failing obscurely.
-  const refused = await runCommand(seam, { ...subject, surface: "webui" }, { text: "/secret" });
+  // `set NAME` asks for the value, in a field that is a secret — masked, never prefilled.
+  const form = await runCommand(seam, someone, { text: "/secret set openai_api_key" });
+  assert.equal(form.kind, "form");
+  assert.ok(form.kind === "form");
+  const value = form.fields.find((field) => field.id === "value")!;
+  assert.equal(value.kind, "secret");
+  assert.equal(value.value, undefined, "nothing is echoed back into the field");
+
+  // Submitting stores it once, says so, and never repeats the value.
+  const stored_ = await runCommand(seam, someone, {
+    text: "/secret",
+    values: { name: "OPENAI_API_KEY", value: "sk-do-not-print" },
+  });
+  assert.equal(stored_.kind, "text");
+  assert.match(stored_.kind === "text" ? stored_.text : "", /Stored OPENAI_API_KEY/);
+  assert.ok(!(stored_.kind === "text" ? stored_.text : "").includes("sk-do-not-print"), "the value is not shown");
+  assert.deepEqual(stored, [{ name: "OPENAI_API_KEY", value: "sk-do-not-print", addedBy: "owner@example.com" }]);
+
+  // Listing gives names, and one line saying values are not available at all.
+  const list = await runCommand(seam, someone, { text: "/secret" });
+  assert.ok(list.kind === "list");
+  assert.ok(list.rows.some((row) => row.label === "OPENAI_API_KEY" && row.command === "/secret remove OPENAI_API_KEY"));
+  assert.ok(list.rows.some((row) => /never shown/.test(row.label)), "and says so, rather than looking incomplete");
+
+  const removed = await runCommand(seam, someone, { text: "/secret remove OPENAI_API_KEY" });
+  assert.match(removed.kind === "text" ? removed.text : "", /Removed/);
+});
+
+test("a reader whose identity is unknown is refused, not trusted", async () => {
+  const { seam, calls } = fakeSeam();
+  const anonymous = { ...subject, surface: "webui" };
+  const refused = await runCommand(seam, anonymous, { text: "/secret" });
   assert.equal(refused.kind, "text");
-  assert.match(refused.kind === "text" ? refused.text : "", /Chat adapter/);
+  assert.match(refused.kind === "text" ? refused.text : "", /not allowed/);
+  assert.equal((calls as { setSecret?: unknown }).setSecret, undefined, "nothing reached the store");
 });

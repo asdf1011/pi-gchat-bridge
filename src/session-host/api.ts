@@ -644,6 +644,30 @@ export interface SessionHost {
   abort(conversationId: number, options?: { signal?: AbortSignal }): Promise<boolean>;
 
   /**
+   * The names in the deployment's secret store. Never the values.
+   *
+   * Host work because the store is a file beside the database, and the same file seeds the redaction
+   * registry — so the host is the thing that can read it and the thing that must not leak it.
+   */
+  secrets(options?: { signal?: AbortSignal }): Promise<readonly { name: string; addedBy?: string }[]>;
+
+  /**
+   * Store a secret.
+   *
+   * The value crosses this boundary once, on the way in, and is never returned by anything: the seam
+   * has no read that yields a value, so an adapter cannot leak what it can only write.
+   */
+  setSecret(
+    name: string,
+    value: string,
+    addedBy: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<{ ok: true } | { error: string }>;
+
+  /** Delete a secret by name. True when something was removed. */
+  removeSecret(name: string, options?: { signal?: AbortSignal }): Promise<boolean>;
+
+  /**
    * Provider quotas, for `/quota`.
    *
    * Host work on purpose: it reads `models.json` (the providers' connection details and keys) and
