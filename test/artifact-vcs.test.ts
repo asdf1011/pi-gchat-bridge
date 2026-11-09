@@ -46,9 +46,28 @@ const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "artifact-vcs-"));
 after(() => fs.rmSync(scratch, { recursive: true, force: true }));
 
 let counter = 0;
-/** A fresh repository directory, unique per test. */
+/** A fresh, empty directory name, unique per test. */
 function freshDir(name: string): string {
   return path.join(scratch, `${name}-${++counter}`);
+}
+
+/**
+ * An initialised repository, unique per test.
+ *
+ * `jj git init --colocate` plus the initial commit costs about a second, and thirteen tests each
+ * paying it was most of this file's wall time. So it is built once and copied: a copy is a real,
+ * independent repository — `.jj` and `.git` are ordinary files — and `initArtifactRepo` on it is the
+ * documented no-op. The one test that is *about* initialisation uses `freshDir` and builds its own.
+ */
+let template: string | undefined;
+async function repo(name: string): Promise<string> {
+  if (!template) {
+    template = path.join(scratch, "template");
+    await initArtifactRepo(template);
+  }
+  const dir = freshDir(name);
+  fs.cpSync(template, dir, { recursive: true });
+  return dir;
 }
 
 function write(dir: string, file: string, body: string): void {
@@ -75,8 +94,7 @@ test("init creates a repository once, and again is a no-op", { skip }, async () 
 });
 
 test("a turn that changes nothing creates no revision", { skip }, async () => {
-  const dir = freshDir("noop");
-  await initArtifactRepo(dir);
+  const dir = await repo("noop");
   // Nothing written: the working copy is clean, so there is nothing to describe.
   assert.equal(await commitTurn(dir, 7), undefined);
 
@@ -88,8 +106,7 @@ test("a turn that changes nothing creates no revision", { skip }, async () => {
 });
 
 test("each changing turn becomes its own revision, described with the turn id", { skip }, async () => {
-  const dir = freshDir("turns");
-  await initArtifactRepo(dir);
+  const dir = await repo("turns");
 
   write(dir, "a.sh", "echo one\n");
   const first = await commitTurn(dir, 11);
@@ -109,8 +126,7 @@ test("each changing turn becomes its own revision, described with the turn id", 
 });
 
 test("annotate reports the change id that introduced each line", { skip }, async () => {
-  const dir = freshDir("annotate");
-  await initArtifactRepo(dir);
+  const dir = await repo("annotate");
 
   write(dir, "a.sh", "echo one\n");
   const created = await commitTurn(dir, 21);
@@ -129,8 +145,7 @@ test("annotate reports the change id that introduced each line", { skip }, async
 });
 
 test("a comment is visible while its line is unchanged, orphaned once it is not", { skip }, async () => {
-  const dir = freshDir("classify");
-  await initArtifactRepo(dir);
+  const dir = await repo("classify");
 
   write(dir, "a.sh", "echo one\necho two\n");
   const created = await commitTurn(dir, 31);
@@ -165,8 +180,7 @@ test("a comment whose line an agent rewrote is mapped to the section that replac
   // The whole point of a review comment is to change the line, so "the line is
   // gone" is the *successful* outcome. History knows where it went; this is that
   // answer, against a real repository.
-  const dir = freshDir("successor");
-  await initArtifactRepo(dir);
+  const dir = await repo("successor");
 
   write(dir, "a.sh", "echo one\necho two\necho three\n");
   const first = await commitTurn(dir, 51);
@@ -212,8 +226,7 @@ test("a comment whose line an agent rewrote is mapped to the section that replac
 });
 
 test("a comment mapped through a rename keeps its place in the new path", { skip }, async () => {
-  const dir = freshDir("successor-rename");
-  await initArtifactRepo(dir);
+  const dir = await repo("successor-rename");
 
   // Ten lines, not two: rename detection is a similarity judgement, and a two-line
   // file with one line changed is legitimately below the threshold — jj then reports
@@ -253,8 +266,7 @@ test("a comment mapped through a rename keeps its place in the new path", { skip
 });
 
 test("a deleted line orphans its comment rather than dropping it", { skip }, async () => {
-  const dir = freshDir("deleted");
-  await initArtifactRepo(dir);
+  const dir = await repo("deleted");
 
   write(dir, "a.sh", "echo one\necho two\necho three\n");
   const created = await commitTurn(dir, 41);
@@ -281,8 +293,7 @@ test("a deleted line orphans its comment rather than dropping it", { skip }, asy
 });
 
 test("a line sliding into a deleted line's position does not resurrect its comment", { skip }, async () => {
-  const dir = freshDir("slide");
-  await initArtifactRepo(dir);
+  const dir = await repo("slide");
 
   write(dir, "a.sh", "echo one\necho two\necho three\n");
   const created = await commitTurn(dir, 61);
@@ -317,8 +328,7 @@ test("a line sliding into a deleted line's position does not resurrect its comme
 });
 
 test("an explicitly resolved comment stays resolved even if its line is live", { skip }, async () => {
-  const dir = freshDir("resolved");
-  await initArtifactRepo(dir);
+  const dir = await repo("resolved");
   write(dir, "a.sh", "echo one\n");
   const created = await commitTurn(dir, 51);
   assert.ok(created);
@@ -346,8 +356,7 @@ test("a line pushed down by an insertion above it keeps its comment", { skip }, 
   // The claim the whole anchor design rests on. `line_number` alone would fail
   // here — the comment was written against line 2 and now lives at line 4 — so
   // the anchor names the revision's own line number instead.
-  const dir = freshDir("shift");
-  await initArtifactRepo(dir);
+  const dir = await repo("shift");
 
   write(dir, "a.sh", "echo one\necho two\n");
   const created = await commitTurn(dir, 71);
@@ -375,8 +384,7 @@ test("a line pushed down by an insertion above it keeps its comment", { skip }, 
 });
 
 test("the file at a revision is the file that revision held", { skip }, async () => {
-  const dir = freshDir("show");
-  await initArtifactRepo(dir);
+  const dir = await repo("show");
   write(dir, "a.sh", "echo one\n");
   const first = await commitTurn(dir, 81);
   write(dir, "a.sh", "echo one\necho two\n");
