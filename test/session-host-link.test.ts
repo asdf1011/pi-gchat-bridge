@@ -23,6 +23,7 @@ import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { BridgeHost } from "../src/durable/host.js";
 import { inProcessSessionHost } from "../src/session-host/inprocess.js";
 import { linkSessionHost, serveSessionHost } from "../src/session-host/link.js";
+import { runCommand } from "../src/adapter/command-surface.js";
 import { createHost } from "@earendil-works/chord";
 
 /** A host over in-memory storage with a model lookaside: no SQLite, no model. */
@@ -40,8 +41,11 @@ async function memoryHost(): Promise<BridgeHost> {
     // Only the thinking-level lookup and the model list use this.
     modelRuntime: {
       getModel: () => undefined,
+      // One model, so `/model` can be applied as well as listed: the command surface refuses a model
+      // the host does not have, which is the correct refusal and a useless fixture if the list is
+      // empty.
       getModels: () => [],
-      getAllAvailable: async () => [],
+      getAllAvailable: async () => [{ provider: "anthropic", id: "claude-sonnet-4", name: "Claude Sonnet 4" }],
     } as unknown as ModelRuntime,
     cwd: "/tmp",
     dbPath: ":memory:",
@@ -227,4 +231,31 @@ test("abort over the link is idempotent, and gone is false", async () => {
   assert.equal(await linked.abort(created.conversationId), true);
   assert.equal(await linked.abort(created.conversationId), true, "twice is the same as once");
   assert.equal(await linked.abort(999_999), false);
+});
+
+test("a command surface over the link is the deployment that was failing", async () => {
+  // The bug this guards: `/status` worked against an in-process seam and answered "state is not
+  // published over the link yet" in the deployment that runs `BRIDGE_WEB_ENGINE=link`. A command is
+  // an adapter calling the seam, so it has to be exercised over the wire, not only in memory.
+  const { linked } = await bothEnds();
+  const created = await linked.getOrCreate("threads/cmd", { model: { provider: "deepseek", modelId: "flash" } });
+  const subject = { conversationId: created.conversationId, name: "threads/cmd" };
+
+  const status = await runCommand(linked, subject, { text: "/status" });
+  assert.equal(status.kind, "text");
+  assert.match(status.kind === "text" ? status.text : "", /deepseek\/flash/);
+
+  const form = await runCommand(linked, subject, { text: "/model" });
+  assert.equal(form.kind, "form");
+  assert.ok(form.kind === "form");
+  assert.ok(form.fields.some((field) => field.id === "thinking"), "the thinking level travels with the model");
+
+  // And applying it moves the host's own binding, which is the read-back that proves the write
+  // crossed rather than being answered by the client.
+  const applied = await runCommand(linked, subject, {
+    text: "/model",
+    values: { model: "anthropic/claude-sonnet-4", thinking: "high" },
+  });
+  assert.equal(applied.kind, "text");
+  assert.equal((await linked.resolve("threads/cmd"))?.model, "anthropic/claude-sonnet-4");
 });
