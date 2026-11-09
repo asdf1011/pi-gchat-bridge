@@ -698,6 +698,11 @@ async function main(): Promise<void> {
                 // poll beside it can run without the two disagreeing.
                 const stop = new AbortController();
                 let wasBusy: boolean | undefined;
+                // A prompt that never becomes a turn: nothing else will end this watcher, so a
+                // deadline does. Without it a historical prompt — a catch-up after a bridge was away
+                // — would poll once every 25 seconds for ever.
+                let sawBusy = false;
+                const openedAt = Date.now();
                 void (async () => {
                   let backoff = 1_000;
                   while (!stop.signal.aborted) {
@@ -718,9 +723,15 @@ async function main(): Promise<void> {
                       if (view) {
                         // Settle is a transition, not a state: an idle conversation stays idle, and
                         // reporting every idle answer would re-read the transcript forever.
+                        if (view.busy) sawBusy = true;
                         if (wasBusy === true && !view.busy) handlers.settled();
                         wasBusy = view.busy;
                         handlers.frame(view);
+                      }
+                      if (!sawBusy && Date.now() - openedAt > 30_000) {
+                        logger.info(`[paint] conversation ${conversationId}: no turn started — stopping the watch`);
+                        handlers.settled();
+                        return;
                       }
                       backoff = 1_000;
                     } catch (error) {

@@ -503,7 +503,14 @@ test("the CLI's watch follows by long poll and remembers its position", async ()
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     assert.ok(lines.some((line) => line.includes("[60] assistant:gchat: the answer")), lines.join("\n"));
-    assert.deepEqual((await loadState(file)).conversations["1"], { cursor: 60 });
+    // The position is saved after the line is printed, so seeing the line does not mean the write has
+    // landed — wait for it rather than racing the client's own ordering.
+    let saved = (await loadState(file)).conversations["1"];
+    for (let i = 0; i < 100 && saved?.cursor !== 60; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      saved = (await loadState(file)).conversations["1"];
+    }
+    assert.deepEqual(saved, { cursor: 60 });
   } finally {
     stop.abort();
     await running?.catch(() => {});

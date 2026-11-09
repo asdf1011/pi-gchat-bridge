@@ -462,9 +462,10 @@ test("a running turn opens one observer, and its settle edge posts the answer", 
   await painter.close();
 });
 
-test("a prompt that is merely being caught up on opens no observer", async () => {
-  // The `busy` check is the whole distinction: replaying a settled turn must not create a
-  // placeholder for a turn that ended before the bridge looked.
+test("a prompt that is merely being caught up on opens no placeholder", async () => {
+  // Replaying a settled turn must not create a placeholder for a turn that ended before the bridge
+  // looked. It *does* subscribe — that is how it learns the turn is not running — but the placeholder
+  // only opens on a frame that says busy, and a settled turn never sends one.
   const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
   ledger.adopt(10, "new");
   let observers = 0;
@@ -487,7 +488,9 @@ test("a prompt that is merely being caught up on opens no observer", async () =>
     { conversationId: 1, entryId: 11, role: "user", text: "old prompt", origin: "gchat" },
     { conversationId: 1, entryId: 12, role: "assistant", text: "old answer", origin: "gchat" },
   ]);
-  assert.equal(observers, 0, "no placeholder for history");
+  // It subscribes — that is how it learns the turn is over — but a settled turn never sends a
+  // running frame, so no placeholder is opened and the answer is posted plainly.
+  assert.equal(observers, 1, "one watch, opened by the prompt");
   await painter.close();
 });
 
@@ -525,36 +528,40 @@ test("a prompt is quoted once, not by the next answer as well", async () => {
   await painter.close();
 });
 
-test("a prompt that arrives before its turn starts still gets a placeholder", async () => {
-  // The race the second `busy` check exists for: the prompt entry is committed first and the turn
-  // starts a moment later, so a delivery that lands in between sees an idle conversation. What that
-  // looks like from outside is a short answer arriving with no "thinking…" line above it.
+test("a prompt opens the watch, and the first busy frame opens the placeholder", async () => {
+  // The race the old double `busy` check papered over cannot happen any more: nothing is asked at
+  // prompt time. The subscription is opened, and the placeholder waits for a frame that says the turn
+  // is running — whether that frame arrives immediately or a moment later.
   const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
   ledger.adopt(10, "new");
   const fake = fakeSurface();
+  const frames: { frame(view: unknown): void; settled(): void }[] = [];
   let asked = 0;
-  let watches = 0;
   const painter = new Painter({
     surface: "gchat",
     ledger,
     owns: () => true,
     conversations: async () => [{ conversationId: 1 }],
     entriesSince: async () => [],
-    // Idle on the first look, running on the second — the gap between "typed" and "started".
     busy: async () => {
       asked += 1;
-      return asked > 1;
+      return false;
     },
-    // Subscribing is what a turn gets in this mode; the placeholder opens on its first frame.
-    watch: () => {
-      watches += 1;
+    watch: (_id, handlers) => {
+      frames.push(handlers);
       return { detach() {} };
     },
     surfaceClient: fake.surface,
   });
 
   await painter.ingest([{ conversationId: 1, entryId: 11, role: "user", text: "hi", origin: "gchat" }]);
-  assert.equal(asked, 2, "the question was asked again");
-  assert.equal(watches, 1, "and the turn is being watched for its frames");
+  assert.equal(asked, 0, "the view is not asked whether a turn is running");
+  assert.equal(frames.length, 1, "the watch is opened on the prompt alone");
+  assert.equal(fake.streams.length, 0, "and no placeholder yet");
+
+  // The turn starts: one frame, and the placeholder exists.
+  frames[0]!.frame({ busy: true, liveText: "…", tools: [] });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(fake.streams.length, 1, "the placeholder opens on the first running frame");
   await painter.close();
 });

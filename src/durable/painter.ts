@@ -398,35 +398,34 @@ export class Painter {
         // Another surface's prompt: the answer will quote it, and the answer is not in this batch.
         this.pendingPrompt.set(conversationId, { entryId: entry.entryId, text: entry.text });
       }
-      // A prompt means a turn. Only a turn *still running* deserves a placeholder: the `busy` check
-      // is what separates "someone just typed" from "a prompt we are catching up on".
+      // A prompt is a turn, and with a frame channel there is nothing to ask: whether it is *running*
+      // is answered by the subscription, first frame by first frame — a placeholder opens on the first
+      // frame that says busy, and a prompt that never gets one is a turn that never started. The
+      // `busy` question was the view being asked to tell the log apart from itself, and it cannot: an
+      // idle conversation and a turn that died look identical from outside.
       //
-      // The check is asked twice, and that is not belt-and-braces: the entry is written before the
-      // turn starts, so a delivery that lands in the gap between the two sees an idle conversation
-      // and skips the placeholder — which is what a short turn looks like from the outside, "the
-      // answer arrived without the thinking line". A prompt that arrives *now* belongs to a turn
-      // that starts within a few hundred milliseconds, so one short wait answers it properly.
-      // A failure and a `false` are not the same answer, and swallowing the difference is how "the
-      // turn is not running" becomes a silent lie: a seam that throws (a link that cannot reach its
-      // host, say) would look exactly like an idle conversation.
-      const ask = async (): Promise<boolean> => {
-        try {
-          return await this.deps.busy(conversationId);
-        } catch (error) {
-          this.log(`[paint] conversation ${conversationId}: busy check failed: ${(error as Error).message}`);
-          return false;
-        }
-      };
-      let running = await ask();
-      if (!running) {
-        await new Promise((resolve) => setTimeout(resolve, 400));
-        running = await ask();
-      }
-      if (running) await this.openTurn(conversationId);
-      else this.log(`[paint] conversation ${conversationId}: prompt ${entry.entryId} arrived with no turn running — no placeholder`);
+      // Without a frame channel (the in-process sink, which the extraction deletes) the placeholder
+      // has to be opened *now* or not at all, so the question stays there and only there.
+      if (this.deps.watch) await this.openTurn(conversationId);
+      else if (await this.askBusy(conversationId)) await this.openTurn(conversationId);
     }
     // Commentary, a prompt, or this surface's own words: accounted for, not painted.
     this.deps.ledger.advance(entry.entryId);
+  }
+
+  /**
+   * Is a turn running *now*? Only the in-process mode asks.
+   *
+   * A failure and a `false` are not the same answer, and swallowing the difference is how "not
+   * running" becomes a silent lie: a seam that throws would look exactly like an idle conversation.
+   */
+  private async askBusy(conversationId: number): Promise<boolean> {
+    try {
+      return await this.deps.busy(conversationId);
+    } catch (error) {
+      this.log(`[paint] conversation ${conversationId}: busy check failed: ${(error as Error).message}`);
+      return false;
+    }
   }
 
   /** Take a position at the newest entry anywhere, and say so. */
