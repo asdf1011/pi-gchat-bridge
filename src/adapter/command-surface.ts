@@ -50,6 +50,11 @@ export interface FormField {
   options?: CommandOption[];
   /** Shown under the field: units, a range, a reason. */
   hint?: string;
+  /**
+   * True when changing this field should re-ask the command with `preview`, because the options of
+   * another field depend on it.
+   */
+  requery?: boolean;
 }
 
 export type CommandResponse =
@@ -69,6 +74,15 @@ export interface CommandInput {
    * answered are different things, and the second one is untrusted.
    */
   values?: Record<string, string>;
+  /**
+   * Answer the form again with these values, applying nothing.
+   *
+   * What a surface sends when a dropdown changes and the *next* question depends on it — the thinking
+   * levels of the model just picked. A re-ask rather than the surface knowing the dependency: the
+   * command decides what a changed value means, and a surface that had to know would be
+   * reimplementing the command.
+   */
+  preview?: boolean;
 }
 
 /** What a command needs to know about the conversation it was typed in. */
@@ -117,8 +131,13 @@ function allLevels(models: readonly ModelInfo[]): string[] {
  * — a form cannot re-render itself when a dropdown changes, and inventing a round trip for that
  * would put the state machine back.
  */
-function modelForm(models: readonly ModelInfo[], current: { model: string; thinking?: string }): CommandResponse {
-  const levels = allLevels(models);
+function modelForm(
+  models: readonly ModelInfo[],
+  current: { model: string; thinking?: string },
+  /** The levels to offer: the chosen model's, when the form knows which model that is. */
+  levels: readonly string[] = allLevels(models),
+): CommandResponse {
+  const offered = levels.length > 0 ? levels : allLevels(models);
   return {
     kind: "form",
     prompt: "Model and thinking level",
@@ -130,6 +149,8 @@ function modelForm(models: readonly ModelInfo[], current: { model: string; think
         label: "Model",
         kind: "select",
         value: current.model,
+        // The thinking options below are this model's, so changing the model asks the command again.
+        requery: true,
         options: models.map((model) => ({
           id: modelKey(model),
           label: model.label,
@@ -142,8 +163,8 @@ function modelForm(models: readonly ModelInfo[], current: { model: string; think
         label: "Thinking",
         kind: "select",
         ...(current.thinking === undefined ? {} : { value: current.thinking }),
-        options: levels.map((level) => ({ id: level, label: level, selected: level === current.thinking })),
-        hint: "Levels a model does not support are refused with a list of the ones it has.",
+        options: offered.map((level) => ({ id: level, label: level, selected: level === current.thinking })),
+        hint: "A level the model does not have is refused, with the ones it does.",
       },
     ],
   };
@@ -200,12 +221,15 @@ export async function runCommand(
     // A form submitted, or a name typed: `values.model` is the dropdown, `/model flash` is the
     // argument. Both end here, and neither is trusted to name a model that exists.
     const wanted = values.model ?? rest[0];
+    const state = await seam.state(subject.conversationId);
+    const shown = state?.model ?? "";
     if (!wanted) {
-      const state = await seam.state(subject.conversationId);
-      return modelForm(models, {
-        model: state?.model ?? "",
-        ...(state?.thinkingLevel === undefined ? {} : { thinking: state.thinkingLevel }),
-      });
+      const current = models.find((model) => modelKey(model) === shown);
+      return modelForm(
+        models,
+        { model: shown, ...(state?.thinkingLevel === undefined ? {} : { thinking: state.thinkingLevel }) },
+        current?.thinkingLevels,
+      );
     }
     const requested = models.filter((model) => modelKey(model) === wanted || model.id === wanted || model.label === wanted);
     if (requested.length === 0) {
@@ -223,6 +247,19 @@ export async function runCommand(
       };
     }
     const chosen = requested[0]!;
+
+    if (input.preview === true) {
+      // A dropdown changed and the answer depends on it: answer the form again with this model's
+      // levels, applying nothing. A level that the new model does not have is replaced by one it
+      // does, rather than left selected and refused later.
+      const levels = chosen.thinkingLevels ?? [];
+      const wantedThinking = values.thinking ?? state?.thinkingLevel;
+      const thinking =
+        wantedThinking !== undefined && (levels.length === 0 || levels.includes(wantedThinking))
+          ? wantedThinking
+          : levels[0];
+      return modelForm(models, { model: modelKey(chosen), ...(thinking === undefined ? {} : { thinking }) }, levels);
+    }
     const thinking = values.thinking ?? (rest.length > 1 ? rest.slice(1).join(" ") : undefined);
     const levels = chosen.thinkingLevels ?? [];
     if (thinking !== undefined && levels.length > 0 && !levels.includes(thinking)) {

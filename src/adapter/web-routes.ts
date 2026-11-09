@@ -448,9 +448,11 @@ export async function handleWebRequest(
     }
     let text = "";
     let values: Record<string, string> = {};
+    let preview = false;
     try {
-      const parsed = JSON.parse(body) as { text?: unknown; values?: unknown };
+      const parsed = JSON.parse(body) as { text?: unknown; values?: unknown; preview?: unknown };
       text = typeof parsed.text === "string" ? parsed.text : "";
+      preview = parsed.preview === true;
       if (parsed.values && typeof parsed.values === "object") {
         // A form's answer, as strings. Anything else in there is not a value and is dropped rather
         // than passed on: the executor validates what it needs, so this only has to be the right
@@ -475,7 +477,7 @@ export async function handleWebRequest(
     }
     let response;
     try {
-      response = await runCommand(seam, { conversationId, name: named.name }, { text, values });
+      response = await runCommand(seam, { conversationId, name: named.name }, { text, values, preview });
     } catch (error) {
       // A command failing is data, not a broken route: the surface shows the reason the same way it
       // shows any other text response.

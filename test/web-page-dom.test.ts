@@ -1503,3 +1503,62 @@ test("a form asks several things at once and sends them together", async () => {
     h?.close();
   }
 });
+
+test("changing the model asks again, so the levels are that model's", async () => {
+  // The web form and the Chat card should behave the same way here: pick a model, and the thinking
+  // select lists only what that model has. The page re-asks with `preview` rather than knowing the
+  // dependency itself.
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      pathname: "/7/",
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+      commandResponse: {
+        kind: "form",
+        prompt: "Model and thinking level",
+        command: "/model",
+        fields: [
+          {
+            id: "model",
+            label: "Model",
+            kind: "select",
+            value: "deepseek/deepseek-chat",
+            requery: true,
+            options: [
+              { id: "deepseek/deepseek-chat", label: "deepseek-chat", selected: true },
+              { id: "anthropic/claude-sonnet-4", label: "Claude Sonnet 4" },
+            ],
+          },
+          {
+            id: "thinking",
+            label: "Thinking",
+            kind: "select",
+            value: "medium",
+            options: [{ id: "off", label: "off" }, { id: "medium", label: "medium", selected: true }],
+          },
+        ],
+      },
+    });
+    await h.settle();
+    const doc = h.dom.window.document;
+    const box = doc.getElementById("text") as HTMLTextAreaElement;
+    box.value = "/model";
+    doc.getElementById("send")!.dispatchEvent(new h.dom.window.Event("submit", { cancelable: true }));
+    await h.settle();
+
+    const model = doc.querySelector("#command-body select") as HTMLSelectElement;
+    model.value = "anthropic/claude-sonnet-4";
+    model.dispatchEvent(new h.dom.window.Event("change", { bubbles: true }));
+    await h.settle();
+
+    const posted = h.requests.filter((request) => request.url.includes("/commands"));
+    const last = JSON.parse(posted[posted.length - 1]!.body ?? "{}");
+    assert.deepEqual(last, {
+      text: "/model",
+      values: { model: "anthropic/claude-sonnet-4", thinking: "medium" },
+      preview: true,
+    });
+  } finally {
+    h?.close();
+  }
+});

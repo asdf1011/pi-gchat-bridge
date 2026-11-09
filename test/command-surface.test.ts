@@ -120,10 +120,11 @@ test("/model with no arguments is one form with both choices", async () => {
   );
 
   const thinkingField = byId.get("thinking")!;
-  // The union, because a form cannot re-render when a dropdown changes: the choice is checked on
-  // submit instead, and "high" is only offered by one of the two models.
-  assert.deepEqual(thinkingField.options?.map((option) => option.id), ["off", "low", "medium", "high"]);
+  // The current model's levels, not the union: changing the model re-asks the command (see `requery`
+  // below), so the second question is answered for the model actually chosen.
+  assert.deepEqual(thinkingField.options?.map((option) => option.id), ["off", "low", "medium"]);
   assert.equal(thinkingField.value, "medium");
+  assert.equal(modelField.requery, true, "changing the model asks again");
 });
 
 test("submitting the form applies both answers in one call", async () => {
@@ -252,4 +253,28 @@ test("/quota is a list of providers, with what each one has left", async () => {
   assert.match(response.rows[0]!.detail ?? "", /12\.40 CNY/);
   assert.match(response.rows[0]!.detail ?? "", /top_up/, "a paid provider says where to add credit");
   assert.match(response.rows[1]!.detail ?? "", /no quota API/, "and an unqueried one says why");
+});
+
+test("a preview re-asks the form for another model's levels, and applies nothing", async () => {
+  // What a surface sends when the model dropdown changes. Without it the thinking select would have to
+  // offer every level any model has, and refuse the impossible ones only on submit.
+  const { seam, calls } = fakeSeam();
+  const response = await runCommand(seam, subject, {
+    text: "/model",
+    values: { model: "anthropic/claude-sonnet-4", thinking: "medium" },
+    preview: true,
+  });
+  assert.equal(response.kind, "form");
+  assert.ok(response.kind === "form");
+  const thinking = response.fields.find((field) => field.id === "thinking")!;
+  assert.deepEqual(thinking.options?.map((option) => option.id), ["off", "low", "high"]);
+  // "medium" is not a level that model has, so the form shows one it does — and does not apply it.
+  assert.equal(thinking.value, "off");
+  assert.equal(calls.setModel.length, 0, "a preview changes nothing");
+});
+
+test("a preview for a model that does not exist is the same list as typing it", async () => {
+  const { seam } = fakeSeam();
+  const response = await runCommand(seam, subject, { text: "/model", values: { model: "gpt-9" }, preview: true });
+  assert.equal(response.kind, "list");
 });

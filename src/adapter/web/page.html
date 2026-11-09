@@ -1308,14 +1308,14 @@ function commandText(tag, text, className) {
  * `values` is a form's or a choice's answer, keyed by field id. The command text stays the same —
  * what was asked and what was chosen are different things, and the second one is untrusted.
  */
-async function runCommandLine(text, values) {
+async function runCommandLine(text, values, preview) {
   if (!current) return;
   let shape;
   try {
     const response = await fetch(rel('api/c/' + current + '/commands'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, ...(values ? { values } : {}) }),
+      body: JSON.stringify({ text, ...(values ? { values } : {}), ...(preview ? { preview: true } : {}) }),
     });
     shape = await response.json();
   } catch {
@@ -1411,6 +1411,16 @@ function renderCommand(shape) {
       label.append(control);
       controls.set(field.id, control);
       form.append(label);
+      // A field whose value another field's options depend on — the model, whose levels the thinking
+      // select lists. Changing it re-asks the command with a preview, so the command decides what the
+      // change means instead of this page knowing.
+      if (field.requery && field.kind === 'select') {
+        control.onchange = () => {
+          const values = {};
+          for (const [id, each] of controls) values[id] = each.value;
+          void runCommandLine(shape.command, values, true);
+        };
+      }
     }
     const actions = document.createElement('div');
     actions.className = 'actions';
