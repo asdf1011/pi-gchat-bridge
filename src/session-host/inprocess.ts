@@ -89,6 +89,14 @@ export interface InProcessOptions {
   /** Told when a filesystem observation fails. Observing is best-effort. */
   onObserveError?: (error: unknown) => void;
   /**
+   * Told that a submission was accepted — which is the moment a turn exists.
+   *
+   * Here rather than announced by every adapter, because the acceptance *is* this method returning:
+   * the adapter would be reporting something the host just did, and an adapter in another process
+   * would need a seam operation to say it. One caller, one place, no wire.
+   */
+  onTurnStarted?: (conversationId: number) => void;
+  /**
    * The jj repository tracking one conversation's artifacts, if any.
    *
    * Supplied by the caller rather than derived here: where artifacts live is a
@@ -611,6 +619,13 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
         await host
           .recordOrigin(conversationId, submission.id as unknown as number, request.origin)
           .catch(() => {});
+      }
+      // The turn exists now: whoever is listening for that (the activity feed, and through it a
+      // long poll) hears it here rather than from whatever surface asked.
+      try {
+        options.onTurnStarted?.(conversationId);
+      } catch {
+        // A listener that throws is the listener's problem: the turn is already accepted.
       }
       // Remember that the conversation was used, and what it opened with, for the
       // recent list: a title is a model call away, and the list needs a name now.

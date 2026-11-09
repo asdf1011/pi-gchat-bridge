@@ -163,6 +163,9 @@ async function main(): Promise<void> {
     // `durable/steer-watch.ts`. `BRIDGE_STEER_WAIT_MS`, 10s unless set.
     steerWaitMs: config.steerWaitMs,
     onObserveError: (error) => logger.warn(`[artifacts] observation failed: ${String(error)}`),
+    // A turn exists when a submission is accepted, and the host is the thing that accepted it. The
+    // feed wakes the long poll; the adapter does not have to announce what the host just did.
+    onTurnStarted: (conversationId) => activity.started(conversationId),
   });
 
   // The Chat adapter's view of the seam.
@@ -523,7 +526,6 @@ async function main(): Promise<void> {
     router,
     state,
     secrets,
-    activity,
   });
   await receiver.start(handler);
   logger.info("[bridge] running on the durable engine. Ctrl+C to stop.");

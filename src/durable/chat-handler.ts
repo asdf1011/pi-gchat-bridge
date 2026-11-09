@@ -30,8 +30,6 @@ export interface ChatHandlerOptions {
   router: DurableRouter;
   state: StateStore;
   secrets: SecretStore;
-  /** The host's activity feed: a turn is announced where the delivery poll can hear it. */
-  activity: { started(conversationId: number): void };
 }
 
 export type ChatHandler = (incoming: IncomingMessage) => Promise<HandleResult>;
@@ -114,7 +112,6 @@ export function chatHandler(options: ChatHandlerOptions): ChatHandler {
         text,
         images,
       });
-      options.activity.started(delivered.conversationId);
       // No wake: activity carries this now, and the painter hears it from the server like any
       // other subscriber.
 
