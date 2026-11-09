@@ -177,6 +177,8 @@ async function main(): Promise<void> {
   // at the moment a second process starts and Chat goes quiet.
   const chatEngine = process.env.BRIDGE_CHAT_ENGINE ?? "inprocess";
   const forked = chatEngine === "process";
+  /** Where the forked adapter listens; 0 unless it is forked. Read by the `/notify` forward. */
+  let chatPort = 0;
   let chatSeam: SessionHost = hostSeam;
   // `serveSessionHost` opens no socket: it is a chord host, and a deployment that never links pays
   // nothing but an object.
@@ -198,7 +200,7 @@ async function main(): Promise<void> {
   } else if (chatEngine === "process") {
     // The adapter in its own process. The child is forked from *this* process rather than the
     // supervisor because the IPC channel is the link: whoever accepts it must be the session host.
-    const chatPort = Number(process.env.BRIDGE_CHAT_PORT ?? 0);
+    chatPort = Number(process.env.BRIDGE_CHAT_PORT ?? 0);
     if (!chatPort) {
       logger.error("[bridge] BRIDGE_CHAT_ENGINE=process needs BRIDGE_CHAT_PORT");
       process.exit(1);
@@ -335,17 +337,35 @@ async function main(): Promise<void> {
           // The engine check is on purpose: this listener is the durable host's,
           // and only it holds a `router`/`seam` pair for the durable harness.
           if (forked && req.method === "POST" && url.pathname === "/notify") {
-            // It moved with the adapter, because it needs a Chat client and this process is not
-            // supposed to have one. Said plainly, and with where to look, because a silent 404 here
-            // is how scheduled notifications stopped once before.
-            res.writeHead(404, { "Content-Type": "application/json" });
-            res.end(
-              JSON.stringify({
-                ok: false,
-                error: "notify moved to the Chat adapter",
-                hint: `POST /notify on BRIDGE_CHAT_PORT (${process.env.BRIDGE_CHAT_PORT ?? "unset"})`,
-              }),
-            );
+            // Forwarded, not moved. The handler needs a Chat client and now lives in the adapter
+            // process, but the *address* is what several cron scripts already hold — one of them
+            // hardcoded — so keeping it is worth one hop. `cron/.env` and `watch-ns-delegation.sh`
+            // both point at this port, and a deploy should not be able to break scheduled
+            // notifications by moving a listener.
+            const body = await readBody(req, 1_000_000);
+            if (body === null) {
+              res.writeHead(413, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ ok: false, error: "request body too large" }));
+              return;
+            }
+            const forwarded = await fetch(`http://127.0.0.1:${chatPort}/notify`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                ...(req.headers.authorization ? { Authorization: req.headers.authorization } : {}),
+              },
+              body,
+            }).catch((error: unknown) => {
+              logger.error(`[bridge] /notify forward failed: ${(error as Error).message}`);
+              return undefined;
+            });
+            if (!forwarded) {
+              res.writeHead(502, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ ok: false, error: "the Chat adapter is not reachable" }));
+              return;
+            }
+            res.writeHead(forwarded.status, { "Content-Type": "application/json" });
+            res.end(await forwarded.text());
             return;
           }
           if (req.method === "POST" && url.pathname === "/notify") {
