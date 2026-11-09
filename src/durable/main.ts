@@ -34,6 +34,7 @@ import { defaultSettings } from "../adapter/commands.js";
 import { ActivityFeed } from "./activity.js";
 import { Painter } from "./painter.js";
 import { httpPoll, httpSnapshot } from "../adapter/poll-client.js";
+import { entriesAfter } from "./entries.js";
 import type { ProjectedView } from "../session-host/projection.js";
 import { chatTarget } from "../session-key.js";
 import { splitMessage } from "../stream.js";
@@ -639,7 +640,18 @@ async function main(): Promise<void> {
               lastActivityAt: binding.updatedAt ?? binding.createdAt,
             }));
         },
-        history: (conversationId, limit, offset) => seam.history(conversationId, { limit, offset }),
+        // The painter walks forward from its cursor, so this asks the seam the same question the
+        // protocol answers: entries after an id, bounded. The `entries` helper does the grouping
+        // (one entry per surface message) that the wire format already assumes.
+        entriesSince: async (conversationId, since, limit) => {
+          const window = await entriesAfter(
+            { history: (id, pageLimit, offset) => seam.history(id, { limit: pageLimit, offset }) },
+            conversationId,
+            since,
+            { pageSize: limit, maxPages: 1 },
+          );
+          return window.entries;
+        },
         busy: async (conversationId) => (await seam.snapshot(conversationId))?.busy === true,
         // The painting half, when the surface is not in-process: poll the snapshot while a turn
         // runs. Three updates a second is finer than the 250ms debounce the Chat placeholder already

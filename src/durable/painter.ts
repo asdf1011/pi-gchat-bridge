@@ -45,7 +45,6 @@
  *     mode. It is the residual polling §18 allows, and it never runs for a watched thread.
  */
 import type { EntryRef, MessageLike } from "./entries.js";
-import { entriesAfter } from "./entries.js";
 import type { Ledger } from "./ledger.js";
 
 import { logger } from "../logger.js";
@@ -114,7 +113,19 @@ export interface PainterDeps {
   /** The surface's address for a conversation, for logs. */
   address?(conversationId: number): string | undefined;
   conversations(): Promise<readonly { conversationId: number; lastActivityAt?: number }[]>;
-  history(conversationId: number, limit: number, offset: number): Promise<readonly MessageLike[] | undefined>;
+  /**
+   * Entries after `since`, oldest first, at most `limit` — the shape `GET /v1/…/entries?since=` serves.
+   *
+   * Deliberately not a paged transcript read: the painter walks *forward* from its cursor, and a
+   * backwards page (which the pane needs for "show earlier") would be a different call with a
+   * different meaning. Asking for what the protocol offers is what keeps the extracted bridge a
+   * change of wiring rather than a rewrite.
+   */
+  entriesSince(
+    conversationId: number,
+    since: number,
+    limit: number,
+  ): Promise<readonly { entryId: number; role: "user" | "assistant"; text: string; at?: number; origin?: string }[] | undefined>;
   /** Is a turn running in this conversation right now? */
   busy(conversationId: number): Promise<boolean>;
   surfaceClient: PaintSurface;
@@ -242,11 +253,24 @@ export class Painter {
     let frontier = Number.POSITIVE_INFINITY;
     for (const { conversationId } of owned) {
       try {
-        const window = await entriesAfter(this.deps, conversationId, this.deps.ledger.cursor, this.pages);
-        if (!window.reachedCursor && window.entries.length > 0) {
-          frontier = Math.min(frontier, Math.max(...window.entries.map((entry) => entry.entryId)) + 1);
+        const pageSize = this.deps.pageSize ?? 50;
+        const read = (await this.deps.entriesSince(conversationId, this.deps.ledger.cursor, pageSize)) ?? [];
+        // A page that came back full means there may be more, so nothing above its last id may be
+        // consumed yet: advancing past it would step over entries in this conversation that were cut
+        // short by the page budget.
+        if (read.length >= pageSize && read.length > 0) {
+          frontier = Math.min(frontier, Math.max(...read.map((entry) => entry.entryId)) + 1);
         }
-        batch.push(...window.entries);
+        batch.push(
+          ...read.map((entry) => ({
+            conversationId,
+            entryId: entry.entryId,
+            role: entry.role,
+            text: entry.text,
+            ...(entry.at === undefined ? {} : { at: entry.at }),
+            ...(entry.origin === undefined ? {} : { origin: entry.origin }),
+          })),
+        );
       } catch (error) {
         summary.failed += 1;
         this.log(`[paint] conversation ${conversationId}: ${(error as Error).message}`);
@@ -369,8 +393,9 @@ export class Painter {
   private async adoptAtHead(owned: readonly { conversationId: number }[]): Promise<void> {
     let newest = 0;
     for (const { conversationId } of owned) {
-      const window = await entriesAfter(this.deps, conversationId, 0, { pageSize: 1 }).catch(() => undefined);
-      if (window) newest = Math.max(newest, window.newest);
+      // The newest entry anywhere, which is where a first look starts.
+      const newestHere = (await this.deps.entriesSince(conversationId, 0, 1).catch(() => undefined)) ?? [];
+      for (const entry of newestHere) newest = Math.max(newest, entry.entryId);
     }
     this.deps.ledger.adopt(newest, this.deps.ledger.recovered ? "lost-position" : "new");
     await this.deps.ledger.save();

@@ -90,9 +90,9 @@ function painterFor(
     ledger,
     owns: options.owns ?? (() => true),
     conversations: async () => [{ conversationId }],
-    history: async (_id, limit, offset) => {
-      const end = Math.max(0, messages.length - offset);
-      return messages.slice(Math.max(0, end - limit), end);
+    entriesSince: async (_id: number, since: number, limit: number) => {
+      // Entries after a cursor, oldest first — what the protocol serves and the painter reads.
+      return messages.filter((message) => (message.entryId ?? 0) > since).slice(0, limit);
     },
     busy: async () => options.busy ?? false,
     surfaceClient: fake.surface,
@@ -196,9 +196,9 @@ test("the placeholder becomes the answer in place", async () => {
     ledger,
     owns: () => true,
     conversations: async () => [{ conversationId: 1 }],
-    history: async (_id, limit, offset) => {
-      const end = Math.max(0, messages.length - offset);
-      return messages.slice(Math.max(0, end - limit), end);
+    entriesSince: async (_id: number, since: number, limit: number) => {
+      // Entries after a cursor, oldest first — what the protocol serves and the painter reads.
+      return messages.filter((message) => (message.entryId ?? 0) > since).slice(0, limit);
     },
     busy: async () => busy,
     surfaceClient: fake.surface,
@@ -268,9 +268,9 @@ test("a turn that produced no answer leaves no placeholder and no message", asyn
     ledger,
     owns: () => true,
     conversations: async () => [{ conversationId: 1 }],
-    history: async (_id, limit, offset) => {
-      const end = Math.max(0, messages.length - offset);
-      return messages.slice(Math.max(0, end - limit), end);
+    entriesSince: async (_id: number, since: number, limit: number) => {
+      // Entries after a cursor, oldest first — what the protocol serves and the painter reads.
+      return messages.filter((message) => (message.entryId ?? 0) > since).slice(0, limit);
     },
     busy: async () => busy,
     surfaceClient: fake.surface,
@@ -378,7 +378,7 @@ test("a conversation with no subscription is still swept, so a dormant thread is
     ledger,
     owns: () => true,
     conversations: async () => [{ conversationId: 1, lastActivityAt: Date.now() }],
-    history: async () => {
+    entriesSince: async () => {
       reads += 1;
       return [];
     },
@@ -388,7 +388,7 @@ test("a conversation with no subscription is still swept, so a dormant thread is
   });
 
   await painter.tick();
-  assert.ok(reads > 0, "an unwatched conversation is read by the sweep");
+  assert.ok(reads > 0, "a conversation nobody is observing is still read by the sweep");
   await painter.close();
 });
 
@@ -432,9 +432,9 @@ test("a running turn opens one observer, and its settle edge posts the answer", 
     ledger,
     owns: () => true,
     conversations: async () => [{ conversationId: 1 }],
-    history: async (_id, limit, offset) => {
-      const end = Math.max(0, messages.length - offset);
-      return messages.slice(Math.max(0, end - limit), end);
+    entriesSince: async (_id: number, since: number, limit: number) => {
+      // Entries after a cursor, oldest first — what the protocol serves and the painter reads.
+      return messages.filter((message) => (message.entryId ?? 0) > since).slice(0, limit);
     },
     busy: async () => busy,
     surfaceClient: fake.surface,
@@ -473,7 +473,7 @@ test("a prompt that is merely being caught up on opens no observer", async () =>
     ledger,
     owns: () => true,
     conversations: async () => [{ conversationId: 1 }],
-    history: async () => [],
+    entriesSince: async () => [],
     busy: async () => false,
     surfaceClient: fakeSurface().surface,
     watch: () => {
