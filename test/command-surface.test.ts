@@ -305,3 +305,23 @@ test("/resume is withheld from a surface that opens conversations by id", async 
   assert.ok(chatHelp.kind === "list");
   assert.ok(chatHelp.rows.some((row) => row.label.startsWith("/resume")));
 });
+
+test("/secret is named, and only where it can actually store anything", async () => {
+  // The command set should not drift by omission: every command Chat has is either offered here or
+  // explicitly withheld, with the reason in the list a reader sees. `/secret` is withheld because the
+  // store is a deployment-local file held by the Chat adapter, and the value is the one thing that
+  // must never travel.
+  const { seam } = fakeSeam();
+  const chat = await runCommand(seam, { ...subject, surface: "gchat" }, { text: "/help" });
+  assert.ok(chat.kind === "list");
+  assert.ok(chat.rows.some((row) => row.label.startsWith("/secret")), "Chat offers it");
+
+  const web = await runCommand(seam, { ...subject, surface: "webui" }, { text: "/help" });
+  assert.ok(web.kind === "list");
+  assert.ok(!web.rows.some((row) => row.label.startsWith("/secret")), "and this surface does not");
+
+  // Asking anyway says where it lives rather than pretending or failing obscurely.
+  const refused = await runCommand(seam, { ...subject, surface: "webui" }, { text: "/secret" });
+  assert.equal(refused.kind, "text");
+  assert.match(refused.kind === "text" ? refused.text : "", /Chat adapter/);
+});

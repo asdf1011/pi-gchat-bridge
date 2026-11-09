@@ -121,6 +121,15 @@ const HELP: readonly { command: string; about: string; surfaces?: readonly strin
   { command: "/resume <id>", about: "carry on in one of them", surfaces: ["gchat"] },
   { command: "/new", about: "start a fresh conversation here" },
   { command: "/name <label>", about: "rename this conversation" },
+  {
+    command: "/secret",
+    about: "store a key for a tool, without it reaching the model",
+    // Chat only, and deliberately: it writes a deployment-local file, and the process that holds
+    // that file is the Chat adapter (the store is seeded into the redaction registry there). A
+    // browser tab is also the wrong place to type a key. Named rather than omitted, so the absence
+    // is a decision a reader can see instead of drift they have to find.
+    surfaces: ["gchat"],
+  },
   { command: "/compact [instructions]", about: "summarise the history now" },
   { command: "/abort", about: "stop whatever is running" },
   { command: "/help", about: "this list" },
@@ -368,6 +377,16 @@ export async function runCommand(
     if (!label) return text("A name, then: `/name research notes`.");
     const ok = await seam.label(subject.name, label);
     return text(ok ? `Named this conversation "${label}".` : "This conversation is not in the store any more.");
+  }
+
+  if (command === "/secret") {
+    // A surface that offers it must implement it: the store lives where the file does, and this
+    // module has no business holding one. Said plainly rather than silently doing nothing, because a
+    // command that answers "ok" without storing anything is worse than one that says it cannot.
+    return text(
+      "Secrets are stored by the Chat adapter, next to the deployment's files. As a value is exactly " +
+        "what must not travel, this surface does not offer it — use `/secret` in Chat.",
+    );
   }
 
   if (command === "/compact") {
