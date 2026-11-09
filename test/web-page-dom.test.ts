@@ -77,6 +77,8 @@ async function loadPage(
     artifacts?: { key: string; markdown?: boolean; wrote?: number; edited?: number }[];
     /** A URL fragment, as a reload would arrive with one. */
     hash?: string;
+    /** What the fake answers `POST api/c/<id>/commands` with. */
+    commandResponse?: unknown;
   } = {},
 ): Promise<Harness> {
   // Conversation mode: the URL carries the conversation id.
@@ -178,6 +180,13 @@ async function loadPage(
         }
         if (/\/api\/c\/\d+\/artifacts$/.test(url)) {
           return { ok: true, status: 200, json: async () => options.artifacts ?? [] };
+        }
+        if (/\/api\/c\/\d+\/commands$/.test(url)) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => options.commandResponse ?? { kind: "text", text: "nothing to report" },
+          };
         }
         if (url.includes("/message")) {
           return { ok: true, status: options.postStatus ?? 202, json: async () => ({ ok: true }) };
@@ -1350,6 +1359,146 @@ test("the fragment follows the drawer: another key opens it, closing clears it",
     await h.settle();
     assert.equal(doc.getElementById("artifacts")!.classList.contains("showing-doc"), false);
     assert.equal(h.dom.window.location.hash, "");
+  } finally {
+    h?.close();
+  }
+});
+
+/* --- slash commands in the composer ------------------------------------------ */
+
+test("a line beginning with a slash is a command, and its answer is drawn", async () => {
+  // The pane implements four renderers — text, list, choice, form — instead of eleven commands, so a
+  // command added on the server shows up here without this page changing.
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      pathname: "/7/",
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+    });
+    await h.settle();
+    const doc = h.dom.window.document;
+    const box = doc.getElementById("text") as HTMLTextAreaElement;
+    box.value = "/status";
+    doc.getElementById("send")!.dispatchEvent(new h.dom.window.Event("submit", { cancelable: true }));
+    for (let i = 0; i < 100 && !h.requests.some((r) => r.url.includes("/commands")); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    await h.settle();
+
+    const sent = h.requests.find((r) => r.url.includes("/commands"));
+    assert.ok(sent, "the command went to the command route");
+    assert.deepEqual(JSON.parse(sent!.body ?? "{}"), { text: "/status" });
+    // It is not a message: nothing was submitted to the conversation.
+    assert.equal(h.requests.some((r) => r.url.includes("/message")), false);
+    // And the box was cleared, so a command does not sit there waiting to be sent twice.
+    assert.equal(box.value, "");
+
+    const panel = doc.getElementById("command-panel") as HTMLElement;
+    assert.equal(panel.hidden, false, "the answer is shown");
+    assert.equal(doc.getElementById("command-body")!.textContent, "nothing to report");
+  } finally {
+    h?.close();
+  }
+});
+
+test("a list of choices is buttons, and pressing one sends its command", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      pathname: "/7/",
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+    });
+    await h.settle();
+    const doc = h.dom.window.document;
+    // The fake answers every command with this list, so the rendering path is what is under test.
+    h.dom.window.fetch = async (input: unknown) => {
+      const url = String(input);
+      h!.requests.push({ url, method: "POST", body: "" });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          kind: "list",
+          title: "Recent conversations",
+          rows: [{ label: "earlier", detail: "2h ago", command: "/resume 9", current: false }],
+        }),
+      };
+    };
+    const box = doc.getElementById("text") as HTMLTextAreaElement;
+    box.value = "/sessions";
+    doc.getElementById("send")!.dispatchEvent(new h.dom.window.Event("submit", { cancelable: true }));
+    await h.settle();
+
+    const row = doc.querySelector("#command-body .row.clickable") as HTMLButtonElement;
+    assert.ok(row, "the row is a button because it carries a command");
+    assert.equal(doc.getElementById("command-title")!.textContent, "Recent conversations");
+    row.click();
+    await h.settle();
+    assert.ok(h.requests.some((request) => request.url.includes("/commands") && request.method === "POST"));
+  } finally {
+    h?.close();
+  }
+});
+
+test("a form asks several things at once and sends them together", async () => {
+  // The reason the vocabulary has a `form`: model and thinking level are one decision. Two questions in
+  // sequence would make every surface carry the state of the first to ask the second.
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      pathname: "/7/",
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+      commandResponse: {
+        kind: "form",
+        prompt: "Model and thinking level",
+        command: "/model",
+        submit: "Apply",
+        fields: [
+          {
+            id: "model",
+            label: "Model",
+            kind: "select",
+            value: "deepseek/deepseek-chat",
+            options: [
+              { id: "deepseek/deepseek-chat", label: "deepseek-chat", selected: true },
+              { id: "anthropic/claude-sonnet-4", label: "Claude Sonnet 4" },
+            ],
+          },
+          {
+            id: "thinking",
+            label: "Thinking",
+            kind: "select",
+            value: "medium",
+            options: [
+              { id: "off", label: "off" },
+              { id: "medium", label: "medium", selected: true },
+              { id: "high", label: "high" },
+            ],
+          },
+        ],
+      },
+    });
+    await h.settle();
+    const doc = h.dom.window.document;
+    const box = doc.getElementById("text") as HTMLTextAreaElement;
+    box.value = "/model";
+    doc.getElementById("send")!.dispatchEvent(new h.dom.window.Event("submit", { cancelable: true }));
+    await h.settle();
+
+    const selects = [...doc.querySelectorAll("#command-body select")] as HTMLSelectElement[];
+    assert.equal(selects.length, 2, "both fields are on one form");
+    assert.equal(selects[0]!.value, "deepseek/deepseek-chat", "the current model is preselected");
+    assert.equal(selects[1]!.value, "medium", "and so is the current thinking level");
+
+    // Both answers arrive together, keyed by field id.
+    selects[0]!.value = "anthropic/claude-sonnet-4";
+    selects[1]!.value = "high";
+    doc.querySelector("#command-body form")!.dispatchEvent(new h.dom.window.Event("submit", { cancelable: true }));
+    await h.settle();
+
+    const posted = h.requests.filter((request) => request.url.includes("/commands"));
+    const last = JSON.parse(posted[posted.length - 1]!.body ?? "{}");
+    assert.deepEqual(last, { text: "/model", values: { model: "anthropic/claude-sonnet-4", thinking: "high" } });
   } finally {
     h?.close();
   }

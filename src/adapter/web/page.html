@@ -186,6 +186,37 @@
   #index-pager span { flex: 1; opacity: .7; }
   #index-pager button:disabled { opacity: .4; cursor: default; }
   #index-pager button:disabled:hover { filter: none; }
+  /* A command's answer, above the composer and *outside* the transcript: `paint()` rebuilds the log
+     from the transcript on every frame, so anything appended there would vanish on the next one. It
+     is also the honest place — this is the application answering a question, not a message in the
+     conversation. */
+  #command-panel { margin: .5rem .75rem 0; border: 1px solid #8884; border-radius: .6rem;
+    background: color-mix(in srgb, CanvasText 4%, Canvas); overflow: hidden; }
+  #command-panel[hidden] { display: none; }
+  #command-panel .head { display: flex; align-items: center; gap: .5rem; padding: .4rem .6rem;
+    border-bottom: 1px solid #8883; font-size: .85em; font-weight: 600; }
+  #command-panel .head span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; }
+  #command-panel .head button { padding: 0 .35rem; border: 0; background: none; cursor: pointer;
+    color: inherit; opacity: .7; font-size: 1em; }
+  #command-body { padding: .4rem .6rem .55rem; max-height: 40vh; overflow: auto; }
+  #command-body p { margin: .2rem 0; white-space: pre-wrap; font-size: .95em; }
+  #command-body ul { list-style: none; margin: 0; padding: 0; }
+  #command-body li { margin: .15rem 0; }
+  /* A row or an option is a button: anything with a command behind it is something to press. */
+  #command-body .row { display: flex; flex-direction: column; align-items: flex-start; gap: .1rem;
+    width: 100%; text-align: left; padding: .35rem .45rem; border-radius: .45rem;
+    border: 1px solid transparent; background: none; color: inherit; cursor: default; font: inherit; }
+  #command-body .row.clickable { cursor: pointer; border-color: #8884; }
+  #command-body .row.clickable:hover { background: color-mix(in srgb, CanvasText 8%, Canvas); }
+  #command-body .row.current { border-color: color-mix(in srgb, CanvasText 30%, transparent); }
+  #command-body .row .detail { font-size: .8em; opacity: .7; }
+  #command-body form { display: flex; flex-direction: column; gap: .5rem; margin: .2rem 0 0; }
+  #command-body label { display: flex; flex-direction: column; gap: .2rem; font-size: .85em; }
+  #command-body select, #command-body input { font: inherit; padding: .3rem .4rem; border-radius: .4rem;
+    border: 1px solid #8886; background: Canvas; color: inherit; }
+  #command-body .hint { font-size: .78em; opacity: .65; }
+  #command-body .actions { display: flex; gap: .5rem; }
   /* Attached images waiting to be sent, above the composer. Same strip whether
      they came from the clipboard, the file picker or a drop: to the person they
      are one thing — what this message carries. */
@@ -333,6 +364,13 @@
   <div id="pane">
   <div id="log"></div>
   <div id="tool"></div>
+    <div id="command-panel" hidden>
+      <div class="head">
+        <span id="command-title"></span>
+        <button type="button" id="command-close" title="Close" aria-label="Close">✕</button>
+      </div>
+      <div id="command-body"></div>
+    </div>
     <div id="attachments" hidden></div>
     <p id="attach-notice" hidden role="status" aria-live="polite"></p>
     <form id="send">
@@ -1199,6 +1237,13 @@ document.getElementById('send').onsubmit = async (e) => {
   // the key directly, so the empty-box rule stays in one place.
   saveDraft();
   fitBox();
+  // A line beginning with `/` is a command, not a message: it asks the application something rather
+  // than telling the agent something. Images win, because dropping them silently is worse than
+  // sending a message beginning with a slash.
+  if (text.startsWith('/') && sending.length === 0) {
+    await runCommandLine(text);
+    return;
+  }
   const response = await fetch(rel('api/c/' + current + '/message'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1229,6 +1274,165 @@ document.getElementById('send').onsubmit = async (e) => {
     // error, if any, arrives on the stream.
   }
 };
+
+// --- Commands -----------------------------------------------------------------
+//
+// A line beginning with `/` is not a message. It goes to `api/c/<id>/commands` and comes back as one
+// of four *shapes* — text, a list, a choice, a form — which this page renders and knows nothing
+// further about. That is the trade the vocabulary makes: four renderers here instead of eleven
+// commands, and a command added on the server appears in every surface at once.
+//
+// The answer is drawn in its own panel above the composer rather than in the transcript, for a dull
+// and decisive reason: `paint()` rebuilds the log from `transcript` on every stream frame, so a
+// message-shaped thing that is not a message would disappear at the next one.
+
+const commandPanel = document.getElementById('command-panel');
+const commandBody = document.getElementById('command-body');
+const commandTitle = document.getElementById('command-title');
+document.getElementById('command-close').onclick = () => {
+  commandPanel.hidden = true;
+  commandBody.innerHTML = '';
+};
+
+/** One text node, so a command's output can never be markup. */
+function commandText(tag, text, className) {
+  const element = document.createElement(tag);
+  element.textContent = text;
+  if (className) element.className = className;
+  return element;
+}
+
+/**
+ * Ask the server what a command means, then draw the answer.
+ *
+ * `values` is a form's or a choice's answer, keyed by field id. The command text stays the same —
+ * what was asked and what was chosen are different things, and the second one is untrusted.
+ */
+async function runCommandLine(text, values) {
+  if (!current) return;
+  let shape;
+  try {
+    const response = await fetch(rel('api/c/' + current + '/commands'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, ...(values ? { values } : {}) }),
+    });
+    shape = await response.json();
+  } catch {
+    shape = { kind: 'text', text: 'The command did not answer. Is the bridge still running?' };
+  }
+  if (!shape || typeof shape.kind !== 'string') shape = { kind: 'text', text: 'The command answered with nothing.' };
+  renderCommand(shape);
+}
+
+function renderCommand(shape) {
+  commandBody.innerHTML = '';
+  commandPanel.hidden = false;
+  if (shape.kind === 'text') {
+    commandTitle.textContent = 'Command';
+    commandBody.append(commandText('p', shape.text));
+    // A command that made a conversation says where it is; going there is the point of `/new` and
+    // `/resume`, and a link the reader has to find in a list would be worse than a redirect.
+    if (typeof shape.goto === 'number') {
+      window.location.href = mountRoot() + shape.goto + '/';
+      return;
+    }
+    return;
+  }
+  if (shape.kind === 'list') {
+    commandTitle.textContent = shape.title || 'Results';
+    const rows = Array.isArray(shape.rows) ? shape.rows : [];
+    if (rows.length === 0) {
+      commandBody.append(commandText('p', shape.empty || 'Nothing.'));
+      return;
+    }
+    const list = document.createElement('ul');
+    for (const row of rows) {
+      const item = document.createElement('li');
+      const clickable = typeof row.command === 'string' && row.command !== '';
+      const button = document.createElement(clickable ? 'button' : 'div');
+      if (clickable) button.type = 'button';
+      button.className = 'row' + (clickable ? ' clickable' : '') + (row.current ? ' current' : '');
+      button.append(commandText('span', row.label));
+      if (row.detail) button.append(commandText('span', row.detail, 'detail'));
+      if (clickable) button.onclick = () => void runCommandLine(row.command);
+      item.append(button);
+      list.append(item);
+    }
+    commandBody.append(list);
+    return;
+  }
+  if (shape.kind === 'choice') {
+    commandTitle.textContent = shape.prompt || 'Choose';
+    const list = document.createElement('ul');
+    for (const option of Array.isArray(shape.options) ? shape.options : []) {
+      const item = document.createElement('li');
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'row clickable' + (option.selected ? ' current' : '');
+      button.append(commandText('span', option.label));
+      if (option.detail) button.append(commandText('span', option.detail, 'detail'));
+      // Choosing is sending the command with this option as the answer, so a choice and a form
+      // submit are the same wire shape and the server sees one mechanism, not two.
+      button.onclick = () => void runCommandLine(shape.command, option.values ?? {});
+      item.append(button);
+      list.append(item);
+    }
+    commandBody.append(list);
+    return;
+  }
+  if (shape.kind === 'form') {
+    commandTitle.textContent = shape.prompt || 'Fill this in';
+    const form = document.createElement('form');
+    const fields = Array.isArray(shape.fields) ? shape.fields : [];
+    const controls = new Map();
+    for (const field of fields) {
+      const label = document.createElement('label');
+      label.append(commandText('span', field.label));
+      let control;
+      if (field.kind === 'select') {
+        control = document.createElement('select');
+        for (const option of Array.isArray(field.options) ? field.options : []) {
+          const choice = document.createElement('option');
+          choice.value = option.id;
+          choice.textContent = option.detail && option.detail !== option.label
+            ? option.label + ' — ' + option.detail
+            : option.label;
+          if (option.selected || option.id === field.value) choice.selected = true;
+          control.append(choice);
+        }
+      } else {
+        control = document.createElement('input');
+        control.type = 'text';
+        if (field.value) control.value = field.value;
+      }
+      control.id = 'field-' + field.id;
+      if (field.hint) label.append(commandText('span', field.hint, 'hint'));
+      label.append(control);
+      controls.set(field.id, control);
+      form.append(label);
+    }
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+    const submit = document.createElement('button');
+    submit.type = 'submit';
+    submit.textContent = shape.submit || 'Apply';
+    actions.append(submit);
+    form.append(actions);
+    form.onsubmit = (event) => {
+      event.preventDefault();
+      const values = {};
+      for (const [id, control] of controls) values[id] = control.value;
+      void runCommandLine(shape.command, values);
+    };
+    commandBody.append(form);
+    return;
+  }
+  // An unknown shape is not a crash: a newer server talking to an older page says something, and the
+  // page says what it can.
+  commandTitle.textContent = 'Command';
+  commandBody.append(commandText('p', 'This page does not know how to show that answer.'));
+}
 
 // --- Artifacts: a drawer over the conversation, hidden until asked for. ---
 //

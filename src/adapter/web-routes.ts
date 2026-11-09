@@ -26,6 +26,7 @@ import {
   type PastedImage,
 } from "./web.js";
 import { renderMarkdown } from "./markdown.js";
+import { runCommand } from "./command-surface.js";
 import { currentAddress, MAX_COMMENT_CHARS, modelText } from "../durable/comments.js";
 import type { SessionHost } from "../session-host/api.js";
 import { logger } from "../logger.js";
@@ -426,6 +427,63 @@ export async function handleWebRequest(
     }
     res.writeHead(result.ok ? 202 : 400, { "Content-Type": "application/json" });
     res.end(JSON.stringify(result));
+    return true;
+  }
+
+  // Slash commands. The page types `/status` and gets a *shape* back — text, a list, a choice, or a
+  // form with several fields — which is the same vocabulary every surface renders, so a command added
+  // here shows up in all of them without any of them knowing its name.
+  const command = /^\/api\/c\/(\d+)\/commands$/.exec(api);
+  if (req.method === "POST" && command) {
+    if (token && req.headers.authorization !== `Bearer ${token}`) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "unauthorized" }));
+      return true;
+    }
+    const body = await readBody(req, 64_000);
+    if (body === null) {
+      res.writeHead(413, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "request body too large" }));
+      return true;
+    }
+    let text = "";
+    let values: Record<string, string> = {};
+    try {
+      const parsed = JSON.parse(body) as { text?: unknown; values?: unknown };
+      text = typeof parsed.text === "string" ? parsed.text : "";
+      if (parsed.values && typeof parsed.values === "object") {
+        // A form's answer, as strings. Anything else in there is not a value and is dropped rather
+        // than passed on: the executor validates what it needs, so this only has to be the right
+        // *shape*.
+        for (const [key, value] of Object.entries(parsed.values as Record<string, unknown>)) {
+          if (typeof value === "string") values[key] = value;
+        }
+      }
+    } catch {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "invalid JSON body" }));
+      return true;
+    }
+    const conversationId = Number(command[1]);
+    // Commands that change settings are keyed by the adapter's *name* for a conversation, so the
+    // name has to come from the store rather than from the caller.
+    const named = (await seam.list()).find((row) => row.conversationId === conversationId);
+    if (!named) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: `no such conversation: ${conversationId}` }));
+      return true;
+    }
+    let response;
+    try {
+      response = await runCommand(seam, { conversationId, name: named.name }, { text, values });
+    } catch (error) {
+      // A command failing is data, not a broken route: the surface shows the reason the same way it
+      // shows any other text response.
+      response = { kind: "text", text: `That did not work: ${(error as Error).message}` };
+    }
+    log.info(`[web] ${who.email ?? "anonymous"}: ${text.split(/\s+/)[0]} in conversation ${conversationId}`);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(response));
     return true;
   }
 
