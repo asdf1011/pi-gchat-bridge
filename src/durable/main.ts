@@ -34,6 +34,7 @@ import { runDurableCommand } from "../adapter/commands.js";
 import { defaultSettings } from "../adapter/commands.js";
 import { ActivityFeed } from "./activity.js";
 import { startChatPainter } from "./chat-painter.js";
+import { chatHandler } from "./chat-handler.js";
 import { httpPoll } from "../adapter/poll-client.js";
 import { entriesAfter } from "./entries.js";
 import type { ProjectedView } from "../session-host/projection.js";
@@ -461,135 +462,6 @@ async function main(): Promise<void> {
     logger.info("[bridge] web engine=link: /web is served by a supervised adapter process");
   }
 
-  // --- One Chat message → one durable submission → one Chat reply. ---
-  const handler = async (incoming: IncomingMessage): Promise<import("../receiver.js").HandleResult> => {
-    const spaceName = incoming.space.name ?? "";
-    const display = incoming.space.displayName ?? spaceName;
-    const text = incoming.message.text ?? "";
-    const threadName = incoming.message.threadName;
-    const threadKey = incoming.message.threadKey;
-    // keyFor() is unchanged from the SDK host: threadKey wins, then the thread
-    // name, then the space — so a thread stays one conversation across engines.
-    const chatKey = AgentRouter.keyFor(spaceName, threadName, threadKey);
-    const actionKey = incoming.action?.parameters?.find((p) => p.key === "session")?.value ?? chatKey;
-
-    logger.info(
-      `[chat] ${display} [${incoming.message.name ?? "?"}]: ${incoming.eventType === "CARD_CLICKED" ? `card:${incoming.action?.actionMethodName}` : text.slice(0, 120)}`,
-    );
-    // Keying is logged for EVERY event, not just card clicks: in a space the
-    // difference between a top-level message (keyed by the space) and a reply in
-    // a thread (keyed by the thread) is the intended model, but it is also the
-    // one thing that looks like "the bot answered in the wrong conversation".
-    // Having both keys in the log turns that from a guess into a lookup.
-    logger.info(
-      `[chat] ${display}: keying ${incoming.eventType ?? "MESSAGE"} thread=${threadName ?? "(none)"} threadKey=${threadKey ?? "(none)"} chatKey=${chatKey} actionKey=${actionKey}${actionKey === chatKey ? "" : " (differ)"}`,
-    );
-
-    const handled = await runDurableCommand({
-      client,
-      seam: chatSeam,
-      router,
-      state,
-      secrets,
-      // Falls back to ALLOWED_USERS when SECRET_USERS is unset, so a single-user
-      // deployment needs no extra configuration.
-      secretUsers: config.secretUsers.length > 0 ? config.secretUsers : config.allowedUsers,
-      incoming,
-      chatKey,
-      actionKey,
-      spaceName,
-      threadName,
-      display,
-      text,
-    });
-    if (handled !== null) return handled;
-
-    const { images, hadAttachments } = await collectImageAttachments(client, incoming);
-    if (images.length === 0 && !text.trim()) {
-      await client
-        .sendMessage(spaceName, "I got your message but couldn't read the attachment — only images are supported.", threadName)
-        .catch((error) => logger.error("[chat] attachment notice failed:", (error as Error).message));
-      return "ok";
-    }
-    if (images.length) {
-      logger.info(`[chat] ${display}: ${images.length} image(s) attached${text ? ` with text "${text.slice(0, 60)}"` : ""}`);
-    } else if (hadAttachments) {
-      logger.info(`[chat] ${display}: attachments present but no image could be downloaded`);
-    }
-
-    // The painter is the mouth for every Chat conversation, so this handler's job is
-    // narrower than it was: submit, wait (waiting is what stamps the answer's origin),
-    // poke the painter, and say why a turn produced nothing. It never posts an answer,
-    // which is why the claim machinery that arbitrated between two posters is gone
-    // rather than merely idle.
-    try {
-      // The delivery is idempotent on the Chat message name, so a Pub/Sub
-      // redelivery after a crash finds the same submission instead of asking the
-      // model again.
-      const delivered = await router.deliver({
-        chatKey,
-        messageName: incoming.message.name,
-        text,
-        images,
-      });
-      activity.started(delivered.conversationId);
-      // No wake: activity carries this now, and the painter hears it from the server like any
-      // other subscriber.
-
-      const turnStarted = Date.now();
-      const settled = await chatSeam.awaitSubmission(delivered.submissionId);
-      const turnMs = Date.now() - turnStarted;
-
-      if (settled.status !== "done" || settled.text === "") {
-        // A failure here used to log only the status, so "unanswered after 9s"
-        // and "unanswered after 154s" were indistinguishable, and the reason
-        // pi-durable records (aborted / provider error / ...) was thrown away.
-        // Diagnosing a real failure from that took twenty minutes of log
-        // archaeology; these four facts make it a single line.
-        const reason = settled.status === "unanswered" ? settled.reason : undefined;
-        const detail = settled.status === "unanswered" ? settled.detail : undefined;
-        logger.info(
-          `[chat] ${display}: no answer text status=${settled.status}` +
-            `${reason ? ` reason=${reason}` : ""}` +
-            ` after ${turnMs}ms conversation=${delivered.conversationId}` +
-            (detail === undefined ? "" : ` detail=${JSON.stringify(detail).slice(0, 300)}`),
-        );
-        // The notice is the handler's because the handler is what knows *why*: the
-        // painter only ever sees that no answer entry arrived.
-        await client
-          .sendMessage(spaceName, failureNotice(settled.status, reason, turnMs), threadName)
-          .catch((error) => logger.error("[chat] empty-reply notice failed:", (error as Error).message));
-        return "ok";
-      }
-
-      // Detached: a CPU titler can take minutes, and the reply is already
-      // delivered. Only fires when /model left a pending card for this thread,
-      // so it is free to call on every turn.
-      if (config.topicSummary) {
-        void applyDurableTopicSummary({
-          state,
-          seam: chatSeam,
-          client,
-          chatKey,
-          display,
-          config: {
-            baseUrl: config.topicSummaryBaseUrl,
-            model: config.topicSummaryModel,
-            timeoutMs: config.topicSummaryTimeoutMs,
-            ...(config.topicSummaryApiKey ? { apiKey: config.topicSummaryApiKey } : {}),
-          },
-        });
-      }
-      return "ok";
-    } catch (error) {
-      const aborted = (error as Error)?.name === "AbortError";
-      logger.error(`[chat] ${display}: handler ${aborted ? "interrupted" : "error"}:`, (error as Error).message);
-      // Nothing to clean up here any more: the placeholder belongs to the painter, which
-      // abandons it when it sees a settled turn with no answer entry.
-      return "ok";
-    }
-  };
-
   // The painter, started as one thing: the cursor and the mouth it feeds.
   const chatPainter = await startChatPainter({ seam: chatSeam, config, client, dbPath });
 
@@ -642,6 +514,17 @@ async function main(): Promise<void> {
   process.on("SIGINT", () => void shutdown());
   process.on("SIGTERM", () => void shutdown());
 
+  // The Chat adapter's message path, in its own module: the same function the fork will run in
+  // another process, given a seam instead of a `BridgeHost`.
+  const handler = chatHandler({
+    seam: chatSeam,
+    config,
+    client,
+    router,
+    state,
+    secrets,
+    activity,
+  });
   await receiver.start(handler);
   logger.info("[bridge] running on the durable engine. Ctrl+C to stop.");
 
