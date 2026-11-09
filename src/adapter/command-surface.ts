@@ -388,6 +388,12 @@ export async function runCommand(
     // Permission is per person, not per surface: one store, one allow-list, so a surface that can
     // authenticate its reader can offer this. A surface that cannot says so by leaving
     // `secretAllowed` unset, which reads as a refusal here.
+    //
+    // **Chat's `/secret` stays bespoke, and this is why.** Its flow is a sequence — panel, value
+    // card, confirmation, removal — and these shapes answer one question at a time. Chat cards also
+    // have no password field (`secretValueCard` says as much in its own copy), so a shared renderer
+    // would reproduce the same plain input and still not cover the sequence. What *is* shared is the
+    // store and the allow-list, which is the part where being wrong costs a key; the UI may differ.
     if (subject.secretAllowed !== true) return text("You are not allowed to use `/secret` here.");
     const verb = (rest[0] ?? "").toLowerCase();
     const name = (rest[1] ?? values.name ?? "").trim().toUpperCase();
