@@ -406,10 +406,21 @@ export class Painter {
       // and skips the placeholder — which is what a short turn looks like from the outside, "the
       // answer arrived without the thinking line". A prompt that arrives *now* belongs to a turn
       // that starts within a few hundred milliseconds, so one short wait answers it properly.
-      let running = await this.deps.busy(conversationId).catch(() => false);
+      // A failure and a `false` are not the same answer, and swallowing the difference is how "the
+      // turn is not running" becomes a silent lie: a seam that throws (a link that cannot reach its
+      // host, say) would look exactly like an idle conversation.
+      const ask = async (): Promise<boolean> => {
+        try {
+          return await this.deps.busy(conversationId);
+        } catch (error) {
+          this.log(`[paint] conversation ${conversationId}: busy check failed: ${(error as Error).message}`);
+          return false;
+        }
+      };
+      let running = await ask();
       if (!running) {
         await new Promise((resolve) => setTimeout(resolve, 400));
-        running = await this.deps.busy(conversationId).catch(() => false);
+        running = await ask();
       }
       if (running) await this.openTurn(conversationId);
       else this.log(`[paint] conversation ${conversationId}: prompt ${entry.entryId} arrived with no turn running — no placeholder`);
