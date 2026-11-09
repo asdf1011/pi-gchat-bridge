@@ -72,6 +72,7 @@ test("every adapter file is one of the surfaces we know about", () => {
   // directory is the whole reason the seam exists.
   const known = new Set([
     "artifacts-server.ts",
+    "command-surface.ts",
     "commands.ts",
     "markdown.ts",
     "queries.ts",
