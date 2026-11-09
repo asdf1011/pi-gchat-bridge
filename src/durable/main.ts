@@ -337,6 +337,34 @@ async function main(): Promise<void> {
           // The engine check is on purpose: this listener is the durable host's,
           // and only it holds a `router`/`seam` pair for the durable harness.
           if (forked && req.method === "POST" && url.pathname === "/notify") {
+            // Served by the adapter, which is where the Chat client is. Not forwarded: `/notify`
+            // is a Chat route, and a host that keeps forwarding one is a host that still knows about
+            // Chat. The callers point at the adapter (`cron/.env`), and this answer says so for
+            // anyone who has not been told — a silent 404 here is how scheduled notifications
+            // stopped once before.
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify({
+                ok: false,
+                error: "notify is served by the Chat adapter",
+                hint: `POST http://${config.bindAddress}:${chatPort}/notify`,
+              }),
+            );
+            return;
+          }
+          // POST /notify: the cron service's single write path into Chat.
+          //
+          // This route was collateral damage in the web-routes extraction
+          // (3a91b1d): the handler moved out, the /notify block was deleted with
+          // the /web routes, and nothing noticed because `handleDurableNotify` is
+          // still *imported* below (so `tsc` was happy) and its unit tests call the
+          // handler directly rather than this server. The result was a silent
+          // 404 for every scheduled notification — balance checks, release notes,
+          // reminders — while `npm test` stayed green.
+          //
+          // The engine check is on purpose: this listener is the durable host's,
+          // and only it holds a `router`/`seam` pair for the durable harness.
+          if (forked && req.method === "POST" && url.pathname === "/notify") {
             // Forwarded, not moved. The handler needs a Chat client and now lives in the adapter
             // process, but the *address* is what several cron scripts already hold — one of them
             // hardcoded — so keeping it is worth one hop. `cron/.env` and `watch-ns-delegation.sh`
