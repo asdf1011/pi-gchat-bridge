@@ -124,7 +124,11 @@ busy_children() {
     cmd=$( { tr '\0' ' ' < "/proc/$pid/cmdline"; } 2>/dev/null )
     [ -z "$cmd" ] && continue
     case "$cmd" in
-      *dist/web-host.js*) continue ;;             # long-lived web adapter
+      # Long-lived adapters, one per surface. The chat adapter joined them when it was
+      # forked: without this line the gate saw a permanent child and never found the
+      # bridge idle, so three restarts queued up and none of them fired.
+      *dist/web-host.js*) continue ;;
+      *dist/chat-host.js*) continue ;;
     esac
     echo "$pid $cmd"
   done
@@ -153,7 +157,7 @@ if [ "$CHECK" = 1 ]; then
     case "$self" in *" $p "*) continue ;; esac
     cmd=$( { tr '\0' ' ' < "/proc/$p/cmdline"; } 2>/dev/null )
     case "$cmd" in
-      *dist/web-host[.]js*) echo "  $p ${cmd:0:60}" ;;
+      *dist/web-host[.]js*|*dist/chat-host[.]js*) echo "  $p ${cmd:0:60}" ;;
     esac
   done
   echo "work in flight:"
