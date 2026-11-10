@@ -1048,6 +1048,22 @@ export class BridgeHost {
         // unknown rather than as "mine".
         const stamped =
           typeof entryId === "number" ? origins?.[`${conversationId}:${entryId}`]?.origin : undefined;
+        // An assistant entry that also carries a tool call is a turn's running
+        // commentary — "Looking at that…", "Now I'll do a focused pass" — said on the
+        // way to a tool. It belongs to how the answer was reached, not to the
+        // conversation, and handing every one of them to the surface stacked a dozen
+        // separate pi bubbles down the page for a single long turn. Chat never showed
+        // this because the painter filters on its origin stamp; history is the one
+        // place every reading surface goes through, and it was not filtering at all.
+        //
+        // The turn's actual answer is the assistant entry with text and no tool call.
+        // That is a property of the entry, so it holds after a restart — unlike the
+        // origin stamp, which is session-scoped and absent for anything older than
+        // the last start. (Filtering on the stamp alone would have erased the answers
+        // of every conversation older than the running process.)
+        // Unless it carries an image: commentary that produced a picture is the only
+        // record of that picture, and hiding it would lose content rather than noise.
+        if (message.role === "assistant" && callsTool(message) && images.length === 0) continue;
         messages.push({
           role: message.role,
           text: text.slice(0, TRANSCRIPT_MESSAGE_CHARS),
@@ -1235,6 +1251,20 @@ function imageBlocks(message: { content?: unknown }): { mimeType: string; data: 
 /** What a viewer needs to know about one message's images. */
 function imagesOf(message: { content?: unknown }): { mimeType: string }[] {
   return imageBlocks(message).map((image) => ({ mimeType: image.mimeType }));
+}
+
+/**
+ * Whether a message asks for a tool call.
+ *
+ * A turn says something, calls a tool, says something else, calls another — and
+ * only the last thing it says, with no call attached, is its answer. That is how
+ * running commentary is told apart from a reply without depending on a session
+ * stamp, which a restart clears.
+ */
+function callsTool(message: { content?: unknown }): boolean {
+  const content = message.content;
+  if (!Array.isArray(content)) return false;
+  return content.some((block) => (block as { type?: string }).type === "toolCall");
 }
 
 /** Concatenated text blocks of one message. */

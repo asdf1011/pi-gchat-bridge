@@ -163,3 +163,86 @@ test("history() truncates one huge message instead of shipping it", async () => 
   assert.equal(rows?.[0].text.length, 4000, "one message cannot swamp the pane");
   await host.harness.close(BACKGROUND_CONTEXT);
 });
+
+test("a turn's running commentary is not shown as separate replies", async () => {
+  // The bug this pins: a long turn says something before every tool call — "Looking
+  // at that…", "Now I'll do a focused pass" — and each of those is an assistant entry
+  // in the transcript. History handed every one of them to the surface, so a single
+  // reply appeared as a dozen pi bubbles stacked down the page. The transcript is
+  // right to record them; it is *showing* them as messages that was wrong.
+  const host = await memoryHost();
+  const created = await host.createNamed("threads/B", { model: { provider: "p", modelId: "m" } });
+
+  await host.writeEntry(created.conversationId, {
+    kind: "app.notice",
+    data: {},
+    model: [{ role: "user", content: "make it prettier" }],
+  });
+  // Narration: text *and* a tool call, which is how a turn thinks out loud.
+  await host.writeEntry(created.conversationId, {
+    kind: "app.notice",
+    data: {},
+    model: [
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Looking at that: the radii differ." },
+          { type: "toolCall", id: "c1", name: "read", arguments: {} },
+        ],
+      },
+    ],
+  });
+  await host.writeEntry(created.conversationId, {
+    kind: "app.notice",
+    data: {},
+    model: [
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Now I'll do a focused pass." },
+          { type: "toolCall", id: "c2", name: "edit", arguments: {} },
+        ],
+      },
+    ],
+  });
+  // The answer: text and nothing else.
+  await host.writeEntry(created.conversationId, {
+    kind: "app.notice",
+    data: {},
+    model: [{ role: "assistant", content: [{ type: "text", text: "Cleaned up and restarted." }] }],
+  });
+
+  const rows = await host.history(created.conversationId);
+  assert.deepEqual(rows?.map((m) => `${m.role}:${m.text}`), [
+    "user:make it prettier",
+    "assistant:Cleaned up and restarted.",
+  ]);
+  await host.harness.close(BACKGROUND_CONTEXT);
+});
+
+test("commentary that produced an image is kept, because the picture is content", async () => {
+  // The one case the filter must not swallow: a turn that calls a tool and attaches
+  // an image is the only record of that image.
+  const host = await memoryHost();
+  const created = await host.createNamed("threads/C", { model: { provider: "p", modelId: "m" } });
+
+  await host.writeEntry(created.conversationId, {
+    kind: "app.notice",
+    data: {},
+    model: [
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Here is the screenshot" },
+          { type: "image", data: "aGk=", mimeType: "image/png" },
+          { type: "toolCall", id: "c1", name: "read", arguments: {} },
+        ],
+      },
+    ],
+  });
+
+  const rows = await host.history(created.conversationId);
+  assert.equal(rows?.length, 1);
+  assert.equal(rows?.[0]?.images?.length, 1);
+  await host.harness.close(BACKGROUND_CONTEXT);
+});
