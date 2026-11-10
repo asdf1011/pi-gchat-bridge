@@ -2029,3 +2029,103 @@ test("a tool run shows alongside the words that announced it", async () => {
     h?.close();
   }
 });
+
+// --- The touch affordance ----------------------------------------------------
+//
+// On a phone the document draws nothing: the platform's own selection menu sits above
+// the page in a layer no page can draw over, so the action moves here and *waits* for
+// that menu to go. These pin the waiting, because "appears immediately" is the bug the
+// delay exists to avoid, and "appears eventually" is the whole point.
+
+test("the touch bar appears only after the selection has settled", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ pathname: "/7/", conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    const bar = h.dom.window.document.getElementById("selection-bar")!;
+    assert.equal(bar.hidden, true, "nothing before a selection");
+
+    await fromFrame(h, {
+      t: "pi-artifact-select-touch",
+      message: { file: "notes.md", line: 3, quote: "scattered values", intent: "comment" },
+    });
+
+    // Still hidden right away: this is the window in which the platform menu is up, and
+    // a bar underneath it is the reported bug.
+    assert.equal(bar.hidden, true, "not immediately — the system menu is still showing");
+
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    assert.equal(bar.hidden, false, "and then it appears");
+    assert.match(bar.textContent ?? "", /scattered values/);
+  } finally {
+    h?.close();
+  }
+});
+
+test("a selection dismissed during the wait never shows the bar", async () => {
+  // The bar is on a timer, so the timer has to be cancellable — otherwise a bar arrives
+  // for a selection that no longer exists, offering to comment on nothing.
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ pathname: "/7/", conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    const bar = h.dom.window.document.getElementById("selection-bar")!;
+
+    await fromFrame(h, {
+      t: "pi-artifact-select-touch",
+      message: { file: "notes.md", line: 3, quote: "gone in a moment", intent: "comment" },
+    });
+    await fromFrame(h, { t: "pi-artifact-clear", file: "notes.md" });
+
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    assert.equal(bar.hidden, true, "the pending appearance was cancelled");
+  } finally {
+    h?.close();
+  }
+});
+
+test("re-selecting restarts the wait, and shows the latest text", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ pathname: "/7/", conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    const bar = h.dom.window.document.getElementById("selection-bar")!;
+
+    await fromFrame(h, {
+      t: "pi-artifact-select-touch",
+      message: { file: "notes.md", line: 3, quote: "first attempt", intent: "comment" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    await fromFrame(h, {
+      t: "pi-artifact-select-touch",
+      message: { file: "notes.md", line: 3, quote: "the wider selection", intent: "comment" },
+    });
+
+    // The second selection restarted the clock, so it is still waiting.
+    assert.equal(bar.hidden, true);
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    assert.equal(bar.hidden, false);
+    assert.match(bar.textContent ?? "", /the wider selection/);
+    assert.doesNotMatch(bar.textContent ?? "", /first attempt/, "the quote follows the latest selection");
+  } finally {
+    h?.close();
+  }
+});
+
+test("opening the composer puts the touch bar away", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ pathname: "/7/", conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    const doc = h.dom.window.document;
+    await fromFrame(h, {
+      t: "pi-artifact-select-touch",
+      message: { file: "notes.md", line: 3, quote: "something", intent: "comment" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    assert.equal(doc.getElementById("selection-bar")!.hidden, false);
+
+    (doc.getElementById("selection-comment") as HTMLButtonElement).click();
+    // Two boxes competing for the same strip is worse than either alone.
+    assert.equal(doc.getElementById("selection-bar")!.hidden, true);
+    assert.equal(doc.getElementById("comment-bar")!.hidden, false, "the composer opened instead");
+  } finally {
+    h?.close();
+  }
+});

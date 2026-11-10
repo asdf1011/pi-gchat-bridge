@@ -470,8 +470,13 @@
      floating button the desktop build draws beside the selection, because on a phone
      that space belongs to the system's own selection menu. Kept to a single line so it
      costs the document as little height as possible while a selection is active. */
+  /* The safe-area inset is the one piece of system UI a page *can* clear: the home
+     indicator on a notched phone. It cannot clear the selection menu — that is drawn
+     above the page in a layer nothing here reaches — which is why the bar also waits
+     to appear (see SELECTION_BAR_DELAY_MS) rather than fighting for the same space. */
   #selection-bar { position: absolute; left: 0; right: 0; bottom: 0; z-index: 3;
-    display: flex; align-items: stretch; gap: .4rem; padding: .4rem .5rem;
+    display: flex; align-items: stretch; gap: .4rem;
+    padding: .4rem .5rem max(.4rem, env(safe-area-inset-bottom));
     background: Canvas; border-top: 1px solid #8886; box-shadow: 0 -6px 24px #0002; }
   #selection-bar[hidden] { display: none; }
   #selection-comment { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: .45rem;
@@ -2553,7 +2558,7 @@ function showCommentBar(selection) {
   }
   commentBar.hidden = false;
   // The bar and the composer would otherwise compete for the same strip.
-  selectionBar.hidden = true;
+  hideSelectionBar();
   // Focus follows intent. The document only sends `intent: "comment"` when somebody clicked the
   // affordance beside their selection — an explicit "I want to write something" — and focusing then
   // is right: it opens the keyboard, which is what they asked for. Selection alone never focuses,
@@ -2574,7 +2579,39 @@ function showCommentBar(selection) {
  * It only offers to *start* a comment. Once the composer is open the bar gets out of
  * the way — two boxes competing for the same strip would be worse than either alone.
  */
+/**
+ * How long to wait before offering the comment action.
+ *
+ * Selecting text on a phone raises the platform's own menu — Copy, Select all, Share —
+ * in a layer *above* the page. Nothing a page draws can go over it: not a higher
+ * z-index, not anchoring to `visualViewport`, not safe-area insets. So the only move
+ * available is not to be there while it is, and to arrive once it has gone.
+ *
+ * The page cannot see that menu, so this is a wait for the selection to stop changing
+ * plus enough time for the menu to animate out. Too short and the bar arrives under
+ * the menu; too long and it feels disconnected from the selection that caused it.
+ * Both Google Docs and Medium solve it the same way — their toolbars appear a beat
+ * after the selection settles — which is why this number is a little over half a
+ * second rather than instant.
+ */
+const SELECTION_BAR_DELAY_MS = 700;
+
+/** Pending appearance of the touch affordance. */
+let selectionBarTimer;
+
+function hideSelectionBar() {
+  if (selectionBarTimer) {
+    clearTimeout(selectionBarTimer);
+    selectionBarTimer = undefined;
+  }
+  selectionBar.hidden = true;
+}
+
 function showSelectionBar(selection) {
+  if (selectionBarTimer) {
+    clearTimeout(selectionBarTimer);
+    selectionBarTimer = undefined;
+  }
   if (!selection) {
     selectionBar.hidden = true;
     return;
@@ -2586,13 +2623,22 @@ function showSelectionBar(selection) {
     selectionBar.hidden = true;
     return;
   }
+  // Hide immediately and show on a delay: a new selection means the platform menu has
+  // just appeared, and the bar must not be visible underneath it.
+  selectionBar.hidden = true;
   const quote = (selection.quote || '').replace(/\s+/g, ' ').trim();
   selectionOn.textContent = quote ? '“' + quote.slice(0, 80) + (quote.length > 80 ? '…' : '') + '”' : '';
-  selectionBar.hidden = false;
+  selectionBarTimer = setTimeout(() => {
+    selectionBarTimer = undefined;
+    // Re-checked at fire time: the selection may have been dismissed while waiting, and
+    // a bar for a selection that no longer exists is worse than no bar.
+    if (!pendingSelection || !commentBar.hidden) return;
+    selectionBar.hidden = false;
+  }, SELECTION_BAR_DELAY_MS);
 }
 
 function closeCommentBar() {
-  selectionBar.hidden = true;
+  hideSelectionBar();
   pendingSelection = null;
   commentBar.hidden = true;
   commentText.value = '';
@@ -2785,7 +2831,7 @@ window.addEventListener('message', (event) => {
     // arrives on every device — the document sends it whenever `describe()` comes
     // back empty — which makes it the one place that reliably forgets a selection,
     // rather than a second message to keep in step.
-    selectionBar.hidden = true;
+    hideSelectionBar();
     // The reader dismissed the selection. Close the composer, but never over a
     // draft, and never while the field has focus — tapping the field itself can
     // collapse the document's selection on some browsers, and that tap means
@@ -2830,11 +2876,11 @@ document.getElementById('selection-comment').onclick = () => {
   // The same entry point the desktop button uses, with the same meaning: the reader
   // has said they want to write, so the composer may take focus and raise the keyboard.
   const selection = { ...pendingSelection, intent: 'comment' };
-  selectionBar.hidden = true;
+  hideSelectionBar();
   showCommentBar(selection);
 };
 document.getElementById('selection-dismiss').onclick = () => {
-  selectionBar.hidden = true;
+  hideSelectionBar();
 };
 document.getElementById('comment-send').onclick = () => void sendComment();
 document.getElementById('comment-cancel').onclick = () => closeCommentBar();
