@@ -161,12 +161,20 @@ export class ReplyStream {
   /** Drop the placeholder (session became busy, or the reply was empty). */
   async abandon(): Promise<void> {
     this.clearTimers();
+    // Anything already in flight has to land before the message it patches goes away: a patch that
+    // arrives after the delete is a 403 ("permission denied, or the resource doesn't exist"), which
+    // is neither, and it is what filled the log once per day. Markers are deleted, not patched.
+    await this.patchChain.catch(() => {});
     if (this.markerName) await this.client.deleteMessage(this.markerName).catch(() => {});
   }
 
   /** Post the final answer: either keep the patched placeholder, or replace it. */
   async finish(final: string): Promise<void> {
     this.clearTimers();
+    // The same ordering rule as `abandon`: a queued or in-flight PATCH must settle before this method
+    // starts deleting or replacing the message it targets, or the patch arrives at a message that no
+    // longer exists and reports it as a permission problem.
+    await this.patchChain.catch(() => {});
     // Show the final text (in the placeholder if one exists), then post overflow.
     // Normalise for Chat's renderer *before* splitting so a table can't be cut
     // in half; the client normalises again on the way out (it's idempotent).

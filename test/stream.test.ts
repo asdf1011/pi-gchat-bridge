@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { splitMessage, toolStatusLine } from "../src/stream.js";
+import { ReplyStream, splitMessage, toolStatusLine } from "../src/stream.js";
 
 test("splitMessage keeps short text as one chunk", () => {
   assert.deepEqual(splitMessage("hello", 10), ["hello"]);
@@ -43,4 +43,45 @@ test("splitMessage closes and reopens a fenced code block across the cut", () =>
   }
   const codeLines = chunks.join("\n").split("\n").filter((l) => l.trim() !== "```");
   assert.deepEqual(codeLines, ["line one", "line two", "line three"]);
+});
+
+test("a patch in flight lands before the placeholder is deleted", async () => {
+  // The chronic log line this is for: `PATCH … 403 "permission denied, or the resource doesn't
+  // exist"`, about once a day. Neither was true — the placeholder had been deleted a moment earlier
+  // by `finish()`, and a patch that was already in flight arrived afterwards.
+  const calls: string[] = [];
+  const patch = Promise.withResolvers<void>();
+  const client = {
+    sendMessage: async (_space: string, text: string) => {
+      calls.push(`post:${text}`);
+    },
+    createMessage: async () => "messages/marker",
+    updateMessage: async (_name: string, _text: string) => {
+      calls.push("patch:start");
+      await patch.promise;
+      calls.push("patch:end");
+      return true;
+    },
+    deleteMessage: async () => {
+      calls.push("delete");
+    },
+  } as unknown as ConstructorParameters<typeof ReplyStream>[0];
+
+  const stream = new ReplyStream(client, "spaces/S", undefined, "tester", { replaceOnFinish: true });
+  // The placeholder is opened by `register()`'s timer (`MARKER_DELAY_MS`) and a patch without one is
+  // a no-op — which is why the first three versions of this test saw no patch at all.
+  stream.register("thread-1");
+  await new Promise((resolve) => setTimeout(resolve, 3200));
+  stream.onSnapshot("half an answer");
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.ok(calls.includes("patch:start"), calls.join(","));
+
+  const finishing = stream.finish("the whole answer");
+  assert.ok(!calls.includes("delete"), "the message is not deleted while a patch is in flight");
+
+  patch.resolve();
+  await finishing;
+  const patchEnd = calls.indexOf("patch:end");
+  const deleted = calls.indexOf("delete");
+  assert.ok(patchEnd !== -1 && deleted > patchEnd, `patch landed first: ${calls.join(",")}`);
 });
