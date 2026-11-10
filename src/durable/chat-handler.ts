@@ -11,7 +11,7 @@ import { logger } from "../logger.js";
 import { AgentRouter } from "../agent-sessions.js";
 import { runDurableCommand } from "../adapter/commands.js";
 import { applyDurableTopicSummary } from "./topic.js";
-import { failureNotice } from "./failure-notice.js";
+import { classifyModelFailure, describeModelFailure } from "./model-failure.js";
 import type { ChatClient } from "../chat-client.js";
 import type { Config } from "../config.js";
 import type { DurableRouter } from "../adapter/router.js";
@@ -127,17 +127,22 @@ export function chatHandler(options: ChatHandlerOptions): ChatHandler {
         // archaeology; these four facts make it a single line.
         const reason = settled.status === "unanswered" ? settled.reason : undefined;
         const detail = settled.status === "unanswered" ? settled.detail : undefined;
+        // A provider failure gets its own summary in the line, because the raw
+        // detail is a JSON envelope and the useful part of it is one field: "402:
+        // {\"message\":\"Insufficient Balance\"...}" is a billing problem, and the log
+        // should say so rather than leave a reader to parse a payload.
+        const failure = classifyModelFailure(reason, detail);
         logger.info(
           `[chat] ${display}: no answer text status=${settled.status}` +
             `${reason ? ` reason=${reason}` : ""}` +
             ` after ${turnMs}ms conversation=${delivered.conversationId}` +
+            (failure ? ` failure=${JSON.stringify(describeModelFailure(failure))}` : "") +
             (detail === undefined ? "" : ` detail=${JSON.stringify(detail).slice(0, 300)}`),
         );
-        // The notice is the handler's because the handler is what knows *why*: the
-        // painter only ever sees that no answer entry arrived.
-        await options.client
-          .sendMessage(spaceName, failureNotice(settled.status, reason, turnMs), threadName)
-          .catch((error) => logger.error("[chat] empty-reply notice failed:", (error as Error).message));
+        // The notice is written by the host, in `observeFiles`, as an entry stamped
+        // with this surface — so it arrives the way an answer does, quoting the prompt,
+        // and the same code covers the web page. Posting it here as well would put two
+        // notices in the thread for one failed turn.
         return "ok";
       }
 

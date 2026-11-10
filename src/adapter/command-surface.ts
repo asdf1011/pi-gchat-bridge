@@ -320,20 +320,32 @@ export async function runCommand(
     // Read-only and slow-ish (a provider API per provider, with a timeout), which is why the seam
     // runs it rather than an adapter: the keys and the connection details live where the host is.
     const quotas = await seam.quota();
+    // What the bridge recorded when turns actually died, alongside what the provider
+    // says now. The two answer different questions and can disagree: a balance API can
+    // report funds while the key is still rejected, and a provider can be unreachable
+    // for a probe while the last turn succeeded. A recorded failure is also the only
+    // evidence available when the probe cannot reach the provider at all.
+    const recorded = await seam.modelFailures().catch(() => []);
+    const failing = new Map(recorded.map((failure) => [failure.provider, failure]));
     return {
       kind: "list",
       title: "Provider quota",
       empty: "No providers are configured, so there is nothing to check.",
-      rows: quotas.map((quota) => ({
-        label: quota.provider + (quota.paid ? " (paid)" : " (free)"),
-        detail: [
-          quota.balance ?? quota.note ?? (quota.queried ? "" : "no quota API"),
-          quota.models.slice(0, 3).join(", ") + (quota.models.length > 3 ? "…" : ""),
-          quota.paid && quota.topUpUrl ? quota.topUpUrl : "",
-        ]
-          .filter(Boolean)
-          .join(" · "),
-      })),
+      rows: quotas.map((quota) => {
+        const failure = failing.get(quota.provider);
+        return {
+          label: quota.provider + (quota.paid ? " (paid)" : " (free)"),
+          detail: [
+            quota.balance ?? quota.note ?? (quota.queried ? "" : "no quota API"),
+            // Last turn's failure, which is why the user is looking at this card.
+            failure ? `last turn failed: ${failure.summary}` : "",
+            quota.models.slice(0, 3).join(", ") + (quota.models.length > 3 ? "…" : ""),
+            quota.paid && quota.topUpUrl ? quota.topUpUrl : "",
+          ]
+            .filter(Boolean)
+            .join(" · "),
+        };
+      }),
     };
   }
 

@@ -59,6 +59,9 @@ function fakeSeam(overrides: Partial<Record<keyof SessionHost, unknown>> = {}): 
       { provider: "deepseek", models: ["flash"], paid: true, queried: true, available: true, balance: "12.40 CNY", topUpUrl: "https://platform.deepseek.com/top_up" },
       { provider: "local", models: ["tiny"], paid: false, queried: false, note: "no quota API" },
     ],
+    // No recorded provider failures in the base fake: the happy path is what most commands
+    // assume, and the failures branch has its own test below.
+    modelFailures: async () => [],
     label: async (...args: unknown[]) => {
       calls.label.push(args);
       return true;
@@ -259,6 +262,32 @@ test("/quota is a list of providers, with what each one has left", async () => {
   assert.match(response.rows[0]!.detail ?? "", /12\.40 CNY/);
   assert.match(response.rows[0]!.detail ?? "", /top_up/, "a paid provider says where to add credit");
   assert.match(response.rows[1]!.detail ?? "", /no quota API/, "and an unqueried one says why");
+});
+
+test("/quota says when the last turn on a provider failed", async () => {
+  // The outage this came from: every turn died on a 402, and /quota showed a healthy
+  // balance because the probe and the turn were asking different things — the probe
+  // reached the provider, the turn did not get through. The recorded failure is what
+  // explains the failure the user actually just experienced.
+  const { seam } = fakeSeam({
+    modelFailures: async () => [
+      {
+        provider: "deepseek",
+        kind: "balance",
+        action: "top_up",
+        summary: "Insufficient Balance",
+        persistent: true,
+        at: 1,
+        reason: "model_error",
+      },
+    ],
+  });
+  const response = await runCommand(seam, subject, { text: "/quota" });
+  assert.equal(response.kind, "list");
+  assert.ok(response.kind === "list");
+  assert.match(response.rows[0]!.detail ?? "", /last turn failed: Insufficient Balance/);
+  // A provider with no recorded failure says nothing about one.
+  assert.doesNotMatch(response.rows[1]!.detail ?? "", /last turn failed/);
 });
 
 test("a preview re-asks the form for another model's levels, and applies nothing", async () => {

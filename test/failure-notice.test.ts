@@ -47,3 +47,56 @@ test("a missing reason does not produce a dangling separator", () => {
 test("sub-second durations render without a bare .0", () => {
   assert.match(failureNotice("unanswered", undefined, 400), /0\.4s/);
 });
+
+// --- provider failures -------------------------------------------------------
+//
+// The case these were added for: every turn failed on a 402, and the notice said
+// "send it again" — advice that could not work, repeated until the user asked
+// whether the bot was still working at all.
+
+/** The detail the durable engine produced for the real outage. */
+const REAL_402 =
+  '402: {"message":"Insufficient Balance (request_id: 6420546f)","type":"insufficient_balance_error"}';
+
+test("a balance failure says to top up, and does not suggest retrying", () => {
+  const notice = failureNotice("unanswered", "model_error", 1600, REAL_402);
+  assert.match(notice, /Insufficient Balance/);
+  assert.match(notice, /\/quota/);
+  assert.match(notice, /top up/i);
+  assert.doesNotMatch(notice, /send it again/);
+});
+
+test("an auth failure points at config rather than at retrying", () => {
+  const notice = failureNotice("unanswered", "model_error", 900, '401: {"message":"Invalid API key"}');
+  assert.match(notice, /Invalid API key/);
+  assert.match(notice, /\/model/);
+  assert.doesNotMatch(notice, /send it again/);
+});
+
+test("a context overflow suggests compacting", () => {
+  const notice = failureNotice(
+    "unanswered",
+    "model_error",
+    2000,
+    "400: maximum context length is 16384 tokens",
+  );
+  assert.match(notice, /\/compact/);
+});
+
+test("a throttle is still offered as a retry", () => {
+  const notice = failureNotice("unanswered", "model_error", 800, "429: Rate limit reached");
+  assert.match(notice, /retrying/i);
+  assert.doesNotMatch(notice, /top up/i);
+});
+
+test("an unclassified model error keeps the generic retry wording", () => {
+  const notice = failureNotice("unanswered", "model_error", 1500, "something odd happened");
+  assert.match(notice, /send it again/);
+  assert.match(notice, /something odd happened/);
+});
+
+test("an abort is never described as a provider problem", () => {
+  const notice = failureNotice("unanswered", "aborted", 9000, REAL_402);
+  assert.match(notice, /was stopped/);
+  assert.doesNotMatch(notice, /top up/i);
+});

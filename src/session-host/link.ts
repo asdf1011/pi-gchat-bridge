@@ -55,6 +55,7 @@ import type {
   HostInfo,
   ModelInfo,
   NamedConversation,
+  ProviderFailure,
   ProviderQuota,
   SessionHost,
   Settled,
@@ -104,7 +105,10 @@ export function serveSessionHost(seam: SessionHost): Host {
       }),
     bind: async ({ name, conversation }) => (await seam.bind(name, conversation)) ?? null,
     label: ({ name, label }) => seam.label(name, label),
+    writeNotice: async ({ conversationId, submission, text }: { conversationId: number; submission: number; text: string }) =>
+      (await seam.writeNotice(conversationId, submission, text)) ?? null,
     quota: () => seam.quota() as Promise<ProviderQuota[]>,
+    modelFailures: () => seam.modelFailures() as Promise<ProviderFailure[]>,
     secrets: () => seam.secrets() as Promise<{ name: string; addedBy?: string }[]>,
     setSecret: ({ name, value, addedBy }: { name: string; value: string; addedBy: string }) =>
       seam.setSecret(name, value, addedBy),
@@ -510,9 +514,18 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
     unbind: () => {
       throw notImplemented("unbind");
     },
+    writeNotice: async (conversationId: number, submission: number, text: string) => {
+      const root = await session();
+      const id = await host.root((ctx) => root.writeNotice({ conversationId, submission, text }, ctx));
+      return id ?? undefined;
+    },
     quota: async () => {
       const root = await session();
       return (await host.root((ctx) => root.quota({}, ctx))) as readonly ProviderQuota[];
+    },
+    modelFailures: async () => {
+      const root = await session();
+      return (await host.root((ctx) => root.modelFailures({}, ctx))) as readonly ProviderFailure[];
     },
     secrets: async () => {
       const root = await session();

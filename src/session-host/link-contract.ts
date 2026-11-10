@@ -115,6 +115,18 @@ export const ProviderQuotaSchema = Type.Object({
   note: Type.Optional(Type.String()),
 });
 
+/** A recorded provider failure, as `/status` reports it. Mirrors `ProviderFailure` at the seam. */
+export const ProviderFailureSchema = Type.Object({
+  provider: Type.String(),
+  kind: Type.String(),
+  action: Type.String(),
+  summary: Type.String(),
+  persistent: Type.Boolean(),
+  at: Type.Number(),
+  conversationId: Type.Optional(Type.Number()),
+  reason: Type.String(),
+});
+
 export const AgentConfigSchema = Type.Object({
   model: Type.Object({ provider: Type.String(), modelId: Type.String() }),
   thinkingLevel: Type.Optional(Type.String()),
@@ -419,7 +431,30 @@ export const SessionContract = remote("pi-bridge.session", {
          * conversation — and because the check reads `models.json` and calls the providers, so it
          * can only run where the host is.
          */
+        /**
+         * Write a failure notice as the answer to a submission.
+         *
+         * Session-level because it names the submission it answers, and that is what decides
+         * which surface the notice returns to. Distinct from a conversation's `write`, which is
+         * commentary the painter never posts; this one must appear as a reply or the turn looks
+         * hung — and it must reach the person who is waiting, not a log.
+         */
+        writeNotice: method(
+          Type.Object({
+            conversationId: Type.Number(),
+            submission: Type.Number(),
+            text: Type.String(),
+          }),
+          Type.Union([Type.Number(), Type.Null()]),
+        ),
         quota: method(Type.Object({}), Type.Array(ProviderQuotaSchema)),
+        /**
+         * Provider failures the bridge recorded, newest first.
+         *
+         * Unlike `quota`, this makes no network call: it is what the host saw when a turn
+         * actually died, so it answers during an outage — which is the only time it is asked.
+         */
+        modelFailures: method(Type.Object({}), Type.Array(ProviderFailureSchema)),
         /** Where the host is running: storage path, working directory, start time. */
         info: method(Type.Object({}), HostInfoSchema),
         /**

@@ -296,6 +296,35 @@ async function main(): Promise<void> {
             res.end(JSON.stringify({ idle: busy.length === 0, busy }));
             return;
           }
+          // GET /status: is anything wrong with the models, as opposed to with us?
+          //
+          // `/healthz` answers "is this process alive", which stayed `ok` through an
+          // entire outage where every turn died on a 402 — the bridge was up and
+          // useless, and nothing that watched it could tell. This endpoint answers
+          // the other question, from the record the failure sink keeps. 200 when no
+          // provider is failing, 503 when one is persistent (a balance or a key),
+          // so a monitor can distinguish "restart me" from "go and pay".
+          if (req.method === "GET" && url.pathname === "/status") {
+            let failures;
+            try {
+              failures = await hostSeam.modelFailures();
+            } catch (error) {
+              res.writeHead(500, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ ok: false, error: (error as Error).message }));
+              return;
+            }
+            const blocked = failures.filter((failure) => failure.persistent === true);
+            res.writeHead(blocked.length === 0 ? 200 : 503, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify({
+                ok: blocked.length === 0,
+                model: `${defaultModel.provider}/${defaultModel.modelId}`,
+                failing: blocked.length > 0,
+                failures,
+              }),
+            );
+            return;
+          }
           // /notify is served by the Chat adapter, which is where the Chat client is. This process
           // answers with where to look rather than a bare 404: a silent one here is how scheduled
           // notifications stopped once before, and the cron jobs now point at the adapter

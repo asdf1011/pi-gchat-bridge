@@ -58,6 +58,15 @@ export interface ProviderQuota {
   note?: string;
 }
 
+/**
+ * A provider failure the bridge recorded, for `/status`.
+ *
+ * The seam's shape, not the document's, for the same reason `ProviderQuota` is: it crosses the
+ * link, and a shape defined on both sides is a shape that drifts.
+ */
+import type { ProviderFailure as RecordedProviderFailure } from "../durable/model-failures-doc.js";
+export type ProviderFailure = RecordedProviderFailure;
+
 /** Token and cost totals, summed over every model one conversation has used. */
 export interface UsageTotals {
   input: number;
@@ -604,6 +613,17 @@ export interface SessionHost {
   /** Write an adapter-authored entry into a conversation. Returns its id. */
   write(conversationId: number, entry: AdapterEntry, options?: { signal?: AbortSignal }): Promise<number>;
 
+  /**
+   * Write a failure notice as an answer, so the asking surface sees it.
+   *
+   * Separate from `write` because the stamp is the point: an ordinary adapter entry is
+   * commentary the painter deliberately never posts, while this one has to appear as the
+   * reply to a prompt that will otherwise have no reply at all. `submission` is what ties
+   * it to that prompt (and to whichever surface asked), so the notice lands in front of
+   * the person who is waiting for an answer rather than in a log.
+   */
+  writeNotice(conversationId: number, submission: number, text: string, options?: { signal?: AbortSignal }): Promise<number | undefined>;
+
   // --- Adapter-owned durable state ----------------------------------------
   //
   // D5 in the doc said "one generic primitive, namespaced". These turned out to
@@ -676,6 +696,16 @@ export interface SessionHost {
    * `note` is where that goes.
    */
   quota(options?: { signal?: AbortSignal }): Promise<readonly ProviderQuota[]>;
+
+  /**
+   * Provider failures the bridge has seen, newest first, cleared by a success.
+   *
+   * Distinct from `quota`, which asks the provider *now*: this is what the bridge
+   * recorded when a turn actually died, so it costs no network call and survives
+   * the provider being unreachable. `/status` reads it; a surface can show it to
+   * explain why every turn is failing without waiting for `/quota`.
+   */
+  modelFailures(options?: { signal?: AbortSignal }): Promise<readonly ProviderFailure[]>;
 
   /** Store-wide token and cost totals. */
   usage(options?: { signal?: AbortSignal }): Promise<{ models: Record<string, unknown>; tools: Record<string, unknown> }>;

@@ -46,6 +46,9 @@ import {
 } from "../durable/comments.js";
 import { filesChangedSince } from "../durable/observed-files.js";
 import { armSteerWatch } from "../durable/steer-watch.js";
+import { classifyModelFailure } from "../durable/model-failure.js";
+import { failureNotice } from "../durable/failure-notice.js";
+import { providerOf } from "../durable/model-failures-doc.js";
 import type { BridgeHost } from "../durable/host.js";
 import { logger } from "../logger.js";
 import { checkProviderQuotas } from "../quota.js";
@@ -65,6 +68,7 @@ import type {
   TranscriptMessage,
   MessageContent,
   NamedConversation,
+  ProviderFailure,
   ProviderQuota,
   HostInfo,
   SessionHost,
@@ -179,7 +183,12 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
     startedAt: number,
   ): Promise<void> {
     try {
-      await host.awaitSubmission(submissionId);
+      const settled = await host.awaitSubmission(submissionId);
+      // A provider failure is the one outcome worth recording about the *bridge*
+      // rather than about the conversation. It is noted here because this is the
+      // single place both surfaces pass through: Chat and web both submit and
+      // forget, so a surface that never learns why its turn died is the norm.
+      noteModelFailure(conversationId, submissionId, settled, Date.now() - startedAt);
       // The walk runs first, deliberately. `commitTurn` writes into `.jj/`, which
       // the walk already skips, but ordering it this way means no harness write
       // can ever be picked up as a file the turn produced.
@@ -218,6 +227,56 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
         options.onObserveError?.(error);
       }
     }
+  }
+
+  /**
+   * Record a provider failure, or clear one when the turn succeeded.
+   *
+   * Fire-and-forget: bookkeeping about a failure must never turn a failed turn
+   * into a thrown one, and the notice the user sees is not allowed to wait on a
+   * document write. A conversation's model identifies the provider; when it
+   * cannot be found the failure is recorded under `unknown` rather than dropped,
+   * because "something failed and we don't know where" is still better than the
+   * silence this replaces.
+   */
+  function noteModelFailure(
+    conversationId: number,
+    submissionId: number,
+    settled: { status: string; reason?: string; detail?: unknown },
+    turnMs: number,
+  ): void {
+    void (async () => {
+      try {
+        const info = await host.conversationState(conversationId);
+        const provider = info?.provider ?? providerOf(info?.model) ?? "unknown";
+        if (settled.status === "done") {
+          await host.clearModelFailure(provider);
+          return;
+        }
+        const failure = classifyModelFailure(settled.reason, settled.detail);
+        // Not every failed turn is a provider failure — an abort is not, and a
+        // reset is not — so only a classified model error is recorded.
+        if (!failure) return;
+        await host.recordModelFailure(provider, failure, {
+          reason: settled.reason ?? "model_error",
+          conversationId,
+        });
+        // The explanation goes into the transcript as the reply to the prompt, so the
+        // surface that asked shows it. Without this a provider outage is silence on the
+        // web page: the spin stops, no answer arrives, and nothing says why. Chat has its
+        // own notice in `chat-handler`, but that code is not on the web path — writing
+        // the entry here is what covers both.
+        await host
+          .writeFailureNotice(
+            conversationId,
+            submissionId,
+            failureNotice(settled.status, settled.reason, turnMs, settled.detail),
+          )
+          .catch(() => undefined);
+      } catch {
+        // Observing is best-effort; see `onObserveError`.
+      }
+    })();
   }
 
   return {
@@ -541,6 +600,10 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
       return host.writeEntry(conversationId, entry);
     },
 
+    async writeNotice(conversationId: number, submission: number, text: string): Promise<number | undefined> {
+      return host.writeFailureNotice(conversationId, submission, text);
+    },
+
     async recordVerdict(name: string, verdict: AdapterVerdict): Promise<void> {
       return host.recordVerdict(name, verdict);
     },
@@ -586,6 +649,12 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
       // The same check the Chat card has always used — one mechanism, two callers. It reads
       // `models.json` and calls the providers, which is why it is here and not in an adapter.
       return checkProviderQuotas(await host.listModels());
+    },
+
+    async modelFailures(): Promise<readonly ProviderFailure[]> {
+      // Recorded by the failure sink, not probed: this answers "what failed lately",
+      // which is answerable while the provider is unreachable — the one time it matters.
+      return host.modelFailures();
     },
 
     async usage(): Promise<{ models: Record<string, unknown>; tools: Record<string, unknown> }> {
