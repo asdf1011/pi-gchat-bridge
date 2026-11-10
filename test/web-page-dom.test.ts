@@ -1870,3 +1870,88 @@ test("a conversation with no format does not claim to know the model", async () 
     h?.close();
   }
 });
+
+test("a repeated failure backs off instead of hammering every second", async () => {
+  // A fixed one-second retry is right for a bridge that is restarting and wrong for
+  // one that is down for an hour: 3,600 requests, and no room for the restarter to
+  // breathe. The delay doubles.
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ pathname: "/7/", conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    const doc = h.dom.window.document;
+
+    // Fail three times in a row, waiting out each (short) backoff.
+    for (const wait of [1100, 2100]) {
+      const last = h.sources.at(-1)!;
+      last.close();
+      last.triggerError();
+      await new Promise((resolve) => setTimeout(resolve, wait));
+    }
+    const last = h.sources.at(-1)!;
+    last.close();
+    last.triggerError();
+
+    // From the third attempt on, the footer says how long it is waiting — otherwise
+    // "reconnecting…" that never resolves is indistinguishable from a dead page.
+    assert.match(doc.getElementById("tool")?.textContent ?? "", /reconnecting… \(\d+s\)/);
+    // And the attempt count is bounded by the waits, not by the elapsed time: a
+    // fixed 1s retry would have produced one attempt per second.
+    assert.ok(h.sources.length <= 4, `expected backoff, got ${h.sources.length} attempts`);
+  } finally {
+    h?.close();
+  }
+});
+
+test("a backed-off footer still clears when a stream finally opens", async () => {
+  // The bug this pins: the open handler compared the footer to the literal
+  // "reconnecting…", so once the backoff started printing "reconnecting… (4s)" the
+  // comparison never matched and the footer kept claiming to reconnect on a
+  // perfectly healthy stream.
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ pathname: "/7/", conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    const doc = h.dom.window.document;
+
+    // Get into the state where the footer carries a delay.
+    for (const wait of [1100, 2100, 4100]) {
+      const current = h.sources.at(-1)!;
+      current.close();
+      current.triggerError();
+      await new Promise((resolve) => setTimeout(resolve, wait));
+    }
+    assert.match(doc.getElementById("tool")?.textContent ?? "", /\(\d+s\)/);
+
+    // Now the stream opens.
+    h.sources.at(-1)!.listeners.get("open")?.forEach((fn) => fn({ data: "" }));
+    assert.equal(doc.getElementById("tool")?.textContent ?? "", "");
+  } finally {
+    h?.close();
+  }
+});
+
+test("coming back to the tab after a long silence reconnects even if the stream looks open", async () => {
+  // A slept laptop or a dead NAT entry leaves a stream that never errored and still
+  // reports OPEN, so the old visibility check — "reconnect only if readyState !== 1" —
+  // did nothing and the pane silently stopped updating.
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ pathname: "/7/", conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    const doc = h.dom.window.document;
+    assert.equal(h.sources.length, 1);
+
+    // Open, never delivered anything, and time has passed.
+    const realNow = Date.now;
+    h.dom.window.Date.now = () => realNow() + 120_000;
+    try {
+      Object.defineProperty(doc, "visibilityState", { value: "visible", configurable: true });
+      doc.dispatchEvent(new h.dom.window.Event("visibilitychange"));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    } finally {
+      h.dom.window.Date.now = realNow;
+    }
+
+    assert.equal(h.sources.length, 2, "the stale stream was replaced");
+  } finally {
+    h?.close();
+  }
+});
