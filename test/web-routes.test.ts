@@ -471,10 +471,11 @@ test("the conversation list and a submit still answer as before", async () => {
 test("health and notify are not the adapter's to answer", async () => {
   const served = await serve(fakeSeam());
   try {
-    for (const path of ["/healthz", "/notify"]) {
+    for (const path of ["/healthz", "/status", "/notify"]) {
       const response = await fetch(`${served.base}${path}`, { method: path === "/notify" ? "POST" : "GET" });
-      // Falls through to the caller's 404: the session host owns both, and an
-      // adapter answering them would misreport which process is alive.
+      // Falls through to the caller's 404: the session host owns all three, and an
+      // adapter answering them would misreport which process is alive — or, for
+      // `/status`, which providers are broken.
       assert.equal(response.status, 404, path);
     }
   } finally {

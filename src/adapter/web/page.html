@@ -91,8 +91,29 @@
      just a time. Bubbles cap their width so long answers stay readable, and the
      colours follow the system scheme. */
   :root { --bubble-pi: #f1f2f4; --bubble-me: #d6e4fd; --bubble-code: Canvas;
-    --content: 54rem; }
-  @media (prefers-color-scheme: dark) { :root { --bubble-pi: #2a2b2e; --bubble-me: #24405f; } }
+    --content: 54rem;
+    /* The composer's controls, in one place. `--accent` is the send action and
+       nothing else, so "the blue button does the blue thing" holds wherever this
+       page grows another control. `--control` is the neutral tone the secondary
+       buttons share with the message box, so the row reads as one object rather
+       than three unrelated pills.
+       Radii and heights are tokens for the same reason: the row had four
+       different corner treatments and two different heights, which is what made
+       it look assembled rather than designed. */
+    --accent: #2557d6; --accent-ink: #fff; --accent-hover: #1e4ac2;
+    --control: #dfe8fb; --control-ink: #16244a; --control-hover: #cfdcf9;
+    --radius-control: 1.5rem;   /* a pill: the composer's shape */
+    --radius-inner: .5rem;      /* the notch on the trailing edge */
+    /* The row's control height. A starting value only: `matchControlHeight()`
+       overwrites it with the box's measured resting height on first paint, so the
+       buttons follow the box instead of a number that drifts from it. */
+    --control-h: 3.5rem; }
+  @media (prefers-color-scheme: dark) { :root {
+    --bubble-pi: #2a2b2e; --bubble-me: #24405f;
+    --accent: #3d6ee8; --accent-ink: #fff; --accent-hover: #4a7bf5;
+    --control: #223350; --control-ink: #dde6fb; --control-hover: #2b3f61;
+    --bubble-code: #1b1c1f;
+  } }
   #log .msg { display: flex; gap: .55rem; margin: 0 0 .9rem; align-items: flex-start; }
   #log .msg.me { flex-direction: row-reverse; }
   #log .msg > .col { display: flex; flex-direction: column; min-width: 0; max-width: min(46rem, 86%); }
@@ -138,8 +159,14 @@
   #tool { padding: .25rem 1rem; font: 12px var(--mono); opacity: .7; min-height: 1.6em; }
   /* The button sits on the baseline of the box, not stretched to its full
      height, so a grown textarea does not drag it into a tall slab. */
-  form { display: flex; gap: .5rem; border-top: 1px solid #8884; align-items: flex-end;
+  form { display: flex; gap: .5rem; border-top: 1px solid #8883; align-items: flex-end;
     padding: .75rem max(.75rem, calc((100% - var(--content)) / 2)); }
+  /* Controls sit on the box's baseline at its resting height, and stay there as it
+     grows. `--control-h` is measured from the box itself (see `matchControlHeight`)
+     rather than guessed: a textarea's height comes from its line-height, padding
+     and an inline height set by `fitBox`, so any constant drifts the moment the
+     font or the padding changes — which is how the row ended up ragged twice. */
+  form > button, #send-group { min-height: var(--control-h); }
   /* The box is shaped like the message it becomes: same colour, radius and
      padding as a `me` bubble, with the tighter corner on the trailing side. The
      send button matches it, so the composer and the sent message read as the
@@ -147,17 +174,38 @@
      Starts at one comfortable line and grows with the message (see fitBox).
      Past 40vh it stops and scrolls — a long paste should stay readable
      without pushing the whole conversation off the screen. */
-  textarea { flex: 1; resize: none; min-height: 3.5rem; max-height: 40vh; overflow-y: auto;
-    font: inherit; color: inherit; background: var(--bubble-me); border: 0;
-    border-radius: 1rem; border-top-right-radius: .3rem; padding: .65rem .9rem; }
-  textarea::placeholder { color: color-mix(in srgb, CanvasText 55%, transparent); }
-  textarea:focus { outline: 2px solid color-mix(in srgb, CanvasText 25%, transparent); outline-offset: 1px; }
+  /* The box is a normal rounded field; its height is whatever one line needs, and
+     `fitBox()` grows it from there. The composer's other controls match *it* rather
+     than the reverse — deriving the box's padding from a target height went wrong
+     because `scrollHeight` already counts padding, so the box doubled it and sat
+     20px taller than the buttons beside it. */
+  textarea { flex: 1; resize: none; max-height: 40vh; overflow-y: auto;
+    font: inherit; color: var(--control-ink); background: var(--control); border: 0;
+    border-radius: var(--radius-control); border-top-right-radius: var(--radius-inner);
+    line-height: 1.5; padding: .7rem 1rem; }
+  textarea::placeholder { color: color-mix(in srgb, var(--control-ink) 45%, transparent); }
+  /* Focus is a ring in the accent, not a browser outline: it matches the send
+     button, so "this is the thing I am in" is the same colour as "this is the
+     thing I press". */
+  textarea:focus { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+    outline-offset: 1px; }
   /* `flex: none` because the textarea's flex:1 will otherwise squeeze the button
      until its label overflows the pill — visible as soon as the box is wide. */
   button { flex: none; white-space: nowrap; padding: .6rem 1.1rem; font: inherit;
     color: inherit; background: var(--bubble-me); border: 0; border-radius: 1rem;
     border-top-right-radius: .3rem; cursor: pointer; }
   button:hover { filter: brightness(.96); }
+  /* A control in the composer row: the neutral pill, sized and rounded the same
+     as the box it sits beside. The attach button is the one that got this wrong
+     — a smaller radius and a different height, so it looked borrowed from another
+     part of the page. */
+  form > button {
+    display: flex; align-items: center; justify-content: center;
+    background: var(--control); color: var(--control-ink);
+    border-radius: var(--radius-control); border-top-right-radius: var(--radius-inner);
+    padding: 0; width: var(--control-h); font-size: 1.1rem; line-height: 1;
+  }
+  form > button:hover { filter: none; background: var(--control-hover); }
   /* Artifacts: a floating toggle and a drawer that is hidden until asked for.
      The pane is an iframe on the artifact origin — a different origin, so it is
      sandboxed there and cannot reach this page's DOM or cookies. */
@@ -228,7 +276,122 @@
     width: 1.25rem; height: 1.25rem; font-size: .7rem; line-height: 1; border-radius: 50%;
     border: 1px solid #8886; background: Canvas; cursor: pointer; }
   /* Attach: the file picker's button, shaped like the send button beside it. */
-  #attach { padding: .6rem .8rem; }
+  /* The attach button is a square the height of the box now (see `form > button`),
+     so it is sized by `width`, not by padding. Kept as its own rule for the icon
+     size, which padding cannot express. */
+  #attach { font-size: 1.1rem; }
+  /* Send, split: the label sends, the caret opens the format menu.
+     One control, not two, because sending is the action and the format is a
+     property *of* it — a separate pill beside Send made them look like siblings
+     when one is the verb and the other is a setting. The two halves share a
+     background and a border so they read as one pill, with a hairline where the
+     caret begins, and the composer's tight corner is on the caret's trailing edge
+     so the shape closes the way the box does. */
+  #send-group { display: flex; flex: none; align-items: stretch;
+    border-radius: var(--radius-control); border-top-right-radius: var(--radius-inner);
+    overflow: hidden; background: var(--accent); color: var(--accent-ink);
+    /* A soft lift, so the one saturated object in the row reads as the action
+       rather than as another field. */
+    box-shadow: 0 1px 2px color-mix(in srgb, var(--accent) 35%, transparent); }
+  #send-group button { border-radius: 0; background: none; color: inherit;
+    padding: 0 1.25rem; font-weight: 550; letter-spacing: .01em; }
+  /* The seam between the halves. It is the caret's leading border, so it moves
+     with the caret and the two halves never drift apart; drawn in the ink colour
+     at low alpha, it reads as a division of one surface rather than a stroke
+     between two. */
+  #send-group #send-menu { padding: 0 .85rem; display: flex; align-items: center;
+    border-left: 1px solid color-mix(in srgb, var(--accent-ink) 30%, transparent); }
+  /* A CSS triangle: the caret in the reference is a solid glyph, and a border
+     triangle scales with font-size without shipping an image or a font dependency. */
+  #send-caret { display: block; width: 0; height: 0; font-size: 1rem;
+    border-left: .28em solid transparent; border-right: .28em solid transparent;
+    border-top: .34em solid currentColor; }
+  /* Open: the caret points at what it opened. Rotating the same triangle rather
+     than swapping glyphs keeps one element and one animation. */
+  #send-menu[aria-expanded="true"] #send-caret { transform: rotate(180deg); }
+  #send-caret { transition: transform .12s ease; }
+  @media (prefers-reduced-motion: reduce) { #send-caret { transition: none; } }
+  /* Hover and focus apply to the half under the pointer, not the whole group: a
+     shared highlight would suggest pressing either half does the same thing. */
+  /* Hover is a real colour, not a filter: `brightness()` on a saturated blue
+     washes it toward grey, which is why the row looked faded at rest. */
+  #send-group button:hover { background: var(--accent-hover); }
+  #send-group button:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent-ink) 70%, transparent);
+    outline-offset: -4px; }
+  /* Open: the caret's half stays lit while its menu is showing, so the popup is
+     never detached from the button that opened it. */
+  #send-group #send-menu[aria-expanded="true"] { background: var(--accent-hover); }
+  /* What will answer, said once, under the caret — the menu's header names the
+     current format so the popup is never a list of models with no context. */
+  #picker .format-now { padding: .6rem .8rem; font-size: .85em; line-height: 1.4;
+    background: color-mix(in srgb, CanvasText 3%, Canvas); opacity: .9; }
+  #picker .format-now b { font-weight: 600; }
+  /* The section labels are the popup's only structure, so they are spaced as
+     headings rather than floated as faint text. */
+  #picker .section { padding: .7rem .8rem .25rem; font-size: .7em; text-transform: uppercase;
+    letter-spacing: .06em; opacity: .5; font-weight: 600; }
+  #picker #picker-thinking-heading { border-top: 1px solid #8883; margin-top: .25rem; }
+  /* The picker: one element, two presentations. On a wide screen it is a small
+     box anchored to the pills; on a phone it takes the screen, because a dropdown
+     under a thumb is a pointer game and the list can be forty models long.
+     `position: fixed` rather than absolute so the popup is not clipped by the
+     composer's `overflow`, and the coordinates come from the button's own rect
+     (see placePicker). */
+  /* `height` as well as `max-height`: with only a max, the flex children size to
+     content and the list never becomes the scroller — it just gets clipped by the
+     container. A definite height is what gives `flex: 1` something to divide. */
+  #picker { position: fixed; z-index: 30; display: flex; flex-direction: column;
+    min-width: 16rem; max-width: min(28rem, calc(100vw - 1.5rem));
+    max-height: min(70vh, 34rem); background: Canvas; color: CanvasText;
+    border: 1px solid #8884; border-radius: .75rem; overflow: hidden;
+    /* Two shadows, not one: a tight edge to sit the popup on the page and a wide
+       soft one to lift it. A single mid-blur shadow reads as a grey halo. */
+    box-shadow: 0 1px 2px #0002, 0 .75rem 2rem #0000001f; }
+  #picker[hidden] { display: none; }
+  #picker .search { display: flex; padding: .5rem; border-bottom: 1px solid #8883; }
+  #picker .search[hidden] { display: none; }
+  #picker .search input { flex: 1; min-width: 0; font: inherit; padding: .4rem .55rem;
+    border-radius: .45rem; border: 1px solid #8886; background: Canvas; color: inherit; }
+  /* The list scrolls, not the popup: the search box has to stay put while a long
+     list is scrolled, or typing buries itself. */
+  /* Only the model list scrolls: it is the long one, and it is the one being
+     searched. The thinking list sizes to its handful of rows, so it never eats the
+     space the models need — two `flex: 1` lists fight for height and neither ends
+     up scrolling, which showed as a cl:ipped model row and a popup off-screen. */
+  /* Every non-scrolling child is `flex: none`, so the container's max-height is
+     spent on the list rather than shared out among headers — without this the
+     headings shrank and the list overflowed the popup instead of scrolling. */
+  #picker > * { flex: none; }
+  #picker ul { list-style: none; margin: 0; padding: .25rem; }
+  /* The scroll window. Capped in vh so a deployment with forty models still shows a
+     popup that fits on screen, and the text search is the way through the rest. */
+  #picker #picker-list { overflow: auto; flex: 1 1 auto; min-height: 0; }
+  /* A level list is never long; cap it anyway so a model with many levels cannot
+     push the popup past the viewport. */
+  #picker #picker-levels { overflow: auto; max-height: 12rem; flex: none; }
+  #picker .item { display: flex; flex-direction: column; align-items: flex-start; gap: .1rem;
+    width: 100%; text-align: left; padding: .55rem .65rem; border: 1px solid transparent;
+    border-radius: .5rem; background: none; color: inherit; cursor: pointer; font: inherit; }
+  /* Hover is the composer's own neutral, so the popup and the row it came from
+     share a palette instead of the popup having a private set of greys. */
+  #picker .item:hover, #picker .item:focus-visible {
+    background: color-mix(in srgb, var(--accent) 9%, transparent); }
+  #picker .item:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 50%, transparent);
+    outline-offset: -2px; }
+  /* The current one is marked twice — a tint and a tick in the accent — because
+     colour alone is not a signal somebody can read on a phone in sunlight. */
+  #picker .item.current { background: color-mix(in srgb, var(--accent) 7%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
+  #picker .item .name { display: flex; align-items: center; gap: .4rem; width: 100%; }
+  #picker .item .name span:first-child { flex: 1; min-width: 0; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  #picker .item .tick { flex: none; color: var(--accent); font-weight: 700; }
+  #picker .item .detail { font-size: .78em; opacity: .65; }
+  #picker .empty { padding: .6rem; font-size: .9em; opacity: .7; }
+  /* Tapping outside closes, which is what a popup teaches people to expect. It
+     covers the page but not the picker, so the picker stays interactive. */
+  #picker-scrim { position: fixed; inset: 0; z-index: 29; background: transparent; }
+  #picker-scrim[hidden] { display: none; }
   /* Why an attachment did not make it — a file that is not an image, or one too
      big to send. Above the composer, where the thumbnails would have appeared, so
      the message is attached to the thing that was refused rather than to the
@@ -334,10 +497,27 @@
     #log .msg { gap: .4rem; }
     #pane { min-height: 0; }
     form { padding: .5rem; gap: .4rem; }
-    textarea { min-height: 3rem; padding: .55rem .7rem; }
+    textarea { padding: .6rem .8rem; }
     button { padding: .55rem .85rem; }
     #attachments img { height: 3.2rem; }
-    #attach { padding: .55rem .7rem; }
+    #attach { font-size: 1rem; }
+    /* The picker becomes a sheet: full width, up from the bottom edge, tall
+       enough to be a list rather than a peek. Anchoring it to a button is
+       pointless under a thumb, and a 60vh box floating mid-screen wastes the
+       half of the screen it is not using. */
+    #picker { left: 0; right: 0; bottom: 0; top: auto; max-width: none; min-width: 0;
+      max-height: 78vh; border-radius: .9rem .9rem 0 0; border-bottom: 0; }
+    /* Roomier rows: a 2.5rem target is comfortable, a 1.8rem one is a coin toss. */
+    #picker .item { padding: .7rem .75rem; }
+    #picker ul { padding-bottom: max(.4rem, env(safe-area-inset-bottom)); }
+    /* A split button is one control, so it still fits beside the box on a phone
+       without a second line: the caret is the only extra width it costs. The box
+       takes the remaining space and the send group keeps its natural size. */
+    #send-group { flex: none; }
+    /* Narrower, not shorter: the height is the shared control height, so the whole
+       row still lines up. */
+    #send-group button { padding: 0 .9rem; }
+    #send-group #send-menu { padding: 0 .65rem; }
     #artifacts { position: fixed; inset: 0; width: 100%; border-left: 0; }
     #artifacts-resize { display: none; }
     #new-chat { right: .75rem; bottom: .75rem; }
@@ -381,9 +561,37 @@
            way in, because a picker's filter is a hint, not a guarantee. -->
       <input id="attach-input" type="file" accept="image/*" multiple hidden>
       <button id="attach" type="button" title="Attach an image" aria-label="Attach an image">📎</button>
-      <button>Send</button>
+      <!-- Send, with the format behind a caret on its trailing edge: a split
+           button. Sending is what the button is for, so it stays one button and
+           keeps its size; what will answer is a property *of* sending, which is
+           why it lives under the caret rather than beside it. The trailing corner
+           keeps the composer's tighter radius all the way across. -->
+      <div id="send-group">
+        <button id="send-primary" type="submit">Send</button>
+        <button id="send-menu" type="button" aria-haspopup="dialog" aria-expanded="false"
+                title="Model and thinking level" aria-label="Choose model and thinking level">
+          <span id="send-caret" aria-hidden="true"></span>
+        </button>
+      </div>
     </form>
   </div>
+</div>
+<!-- One picker for both buttons. Which list it shows is decided at open time,
+     so the two never drift apart and there is one close path to get right. -->
+<div id="picker-scrim" hidden></div>
+<div id="picker" hidden role="dialog" aria-modal="false" aria-label="Model and thinking level">
+  <div class="search" hidden>
+    <input id="picker-search" type="search" placeholder="Search models…"
+           aria-label="Search models" autocomplete="off">
+  </div>
+  <!-- Both lists live in one menu, model first: the caret opens "what will answer",
+       and the thinking level is part of that answer rather than a second place to
+       look. One popup, so there is never two of them open at once. -->
+  <p class="format-now" id="picker-now"></p>
+  <p class="section" id="picker-model-heading">Model</p>
+  <ul id="picker-list" role="listbox" aria-labelledby="picker-model-heading"></ul>
+  <p class="section" id="picker-thinking-heading" hidden>Thinking</p>
+  <ul id="picker-levels" role="listbox" aria-labelledby="picker-thinking-heading" hidden></ul>
 </div>
 <button id="new-chat" title="Start a new conversation" aria-label="New chat">＋</button>
 <aside id="artifacts" hidden>
@@ -480,6 +688,12 @@ let current;
 let source;
 /** Pending reconnect for a stream the browser has given up on. */
 let reconnectTimer;
+/** Consecutive failed attempts, for the backoff. Reset when a stream opens. */
+let reconnectAttempts = 0;
+/** When the open stream last proved it was alive (a frame, or the server's keepalive). */
+let lastFrameAt = 0;
+/** Watches for silence on a stream that never errored. */
+let livenessTimer;
 const log = document.getElementById('log');
 const tool = document.getElementById('tool');
 const textBox = document.getElementById('text');
@@ -908,9 +1122,18 @@ function connectStream(id) {
     clearTimeout(reconnectTimer);
     reconnectTimer = undefined;
   }
+  if (livenessTimer) {
+    clearInterval(livenessTimer);
+    livenessTimer = undefined;
+  }
 
   source = new EventSource(rel('api/c/' + id + '/events'));
+  // Any frame proves the stream is alive. The server writes a `: keepalive` comment
+  // every 15s precisely so a quiet conversation can still prove it; that comment
+  // does not surface as a named event, so the watchdog below has its own grace.
+  lastFrameAt = Date.now();
   source.addEventListener('text', (e) => {
+    lastFrameAt = Date.now();
     const d = JSON.parse(e.data);
     const wasBusy = liveText !== '';
     liveText = d.text;
@@ -940,7 +1163,16 @@ function connectStream(id) {
     // A stream that opens is no longer reconnecting, whatever the last error said. Without this
     // the footer keeps the message for ever on an idle conversation, because no frame arrives to
     // overwrite it.
-    if (tool.textContent === 'reconnecting…') tool.textContent = '';
+    // Not `=== 'reconnecting…'`: an attempt that showed its delay says
+    // "reconnecting… (4s)", and an equality check against the bare string silently
+    // stopped clearing the footer the moment the backoff started counting. Match the
+    // prefix, which is the part that means "not connected".
+    if (tool.textContent.startsWith('reconnecting…')) tool.textContent = '';
+    // A stream that opened is a stream that works, so the next failure starts its
+    // backoff from the bottom again rather than from wherever a bad patch left it.
+    reconnectAttempts = 0;
+    lastFrameAt = Date.now();
+    startLivenessWatch(id);
     if (!pageVersion || reloadedForVersion) return;
     try {
       const environment = await (await fetch(rel('api/environment'))).json();
@@ -957,6 +1189,7 @@ function connectStream(id) {
   });
 
   source.addEventListener('tool', (e) => {
+    lastFrameAt = Date.now();
     const d = JSON.parse(e.data);
     // The server words this exactly as Chat does; the page just shows it.
     statusLine = d ? String(d.line || '') : '';
@@ -971,11 +1204,65 @@ function connectStream(id) {
     tool.textContent = 'reconnecting…';
     const gone = !source || source.readyState === 2; // EventSource.CLOSED
     if (!gone || reconnectTimer) return;
-    reconnectTimer = setTimeout(() => {
-      reconnectTimer = undefined;
-      connectStream(id);
-    }, 1000);
+    scheduleReconnect(id);
   });
+}
+
+/**
+ * Try again, backing off.
+ *
+ * A fixed one-second retry is right for a bridge that is restarting and wrong for
+ * one that is down for an hour: the pane would issue 3,600 requests and give the
+ * restarter no room to breathe. The delay doubles from 1s to 30s, so the first
+ * retry is still instant but a long outage settles into something polite.
+ *
+ * The footer says which it is, because "reconnecting…" that never resolves is
+ * indistinguishable from a page that has quietly died.
+ */
+function scheduleReconnect(id) {
+  if (reconnectTimer) return;
+  const delay = Math.min(1000 * 2 ** reconnectAttempts, 30_000);
+  reconnectAttempts += 1;
+  if (reconnectAttempts > 2) {
+    const secs = Math.round(delay / 1000);
+    tool.textContent = `reconnecting… (${secs}s)`;
+  }
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = undefined;
+    connectStream(id);
+  }, delay);
+}
+
+/**
+ * Notice a stream that has stopped delivering, without ever erroring.
+ *
+ * The failure this exists for: a half-open connection. A dead NAT entry, a laptop
+ * that slept, a proxy that dropped the stream while both ends still believe it is
+ * up. Nothing fires — no `error`, no `close`, `readyState` stays OPEN — so the pane
+ * sits there looking healthy and simply never updates again. That is precisely what
+ * coming back to the tab after a while looked like.
+ *
+ * The server writes a `: keepalive` comment every 15s, so silence for well over
+ * twice that means the connection is dead whatever the socket says. Reconnecting is
+ * cheap and safe: the first frame after a reconnect is the whole current state, so
+ * nothing is missed by starting over.
+ */
+function startLivenessWatch(id) {
+  if (livenessTimer) clearInterval(livenessTimer);
+  // 40s: two missed keepalives and a margin, so an ordinary hiccup or a slow
+  // scheduler tick does not churn the connection.
+  const SILENCE_MS = 40_000;
+  livenessTimer = setInterval(() => {
+    if (!source || source.readyState !== 1) {
+      // A stream that is not open is the `error` handler's business, not this one's.
+      return;
+    }
+    if (Date.now() - lastFrameAt < SILENCE_MS) return;
+    // Deliberately silent in the footer: from the reader's point of view nothing
+    // happened, and if the reconnect works nothing will have. Announcing a blip that
+    // fixes itself is worse than the blip.
+    connectStream(id);
+  }, 10_000);
 }
 
 /**
@@ -992,6 +1279,9 @@ async function loadTitle() {
     if (conversation && (conversation.name || conversation.chatKey)) {
       heading.textContent = conversation.name || conversation.chatKey;
     }
+    // The same response carries the format, so the model and thinking pills can
+    // say what will answer before anything is typed — one fetch, not two.
+    adoptFormat(conversation);
   } catch {
     // The id is a fine fallback: the pane below is the thing being read.
   }
@@ -1006,10 +1296,32 @@ async function loadTitle() {
 function fitBox() {
   textBox.style.height = 'auto';
   const border = textBox.offsetHeight - textBox.clientHeight;
-  textBox.style.height = textBox.scrollHeight + border + 'px';
+  // Never below the row's control height. `scrollHeight` measures content and
+  // padding, so an empty box would otherwise resolve shorter than the buttons
+  // beside it and the composer would sit ragged; the CSS `min-height` cannot help
+  // once an inline height is set, which is exactly what this function does.
+  const floor = parseFloat(getComputedStyle(textBox).minHeight) || 0;
+  const wanted = Math.max(textBox.scrollHeight + border, floor);
+  textBox.style.height = wanted + 'px';
+  // Publish the resting height for the buttons to match. Only the *empty* box sets
+  // it: once a message is being typed the box grows, and the buttons should stay a
+  // button's height rather than stretching with it.
+  if (textBox.value === '') matchControlHeight(wanted);
+}
+
+/** Make `--control-h` the box's own height, so the row lines up without guessing. */
+function matchControlHeight(height) {
+  document.documentElement.style.setProperty('--control-h', Math.round(height) + 'px');
 }
 
 textBox.addEventListener('input', fitBox);
+// First paint: the box has its resting height once the font has loaded, which is
+// when the buttons can be matched to it. `document.fonts` is optional; a browser
+// without it gets the same result from the timeout.
+if (document.fonts && document.fonts.ready) {
+  document.fonts.ready.then(() => fitBox()).catch(() => {});
+}
+setTimeout(fitBox, 0);
 
 // Paste can land a wall of text in one go, which fires `input` before the
 // layout has the new content in some browsers; re-fit after it has settled.
@@ -1459,7 +1771,354 @@ function renderCommand(shape) {
   commandBody.append(commandText('p', 'This page does not know how to show that answer.'));
 }
 
-// --- Artifacts: a drawer over the conversation, hidden until asked for. ---
+// --- Send, split: which model answers, and how hard it thinks --------------
+//
+// The caret on the Send button opens one menu holding both things that decide how
+// the next message is answered: the model, and that model's thinking level. It is
+// a *split button* rather than a pill standing beside Send because sending is the
+// action and the format is a property of it — two equal buttons made a setting look
+// like a verb. It exists at all because the only way to change the model used to be
+// typing `/model` into the box, which needs both the command and the model's key;
+// when the provider ran out of credit there was no visible way off that model.
+//
+// The menu is one popup containing two lists, model first: "what will answer" and
+// "how hard it thinks about it" are one question asked in two parts. One popup also
+// means there is never a second one to keep in sync.
+//
+// State comes with the conversation (`GET /api/c/<id>` returns `format`), so the
+// menu opens already knowing what is in use, and the list of choices comes from
+// `GET /api/models`, which carries each model's levels — so a level is never
+// offered for a model that does not have it.
+//
+// Applying goes through `/model` like any other surface's would. The page does not
+// decide what a valid combination is; the command does, and a refusal is shown in
+// the command panel where this page has always put an answer.
+
+const picker = document.getElementById('picker');
+const pickerList = document.getElementById('picker-list');
+const pickerLevels = document.getElementById('picker-levels');
+const pickerNow = document.getElementById('picker-now');
+const pickerModelHeading = document.getElementById('picker-model-heading');
+const pickerThinkingHeading = document.getElementById('picker-thinking-heading');
+const pickerSearch = document.getElementById('picker-search');
+/** The row the search box sits in: hidden as a unit, so the border goes with it. */
+const pickerSearchRow = pickerSearch.parentElement;
+const pickerScrim = document.getElementById('picker-scrim');
+const sendMenuButton = document.getElementById('send-menu');
+
+/** The conversation's format, as last reported by the server. */
+let formatState = null;
+/** Whether the menu is open. One menu now, so this is a flag, not a name. */
+let pickerOpen = false;
+/** Every model, with its levels, fetched once and filtered locally. */
+let modelChoices = null;
+
+/** Take the format from a conversation payload, when it carries one. */
+function adoptFormat(conversation) {
+  const format = conversation && conversation.format;
+  if (!format || typeof format.model !== 'string') {
+    // An older payload, or a host that could not answer. The caret still opens (it
+    // can still change the model), but it cannot claim to know the current one.
+    formatState = null;
+    return;
+  }
+  formatState = {
+    model: format.model,
+    thinking: typeof format.thinking === 'string' ? format.thinking : undefined,
+    levels: Array.isArray(format.levels) ? format.levels : [],
+  };
+}
+
+/** The model id from a key, for when the labels have not arrived yet. */
+function shortModelName(key) {
+  const slash = key.indexOf('/');
+  return slash > 0 ? key.slice(slash + 1) : (key || 'Model');
+}
+
+/** The label for a key, once the list has arrived. */
+function modelLabelOf(key) {
+  const chosen = (modelChoices || []).find((model) => model.key === key);
+  return chosen ? chosen.label : shortModelName(key);
+}
+
+/** Load the model list, once. Filtering then costs nothing. */
+async function loadModels() {
+  if (modelChoices) return modelChoices;
+  try {
+    const response = await fetch(rel('api/models'));
+    const body = await response.json();
+    modelChoices = Array.isArray(body && body.models) ? body.models : [];
+  } catch {
+    modelChoices = [];
+  }
+  return modelChoices;
+}
+
+/** Close the menu, restoring focus to the caret that opened it. */
+function closePicker() {
+  pickerOpen = false;
+  picker.hidden = true;
+  pickerScrim.hidden = true;
+  pickerSearchRow.hidden = true;
+  pickerList.innerHTML = '';
+  pickerLevels.innerHTML = '';
+  sendMenuButton.setAttribute('aria-expanded', 'false');
+  // Focus goes back to the caret, so Escape is not a dead end for a keyboard.
+  if (document.activeElement && picker.contains(document.activeElement)) sendMenuButton.focus();
+}
+
+/** Whether the layout is the phone sheet. */
+function isNarrow() {
+  // The same breakpoint the CSS uses, asked in JS so the popup can be positioned
+  // only when it is one. Guarded because a missing `matchMedia` must not take the
+  // menu down with it: an unpositioned list is still a usable one.
+  try {
+    return window.matchMedia('(max-width: 40rem)').matches;
+  } catch {
+    return window.innerWidth <= 640;
+  }
+}
+
+/**
+ * Put the menu next to the caret, or up from the bottom on a phone.
+ *
+ * The sheet is entirely CSS (see the media query): both are the same element, so
+ * there is one list, one search box and one close path. This only computes the
+ * desktop anchor, and only when the layout is a popup — a sheet pinned to the
+ * viewport must not be given coordinates.
+ */
+function placePicker(searchable) {
+  const sheet = isNarrow();
+  // Search for finding a model in a long list, on a screen with no keyboard. On a
+  // desktop the popup is small and scrollable, and a search field inside it is
+  // mostly chrome. Same input either way, so there is one filter.
+  pickerSearchRow.hidden = !(sheet && searchable);
+  if (sheet) {
+    picker.style.left = '';
+    picker.style.top = '';
+    picker.style.bottom = '';
+    return;
+  }
+  const rect = sendMenuButton.getBoundingClientRect();
+  const width = picker.offsetWidth || 320;
+  // Above the button: the composer is at the bottom, so a list below it would be
+  // off-screen. Right-aligned to the caret's trailing edge, so the popup grows
+  // leftwards from the button that opened it rather than off the right edge.
+  const left = Math.min(Math.max(12, rect.right - width), window.innerWidth - width - 12);
+  picker.style.left = left + 'px';
+  picker.style.top = '';
+  picker.style.bottom = (window.innerHeight - rect.top + 6) + 'px';
+}
+
+/** One row: a label, an optional subtitle, a tick when it is the current value. */
+function pickerItem(label, detail, isCurrent, apply) {
+  const item = document.createElement('li');
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'item' + (isCurrent ? ' current' : '');
+  button.setAttribute('role', 'option');
+  button.setAttribute('aria-selected', isCurrent ? 'true' : 'false');
+  const name = document.createElement('span');
+  name.className = 'name';
+  const text = document.createElement('span');
+  text.textContent = label;
+  name.append(text);
+  if (isCurrent) {
+    const tick = document.createElement('span');
+    tick.className = 'tick';
+    tick.textContent = '✓';
+    tick.setAttribute('aria-hidden', 'true');
+    name.append(tick);
+  }
+  button.append(name);
+  if (detail) {
+    const sub = document.createElement('span');
+    sub.className = 'detail';
+    sub.textContent = detail;
+    button.append(sub);
+  }
+  button.onclick = () => apply();
+  item.append(button);
+  return item;
+}
+
+/** Open the menu: the current format, then every model, then this model's levels. */
+async function openPicker() {
+  pickerOpen = true;
+  sendMenuButton.setAttribute('aria-expanded', 'true');
+  picker.hidden = false;
+  pickerScrim.hidden = false;
+  pickerSearch.value = '';
+  renderPickerNow();
+  placePicker(true);
+  drawModels('');
+  if (!pickerSearchRow.hidden) pickerSearch.focus();
+  await loadModels();
+  if (!pickerOpen) return; // closed while loading
+  renderPickerNow();
+  drawModels('');
+  if (pickerSearchRow.hidden) drawLevels();
+}
+
+/** The menu's header: the format the next message will use, in words. */
+function renderPickerNow() {
+  if (!formatState) {
+    pickerNow.textContent = 'Choose the model and thinking level for this conversation.';
+    return;
+  }
+  pickerNow.innerHTML = '';
+  const model = document.createElement('b');
+  model.textContent = modelLabelOf(formatState.model);
+  pickerNow.append('Next message: ', model);
+  if (formatState.thinking) pickerNow.append(' · thinking ');
+  if (formatState.thinking) {
+    const level = document.createElement('b');
+    level.textContent = formatState.thinking;
+    pickerNow.append(level);
+  }
+}
+
+function drawModels(query) {
+  if (!pickerOpen) return;
+  pickerList.innerHTML = '';
+  const needle = (query || '').trim().toLowerCase();
+  const matching = (modelChoices || []).filter((model) => {
+    if (!needle) return true;
+    // Label and key both: searching "flash" means the name, "deepseek" means the
+    // provider in the key.
+    return (model.label || '').toLowerCase().includes(needle)
+      || (model.key || '').toLowerCase().includes(needle);
+  });
+  if (modelChoices && modelChoices.length === 0) {
+    const empty = document.createElement('li');
+    empty.className = 'empty';
+    empty.textContent = 'No models are configured.';
+    pickerList.append(empty);
+  } else if (matching.length === 0) {
+    const empty = document.createElement('li');
+    empty.className = 'empty';
+    empty.textContent = 'No model matches “' + query + '”.';
+    pickerList.append(empty);
+  } else {
+    for (const model of matching) {
+      pickerList.append(pickerItem(
+        model.label || shortModelName(model.key),
+        // No key under the name. `deepseek/deepseek-flash` is the wire format, not
+        // something a person reads, and the label already says which model it is:
+        // "DeepSeek V4.1 Flash". The key is still what gets applied — it just does
+        // not need to be on screen to be understood.
+        '',
+        formatState !== null && model.key === formatState.model,
+        () => void applyFormat(model.key, formatState && formatState.thinking, model.levels),
+      ));
+    }
+  }
+  drawLevels();
+}
+
+/**
+ * The thinking levels of the model in use.
+ *
+ * Hidden entirely when the model has none (a small local model does not think at a
+ * level), rather than shown empty: an empty section reads as a broken page, while
+ * its absence reads as "not applicable".
+ */
+function drawLevels() {
+  if (!pickerOpen || !formatState) {
+    pickerThinkingHeading.hidden = true;
+    pickerLevels.hidden = true;
+    return;
+  }
+  const levels = formatState.levels;
+  const show = levels.length > 0 && (modelChoices === null || !pickerSearch.value.trim());
+  pickerThinkingHeading.hidden = !show;
+  pickerLevels.hidden = !show;
+  pickerLevels.innerHTML = '';
+  if (!show) return;
+  for (const level of levels) {
+    pickerLevels.append(pickerItem(
+      level,
+      '',
+      level === formatState.thinking,
+      () => void applyFormat(formatState.model, level, levels),
+    ));
+  }
+}
+
+/**
+ * Apply a choice, then re-read the format.
+ *
+ * The whole format is sent, not just the field that changed: `/model` takes a model
+ * and a level together, and sending one alone would leave the other to a guess.
+ * A level the new model does not have is replaced by one it does, chosen here, so
+ * switching to a small local model does not mean switching twice.
+ */
+async function applyFormat(modelKey, thinking, levels) {
+  closePicker();
+  // Keep the level by default — switching between reasoning models should not
+  // silently reset how hard they think — but only when the new model has it. A
+  // model with no levels takes none: sending a level to a model that does not think
+  // is a refusal, not a preference.
+  const wanted = thinking !== undefined && levels.includes(thinking) ? thinking : levels[0];
+  try {
+    const response = await fetch(rel('api/c/' + current + '/commands'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: '/model',
+        values: { model: modelKey, ...(wanted === undefined ? {} : { thinking: wanted }) },
+      }),
+    });
+    const shape = await response.json();
+    if (shape && shape.kind !== 'form') {
+      // The command refused. Say so where this page has always put an answer.
+      renderCommand(shape);
+      return;
+    }
+    commandPanel.hidden = true;
+    commandBody.innerHTML = '';
+  } catch {
+    renderCommand({ kind: 'text', text: 'The model change did not go through. Is the bridge still running?' });
+    return;
+  }
+  await refreshFormat();
+}
+
+/**
+ * Re-read the format from the server after a change.
+ *
+ * Re-reading rather than assuming the change landed: `/model` validates (a level
+ * the model does not have is refused), and the caret showing the choice before it
+ * was accepted would be lying for exactly as long as it took the server to disagree.
+ */
+async function refreshFormat() {
+  try {
+    adoptFormat(await (await fetch(rel('api/c/' + current))).json());
+  } catch {
+    // Keep what we have: it is still the last thing the server said.
+  }
+}
+
+sendMenuButton.onclick = () => {
+  if (pickerOpen) closePicker();
+  else void openPicker();
+};
+pickerScrim.onclick = () => closePicker();
+pickerSearch.addEventListener('input', () => drawModels(pickerSearch.value));
+// Escape closes: the menu is a popup, and a popup that traps Escape is a dialog
+// nobody asked for.
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape' || !pickerOpen) return;
+  event.stopPropagation();
+  closePicker();
+});
+// A resize can move the caret out from under a desktop popup, and turning a phone
+// sideways crosses the sheet breakpoint. Closing is simpler than re-anchoring.
+window.addEventListener('resize', () => {
+  if (pickerOpen) closePicker();
+});
+
+// --- Artifacts: a drawer over the conversation, hidden until asked for. ---// --- Artifacts: a drawer over the conversation, hidden until asked for. ---
 //
 // The list comes from this origin (`api/c/<id>/artifacts`), so no CORS. The file
 // itself is framed from the artifact host, which is a *different* origin: it is
@@ -2019,8 +2678,14 @@ document.addEventListener('visibilitychange', () => {
   // Back to the tab: a stream that died while we were away is not going to notice by itself, and
   // waiting for a backoff that may already have elapsed is how "inactive then returning" looks
   // broken. Only reconnect when nothing is open, so a healthy stream is left alone.
-  if (document.visibilityState === 'visible' && current && (!source || source.readyState !== 1)) {
-    connectStream(current);
+  if (document.visibilityState === 'visible' && current) {
+    // Two different kinds of "not open". `readyState !== 1` is a stream the browser
+    // has closed and will never reopen by itself. The second is subtler: a stream
+    // that still claims to be OPEN but has been silent since before the tab was
+    // hidden, which is what a slept laptop leaves behind. Both are worth replacing,
+    // and the reconnect is free because the next frame is the whole current state.
+    const stale = Date.now() - lastFrameAt > 40_000;
+    if (!source || source.readyState !== 1 || stale) connectStream(current);
   }
   if (!document.hidden) void refreshReview();
 });
@@ -2191,6 +2856,10 @@ if (openId === undefined) {
   document.getElementById('back').href = mountRoot();
   current = openId;
   void loadTitle();
+  // Fetched alongside the title, not when the picker first opens: the pill should
+  // say "DeepSeek V4.1 Flash" rather than "deepseek-flash" from the first frame,
+  // and a list this size costs nothing to have ready.
+  void loadModels();
   open(openId);
   // A reload lands here with the fragment still naming the file that was open.
   void restoreArtifact(artifactKeyFromHash());

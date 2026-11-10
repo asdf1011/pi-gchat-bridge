@@ -338,8 +338,53 @@ export async function handleWebRequest(
       res.end(JSON.stringify({ ok: false, error: `no such conversation: ${one[1]}` }));
       return true;
     }
+    // The format comes with the conversation rather than from a second call to
+    // `/model`: the pills have to be right on first paint, and a page that had to
+    // ask twice could show a model it is not actually using for one frame. `state()`
+    // already answers with the model, the level and the levels that model has.
+    const state = await seam.state(found.conversationId).catch(() => undefined);
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(toJson(found)));
+    res.end(
+      JSON.stringify({
+        ...toJson(found),
+        ...(state === undefined
+          ? {}
+          : {
+              format: {
+                model: state.model,
+                ...(state.thinkingLevel === undefined ? {} : { thinking: state.thinkingLevel }),
+                levels: state.supportedLevels ?? [],
+              },
+            }),
+      }),
+    );
+    return true;
+  }
+
+  // The models a picker may offer. Read-only and cheap (a list the host already has),
+  // and deliberately *not* derived from `/model`'s form: a surface that parses a form
+  // to find the models is reimplementing the command, and would break the day the
+  // form grows a field. Levels travel with each model because that is the pair the
+  // picker shows — asking for them separately is a second chance to disagree.
+  if (req.method === "GET" && api === "/api/models") {
+    if (token && req.headers.authorization !== `Bearer ${token}`) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "unauthorized" }));
+      return true;
+    }
+    const models = await seam.models();
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        models: models.map((model) => ({
+          provider: model.provider,
+          id: model.id,
+          key: `${model.provider}/${model.id}`,
+          label: model.label,
+          levels: model.thinkingLevels ?? [],
+        })),
+      }),
+    );
     return true;
   }
 

@@ -46,6 +46,14 @@ async function stubApi(
     history?: { role: string; text: string; html?: string; at?: number }[];
     frames?: { event: string; data: unknown }[];
     onPost?: (body: unknown) => void;
+    /** The format the conversation reports: what the two pills show. */
+    format?: { model: string; thinking?: string; levels?: string[] };
+    /** The models the picker lists. */
+    models?: { provider: string; id: string; label: string; levels?: string[] }[];
+    /** What `POST /commands` answers, so a change can be seen to go through. */
+    commandResponse?: unknown;
+    /** Told about every command post, so a test can read what was applied. */
+    onCommand?: (body: { text?: string; values?: Record<string, string> }) => void;
   } = {},
 ): Promise<void> {
   const conversations = options.conversations ?? CONVERSATIONS;
@@ -98,11 +106,38 @@ async function stubApi(
   );
 
   // The page's own heading: one conversation's name.
+  // The models a picker offers. Registered before the general conversation route
+  // so it is not swallowed by it (both start `/api/`).
+  await page.route("**/api/models", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        models: (options.models ?? []).map((model) => ({
+          ...model,
+          key: `${model.provider}/${model.id}`,
+          levels: model.levels ?? [],
+        })),
+      }),
+    }),
+  );
+
+  await page.route("**/api/c/*/commands", async (route) => {
+    options.onCommand?.(route.request().postDataJSON());
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(options.commandResponse ?? { kind: "text", text: "ok" }),
+    });
+  });
+
   await page.route("**/api/c/*", (route) => {
     const id = Number(/\/api\/c\/(\d+)$/.exec(new URL(route.request().url()).pathname)?.[1] ?? 0);
     const found = conversations.find((conversation) => conversation.conversationId === id);
+    // The format rides with the conversation, the way the real route serves it.
+    const body = found && options.format ? { ...found, format: options.format } : found;
     return found
-      ? route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(found) })
+      ? route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) })
       : route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ ok: false }) });
   });
 
@@ -976,4 +1011,196 @@ test("artifacts: dragging the left edge resizes the drawer, and it is remembered
   await page.mouse.up();
   const widest = (await page.locator("#log").boundingBox())!;
   expect(widest.width).toBeGreaterThanOrEqual(200);
+});
+
+// --- The format picker -------------------------------------------------------
+//
+// jsdom can assert the clicks; only a real browser can assert that the popup is
+// *on screen* and that the phone presentation is a sheet rather than a 16rem box
+// floating under a thumb. Both are the kind of thing that looks right in a DOM
+// dump and wrong in a hand.
+
+/**
+ * Two boxes share an edge, within a pixel.
+ *
+ * A split button where the halves drift apart is two buttons with a gap, which is
+ * the thing this layout exists to avoid — and it is invisible to a DOM assertion.
+ */
+function assertAdjacent(left: { x: number; y: number; width: number; height: number },
+                        right: { x: number; y: number; width: number; height: number }): void {
+  expect(Math.abs(left.x + left.width - right.x)).toBeLessThanOrEqual(1);
+  expect(Math.abs(left.y - right.y)).toBeLessThanOrEqual(1);
+  expect(Math.abs(left.height - right.height)).toBeLessThanOrEqual(1);
+}
+
+const MODELS = [
+  { provider: "deepseek", id: "deepseek-flash", label: "DeepSeek V4.1 Flash", levels: ["low", "high"] },
+  { provider: "llama-local", id: "lfm3", label: "LFM3 (local)", levels: [] },
+];
+
+const FORMAT = { model: "deepseek/deepseek-flash", thinking: "high", levels: ["low", "high"] };
+
+test("the send caret opens a popup that is actually on screen", async ({ page }) => {
+  const errors = watchErrors(page);
+  await stubApi(page, { format: FORMAT, models: MODELS });
+  await page.goto("/7/");
+
+  // A split button: Send and the caret are two halves of one control.
+  const send = page.locator("#send-primary");
+  const caret = page.locator("#send-menu");
+  await expect(send).toBeVisible();
+  await expect(send).toHaveText("Send");
+  await expect(caret).toBeVisible();
+  // Side by side and touching, or it is two buttons with a gap.
+  const sendBox = (await send.boundingBox())!;
+  const caretBox = (await caret.boundingBox())!;
+  assertAdjacent(sendBox, caretBox);
+
+  await caret.click();
+  const picker = page.locator("#picker");
+  await expect(picker).toBeVisible();
+
+  // The popup must be inside the viewport. A list rendered below the composer, or
+  // pushed off the left edge by a narrow window, is "visible" to a DOM check and
+  // unusable to a person.
+  const box = await picker.boundingBox();
+  const viewport = page.viewportSize()!;
+  expect(box).not.toBeNull();
+  expect(box!.x).toBeGreaterThanOrEqual(0);
+  expect(box!.y).toBeGreaterThanOrEqual(0);
+  expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width + 1);
+  expect(box!.y + box!.height).toBeLessThanOrEqual(viewport.height + 1);
+
+  // Anchored to its button, not parked in a corner.
+  const anchor = (await caret.boundingBox())!;
+  expect(box!.y + box!.height).toBeLessThanOrEqual(anchor.y + 1);
+  // Right-aligned to the caret: the popup grows leftwards from the button that
+  // opened it, so it cannot hang off the right edge of a narrow window.
+  expect(Math.abs(box!.x + box!.width - anchor.x - anchor.width)).toBeLessThan(120);
+
+  await expect(page.locator("#picker-list .item")).toHaveCount(2);
+  await expect(page.locator("#picker-list .item.current")).toHaveCount(1);
+  expect(errors).toEqual([]);
+});
+
+test("the composer's controls share one height and one shape", async ({ page }) => {
+  // The row looked assembled because it *was*: the attach button had a different
+  // height and radius from the send group, and the box a different radius again.
+  // Only a real browser can measure this, and the mismatch was invisible to every
+  // DOM assertion.
+  const errors = watchErrors(page);
+  await stubApi(page, { format: FORMAT, models: MODELS });
+  await page.goto("/7/");
+
+  const box = (await page.locator("#text").boundingBox())!;
+  const attach = (await page.locator("#attach").boundingBox())!;
+  const send = (await page.locator("#send-group").boundingBox())!;
+
+  // One height across the row, within a pixel.
+  expect(Math.abs(box.height - attach.height)).toBeLessThanOrEqual(1);
+  expect(Math.abs(box.height - send.height)).toBeLessThanOrEqual(1);
+  // Bottom edges level: the row is baseline-aligned, not ragged.
+  expect(Math.abs(box.y + box.height - (attach.y + attach.height))).toBeLessThanOrEqual(1);
+  expect(Math.abs(box.y + box.height - (send.y + send.height))).toBeLessThanOrEqual(1);
+  // Equal gaps, so the three read as a group rather than three objects.
+  const gapOne = attach.x - (box.x + box.width);
+  const gapTwo = send.x - (attach.x + attach.width);
+  expect(Math.abs(gapOne - gapTwo)).toBeLessThanOrEqual(1);
+
+  // The attach button is a square, not a squashed pill.
+  expect(Math.abs(attach.width - attach.height)).toBeLessThanOrEqual(1);
+
+  // And the send half is visibly the action, not another neutral field.
+  const sendColour = await page.locator("#send-primary").evaluate(
+    (element) => getComputedStyle(element.parentElement!).backgroundColor,
+  );
+  const boxColour = await page.locator("#text").evaluate((element) => getComputedStyle(element).backgroundColor);
+  expect(sendColour).not.toBe(boxColour);
+
+  expect(errors).toEqual([]);
+});
+
+test("a model's row is not taller than its name needs", async ({ page }) => {
+  // The id line under each name doubled every row for information the label
+  // already carried.
+  const errors = watchErrors(page);
+  await stubApi(page, { format: FORMAT, models: MODELS });
+  await page.goto("/7/");
+  await page.locator("#send-menu").click();
+
+  // Name only: no second line in the row.
+  await expect(page.locator("#picker-list .item").first().locator(".detail")).toHaveCount(0);
+  await expect(page.locator("#picker-list .item").first()).toContainText("DeepSeek V4.1 Flash");
+  await expect(page.locator("#picker-list .item").first()).not.toContainText("deepseek/");
+  expect(errors).toEqual([]);
+});
+
+test("on a phone the picker is a full-width sheet with a search box", async ({ page }) => {
+  const errors = watchErrors(page);
+  await stubApi(page, { format: FORMAT, models: MODELS });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/7/");
+
+  await page.locator("#send-menu").click();
+  const picker = page.locator("#picker");
+  await expect(picker).toBeVisible();
+
+  // Full width, pinned to the bottom: a sheet, not a popup.
+  const box = await picker.boundingBox();
+  expect(box!.width).toBeGreaterThanOrEqual(389);
+  expect(box!.y + box!.height).toBeGreaterThanOrEqual(843);
+
+  // And searchable, because finding one model in forty under a thumb is typing.
+  await expect(page.locator("#picker-search")).toBeVisible();
+  await page.locator("#picker-search").fill("local");
+  await expect(page.locator("#picker-list .item")).toHaveCount(1);
+
+  expect(errors).toEqual([]);
+});
+
+test("choosing a model applies it through the command, and the pill updates", async ({ page }) => {
+  const errors = watchErrors(page);
+  const applied: { text?: string; values?: Record<string, string> }[] = [];
+  await stubApi(page, {
+    format: FORMAT,
+    models: MODELS,
+    // The command answers with a form, which is how a successful `/model` replies.
+    commandResponse: { kind: "form", prompt: "Model and thinking level", command: "/model", fields: [] },
+    onCommand: (body) => applied.push(body),
+  });
+  await page.goto("/7/");
+
+  await page.locator("#send-menu").click();
+  await page.locator("#picker-list .item").nth(1).click();
+
+  // The picker shuts on a choice: one tap, not a confirm step.
+  await expect(page.locator("#picker")).toBeHidden();
+
+  expect(applied.length).toBeGreaterThan(0);
+  expect(applied[0]!.text).toBe("/model");
+  expect(applied[0]!.values?.model).toBe("llama-local/lfm3");
+  // A model with no levels is sent with none, rather than with the old model's.
+  expect(applied[0]!.values?.thinking).toBeUndefined();
+  expect(errors).toEqual([]);
+});
+
+test("the thinking section lists levels, and choosing one applies it", async ({ page }) => {
+  const errors = watchErrors(page);
+  const applied: { text?: string; values?: Record<string, string> }[] = [];
+  await stubApi(page, {
+    format: FORMAT,
+    models: MODELS,
+    commandResponse: { kind: "form", prompt: "Model and thinking level", command: "/model", fields: [] },
+    onCommand: (body) => applied.push(body),
+  });
+  await page.goto("/7/");
+
+  await page.locator("#send-menu").click();
+  const rows = page.locator("#picker-levels .item");
+  await expect(rows).toHaveCount(2);
+  await rows.first().click();
+
+  await expect(page.locator("#picker")).toBeHidden();
+  expect(applied[0]!.values).toEqual({ model: "deepseek/deepseek-flash", thinking: "low" });
+  expect(errors).toEqual([]);
 });

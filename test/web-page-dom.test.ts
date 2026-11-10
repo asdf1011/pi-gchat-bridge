@@ -79,6 +79,10 @@ async function loadPage(
     hash?: string;
     /** What the fake answers `POST api/c/<id>/commands` with. */
     commandResponse?: unknown;
+    /** The format the fake reports for the open conversation (model + thinking). */
+    format?: { model: string; thinking?: string; levels?: string[] };
+    /** The models the fake offers a picker. */
+    models?: { provider: string; id: string; label: string; levels?: string[] }[];
   } = {},
 ): Promise<Harness> {
   // Conversation mode: the URL carries the conversation id.
@@ -152,7 +156,17 @@ async function loadPage(
         const one = /\/api\/c\/(\d+)$/.exec(url);
         if (one) {
           const found = conversations.find((c) => c.conversationId === Number(one[1]));
-          return { ok: Boolean(found), status: found ? 200 : 404, json: async () => found ?? {} };
+          // The format rides with the conversation, the way the real route serves it.
+          const body = found && options.format ? { ...found, format: options.format } : (found ?? {});
+          return { ok: Boolean(found), status: found ? 200 : 404, json: async () => body };
+        }
+        if (url.includes("api/models")) {
+          const models = (options.models ?? []).map((model) => ({
+            ...model,
+            key: `${model.provider}/${model.id}`,
+            levels: model.levels ?? [],
+          }));
+          return { ok: true, status: 200, json: async () => ({ models }) };
         }
         if (url.includes("/history")) {
           // Paged the way the real route pages **now**: anchored on an entry id, not on an offset.
@@ -1609,6 +1623,249 @@ test("a row about a conversation is a link here, because this page can open one"
     await h.settle();
     assert.equal(h.requests.filter((request) => request.url.includes("/commands")).length, 1);
     assert.equal(h.requests.length >= before, true);
+  } finally {
+    h?.close();
+  }
+});
+
+// --- The format picker -------------------------------------------------------
+//
+// The model was unreachable from this pane: the only way to change it was to type
+// `/model` into the box, which needs both the command and the model's key. When the
+// provider ran out of credit there was no visible way off that model at all. These
+// pin the two buttons that replaced that, and the two rules that make a picker
+// trustworthy: it shows what is actually in use, and it never offers a setting the
+// server would refuse.
+
+/** The picker's rows, as a test can read them. */
+function pickerRows(doc: Document): HTMLButtonElement[] {
+  return [...doc.querySelectorAll("#picker-list .item")] as HTMLButtonElement[];
+}
+
+const TWO_MODELS = [
+  { provider: "deepseek", id: "deepseek-flash", label: "DeepSeek V4.1 Flash", levels: ["low", "high"] },
+  { provider: "llama-local", id: "lfm3", label: "LFM3 (local)", levels: [] },
+];
+
+test("a conversation shows the format behind the send caret, without opening it", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      conversations: [{ conversationId: 7, chatKey: "k", model: "deepseek/deepseek-flash" }],
+      format: { model: "deepseek/deepseek-flash", thinking: "high", levels: ["low", "high"] },
+      models: TWO_MODELS,
+    });
+    await h.settle();
+    const doc = h.dom.window.document;
+
+    // The caret is the way in, and it is part of the send button rather than a
+    // second control beside it.
+    const menu = doc.getElementById("send-menu")!;
+    assert.equal(menu.hidden, false, "the menu is reachable without typing a command");
+    assert.equal(doc.getElementById("send-primary")!.textContent, "Send");
+
+    // What is in use, in words, once the menu is open.
+    (menu as HTMLButtonElement).click();
+    await h.settle();
+    const now = doc.getElementById("picker-now")!.textContent!;
+    assert.match(now, /DeepSeek V4\.1 Flash/);
+    assert.match(now, /thinking high/);
+  } finally {
+    h?.close();
+  }
+});
+
+test("pressing the model button lists every model, marking the current one", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      conversations: [{ conversationId: 7, chatKey: "k", model: "deepseek/deepseek-flash" }],
+      format: { model: "deepseek/deepseek-flash", thinking: "high", levels: ["low", "high"] },
+      models: TWO_MODELS,
+    });
+    await h.settle();
+    const doc = h.dom.window.document;
+    (doc.getElementById("send-menu") as HTMLButtonElement).click();
+    await h.settle();
+
+    assert.equal(doc.getElementById("picker")!.hidden, false);
+    const rows = pickerRows(doc);
+    assert.equal(rows.length, 2, "every configured model, not just the current one");
+    assert.equal(rows[0]!.classList.contains("current"), true);
+    assert.equal(rows[1]!.classList.contains("current"), false);
+  } finally {
+    h?.close();
+  }
+});
+
+test("a model row shows the name only, not its provider/key", async () => {
+  // The key is the wire format, not something a person reads: "DeepSeek V4.1 Flash"
+  // is the model, and `deepseek/deepseek-flash` under it is noise that made every
+  // row twice as tall to say the same thing.
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      conversations: [{ conversationId: 7, chatKey: "k", model: "deepseek/deepseek-flash" }],
+      format: { model: "deepseek/deepseek-flash", thinking: "high", levels: ["low", "high"] },
+      models: TWO_MODELS,
+    });
+    await h.settle();
+    const doc = h.dom.window.document;
+    (doc.getElementById("send-menu") as HTMLButtonElement).click();
+    await h.settle();
+
+    const rows = pickerRows(doc);
+    assert.equal(rows[0]!.querySelector(".detail"), null, "no key line under the name");
+    assert.equal(rows[0]!.querySelector(".name span")!.textContent, "DeepSeek V4.1 Flash");
+    assert.doesNotMatch(rows[0]!.textContent!, /deepseek\/deepseek-flash/);
+    // The choice is still applied by key, whatever is shown.
+    pickerRows(doc)[0]!.click();
+    await h.settle();
+  } finally {
+    h?.close();
+  }
+});
+
+test("choosing a model sends /model with that model, and the pill follows", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      conversations: [{ conversationId: 7, chatKey: "k", model: "deepseek/deepseek-flash" }],
+      format: { model: "deepseek/deepseek-flash", thinking: "high", levels: ["low", "high"] },
+      models: TWO_MODELS,
+      commandResponse: { kind: "form", prompt: "Model and thinking level", command: "/model", fields: [] },
+    });
+    await h.settle();
+    const doc = h.dom.window.document;
+    (doc.getElementById("send-menu") as HTMLButtonElement).click();
+    await h.settle();
+    pickerRows(doc)[1]!.click();
+    await h.settle();
+
+    const post = h.requests.find((r) => r.method === "POST" && /commands$/.test(r.url));
+    assert.ok(post, "the change goes through the command, not a bespoke endpoint");
+    const body = JSON.parse(post!.body!);
+    assert.equal(body.text, "/model");
+    assert.equal(body.values.model, "llama-local/lfm3");
+    // A level the new model does not have is replaced, not sent to be refused:
+    // switching to a local model should not mean switching twice.
+    assert.equal(body.values.thinking, undefined);
+
+    // The picker shuts once a choice is made.
+    assert.equal(doc.getElementById("picker")!.hidden, true);
+  } finally {
+    h?.close();
+  }
+});
+
+test("the menu lists only the current model's thinking levels", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      conversations: [{ conversationId: 7, chatKey: "k", model: "deepseek/deepseek-flash" }],
+      format: { model: "deepseek/deepseek-flash", thinking: "high", levels: ["low", "high"] },
+      models: TWO_MODELS,
+    });
+    await h.settle();
+    const doc = h.dom.window.document;
+    (doc.getElementById("send-menu") as HTMLButtonElement).click();
+    await h.settle();
+
+    const doc2 = doc;
+    const levels = [...doc2.querySelectorAll("#picker-levels .item")];
+    assert.deepEqual(levels.map((row) => row.querySelector(".name span")!.textContent), ["low", "high"]);
+    // Never a search box here: a handful of levels is a glance.
+    assert.equal(doc.getElementById("picker-search")!.parentElement!.hidden, true);
+  } finally {
+    h?.close();
+  }
+});
+
+test("a model with no thinking levels has no thinking section", async () => {
+  // A dead button that opens an empty list is worse than no button: it reads as
+  // broken rather than as "this model does not think".
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      conversations: [{ conversationId: 7, chatKey: "k", model: "llama-local/lfm3" }],
+      format: { model: "llama-local/lfm3", levels: [] },
+      models: TWO_MODELS,
+    });
+    await h.settle();
+    const doc = h.dom.window.document;
+    (doc.getElementById("send-menu") as HTMLButtonElement).click();
+    await h.settle();
+    // The model list is still there; only the thinking section is gone.
+    assert.ok(pickerRows(doc).length > 0, "the model list is still offered");
+    assert.equal(doc.getElementById("picker-levels")!.hidden, true, "no levels, no section");
+  } finally {
+    h?.close();
+  }
+});
+
+test("a refinement narrower than the list filters it", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      conversations: [{ conversationId: 7, chatKey: "k", model: "deepseek/deepseek-flash" }],
+      format: { model: "deepseek/deepseek-flash", thinking: "high", levels: ["low", "high"] },
+      models: TWO_MODELS,
+    });
+    await h.settle();
+    const doc = h.dom.window.document;
+    (doc.getElementById("send-menu") as HTMLButtonElement).click();
+    await h.settle();
+    assert.equal(pickerRows(doc).length, 2);
+
+    const search = doc.getElementById("picker-search") as HTMLInputElement;
+    search.value = "local";
+    search.dispatchEvent(new h.dom.window.Event("input", { bubbles: true }));
+    await h.settle();
+
+    const rows = pickerRows(doc);
+    assert.equal(rows.length, 1, "only the matching model");
+    assert.match(rows[0]!.textContent!, /LFM3/);
+  } finally {
+    h?.close();
+  }
+});
+
+test("escape closes the picker and nothing else", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      conversations: [{ conversationId: 7, chatKey: "k", model: "deepseek/deepseek-flash" }],
+      format: { model: "deepseek/deepseek-flash", thinking: "high", levels: ["low", "high"] },
+      models: TWO_MODELS,
+    });
+    await h.settle();
+    const doc = h.dom.window.document;
+    (doc.getElementById("send-menu") as HTMLButtonElement).click();
+    await h.settle();
+    assert.equal(doc.getElementById("picker")!.hidden, false);
+
+    doc.dispatchEvent(new h.dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await h.settle();
+    assert.equal(doc.getElementById("picker")!.hidden, true);
+    // The scrim goes with it, or the page stays covered by an invisible sheet.
+    assert.equal(doc.getElementById("picker-scrim")!.hidden, true);
+    assert.equal(doc.getElementById("picker-search")!.parentElement!.hidden, true);
+  } finally {
+    h?.close();
+  }
+});
+
+test("a conversation with no format does not claim to know the model", async () => {
+  // An older host, or one that could not answer. The caret still works — a model can
+  // still be chosen — but the header does not assert one it was never told.
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ conversations: [{ conversationId: 7, chatKey: "k", model: "deepseek/deepseek-flash" }] });
+    await h.settle();
+    const doc = h.dom.window.document;
+    (doc.getElementById("send-menu") as HTMLButtonElement).click();
+    await h.settle();
+    assert.doesNotMatch(doc.getElementById("picker-now")!.textContent!, /Next message:/);
   } finally {
     h?.close();
   }
