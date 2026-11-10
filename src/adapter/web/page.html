@@ -1990,7 +1990,10 @@ async function openPicker() {
   renderPickerNow();
   placePicker(true);
   drawModels('');
-  if (!pickerSearchRow.hidden) pickerSearch.focus();
+  // No focus on the search box. Focusing it raised the on-screen keyboard over a
+  // list that is usually answered by tapping: most visits pick a model, and a
+  // keyboard covering the first rows costs more than typing would save. The box is
+  // still there for the long list, one tap away.
   await loadModels();
   if (!pickerOpen) return; // closed while loading
   renderPickerNow();

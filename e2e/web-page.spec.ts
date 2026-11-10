@@ -1229,3 +1229,26 @@ test("a phone resize while the picker is open does not close it", async ({ page 
   expect(box.width).toBeGreaterThanOrEqual(389);
   expect(errors).toEqual([]);
 });
+
+test("opening the picker does not focus the search box", async ({ page }) => {
+  // Focusing it raised the on-screen keyboard over a list that is usually answered by
+  // tapping. Most visits pick a model; a keyboard covering the first rows costs more
+  // than typing would save. The box is still there, one tap away, for a long list.
+  const errors = watchErrors(page);
+  await stubApi(page, { format: FORMAT, models: MODELS });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/7/");
+
+  await page.locator("#send-menu").click();
+  await expect(page.locator("#picker")).toBeVisible();
+
+  const focused = await page.evaluate(() => document.activeElement?.id ?? "");
+  expect(focused).not.toBe("picker-search");
+  // Focus stays on the control that was pressed, so the menu is not detached from it.
+  expect(focused).toBe("send-menu");
+
+  // And the search still does its job when it is wanted.
+  await page.locator("#picker-search").fill("local");
+  await expect(page.locator("#picker-list .item")).toHaveCount(1);
+  expect(errors).toEqual([]);
+});
