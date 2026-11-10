@@ -52,6 +52,13 @@ import { mergeObserved, type ObservedFile } from "./observed-files.js";
 import { mergeRevisions, type ArtifactRevision } from "./artifact-revisions.js";
 import { originForSubmission, OriginsDoc, withOrigin, type EntryOrigin } from "./origins-doc.js";
 import {
+  ModelFailuresDoc,
+  withoutProviderFailure,
+  withProviderFailure,
+  type ProviderFailure,
+} from "./model-failures-doc.js";
+import type { ModelFailure } from "./model-failure.js";
+import {
   addComment as addCommentTo,
   appendReply,
   appendSubmission,
@@ -887,6 +894,102 @@ export class BridgeHost {
       }).byEntry;
     }, this.context);
     return true;
+  }
+
+  /**
+   * Write a notice into the transcript as an answer, attributed to whoever asked.
+   *
+   * This is the fix for the silence. A turn that dies leaves no answer entry, so both
+   * surfaces showed nothing at all: the web page cleared its "thinking…" bubble and the
+   * conversation simply stopped, which is indistinguishable from a hung bridge. Chat had
+   * its own notice, but chat-handler is not on the web path, so the browser got silence.
+   *
+   * Writing the explanation as an *entry* rather than a side channel is what makes one
+   * implementation serve every surface: each one already reads the transcript, so the
+   * notice arrives the same way an answer does — quoting the prompt, in the same place,
+   * rendered by the same code. The origin stamp is what marks it an answer rather than
+   * commentary (`painter.isAnswer`), and it inherits the prompt's surface, so a turn
+   * started in the browser is reported in the browser.
+   *
+   * The entry is stamped as assistant-role text with no model call: nothing asked the
+   * model anything, and pretending otherwise would put words in its mouth.
+   */
+  async writeFailureNotice(
+    conversationId: number,
+    submission: number,
+    text: string,
+  ): Promise<number | undefined> {
+    const conversation = await this.harness.conversation(
+      conversationId as ConversationId,
+      this.context,
+    );
+    if (!conversation) return undefined;
+    const written = await conversation.commit(
+      (tx) =>
+        tx.appendEntry(conversationId as ConversationId, {
+          kind: "app.notice",
+          data: { text, reason: "model_error" },
+          model: [{ role: "assistant", content: [{ type: "text", text }], timestamp: Date.now() }],
+        } as never),
+      this.context,
+    );
+    const entryId = (written as { id?: unknown })?.id;
+    if (typeof entryId !== "number") return undefined;
+    // Stamped like an answer, so the painter posts it instead of treating it as a turn's
+    // running commentary. Inheriting the prompt's surface is what puts it back in front of
+    // whoever asked.
+    await this.recordAnswerOrigin(conversationId, entryId, submission).catch(() => {});
+    return entryId;
+  }
+
+  /**
+   * Record that a provider refused a turn, so the bridge can report it.
+   *
+   * The durable engine settles the turn and forgets it; only the log remembers,
+   * and the log is not a thing `/status` can read. Recording it here is what
+   * turns "every turn fails with no visible reason" into an answerable state.
+   *
+   * Best-effort by design: failing to record a failure must never turn a failed
+   * turn into a thrown one, so a write error is swallowed by the caller.
+   */
+  async recordModelFailure(
+    provider: string,
+    failure: ModelFailure,
+    extra: { reason: string; conversationId?: number },
+  ): Promise<void> {
+    const at = Date.now();
+    await this.harness.commit(async (tx) => {
+      const doc = await tx.doc(ModelFailuresDoc);
+      doc.byProvider = withProviderFailure(doc, {
+        provider,
+        kind: failure.kind,
+        action: failure.action,
+        summary: failure.summary,
+        persistent: failure.persistent,
+        reason: extra.reason,
+        at,
+        ...(extra.conversationId === undefined ? {} : { conversationId: extra.conversationId }),
+      }).byProvider;
+    }, this.context);
+  }
+
+  /**
+   * Clear a provider's recorded failure, because a turn on it produced an answer.
+   *
+   * Called on the success path for the same reason it is written on the failure
+   * path: a stale 402 that outlives its top-up is worse than no signal at all.
+   */
+  async clearModelFailure(provider: string): Promise<void> {
+    await this.harness.commit(async (tx) => {
+      const doc = await tx.doc(ModelFailuresDoc);
+      doc.byProvider = withoutProviderFailure(doc, provider).byProvider;
+    }, this.context);
+  }
+
+  /** Every provider's most recent failure. Empty when all is well. */
+  async modelFailures(): Promise<readonly ProviderFailure[]> {
+    const value = await this.harness.snapshot(ModelFailuresDoc, this.context);
+    return Object.values(value?.byProvider ?? {}).sort((a, b) => b.at - a.at);
   }
 
   /** Entry ids of the user messages in a conversation, oldest first. */
