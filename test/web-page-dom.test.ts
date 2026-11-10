@@ -1955,3 +1955,71 @@ test("coming back to the tab after a long silence reconnects even if the stream 
     h?.close();
   }
 });
+
+test("a turn keeps what it already said while it goes on to the next step", async () => {
+  // The report: a message appears, then is immediately replaced by "thinking…". A
+  // turn is several messages — say something, call a tool, say something else — and
+  // rendering only the one in flight meant the paragraph being read vanished the
+  // instant the model moved on.
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    const log = h.dom.window.document.getElementById("log")!;
+    const source = h.sources[0]!;
+
+    // The first message of the turn, then the frame where it has moved on and the
+    // live message is briefly empty.
+    source.emit("text", { text: "Looking at that: the radii differ.", busy: true });
+    source.emit("text", { text: "", turn: "Looking at that: the radii differ.", busy: true });
+
+    const bubble = log.querySelector(".msg.live .bubble")!;
+    // The earlier words are still on screen...
+    assert.match(bubble.textContent ?? "", /the radii differ/);
+    // ...and the status sits under them rather than in their place.
+    assert.match(bubble.textContent ?? "", /thinking…/);
+    const said = bubble.querySelector(".said")!;
+    const status = bubble.querySelector(".status")!;
+    assert.ok(said && status, "both blocks present");
+    // Reading order: what was said, then what is happening now.
+    assert.ok(said.compareDocumentPosition(status) & 4, "the status follows the text");
+  } finally {
+    h?.close();
+  }
+});
+
+test("the live message is appended under the text already said, not over it", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    const log = h.dom.window.document.getElementById("log")!;
+    const source = h.sources[0]!;
+
+    source.emit("text", { text: "The fix is", turn: "Looking at that.", busy: true });
+    const bubble = log.querySelector(".msg.live .bubble")!;
+    assert.equal(bubble.querySelector(".said")!.textContent, "Looking at that.");
+    assert.equal(bubble.querySelector(".current")!.textContent, "The fix is");
+    // No status line while text is arriving: a growing message is its own evidence.
+    assert.equal(bubble.querySelector(".status"), null);
+  } finally {
+    h?.close();
+  }
+});
+
+test("a tool run shows alongside the words that announced it", async () => {
+  // Same report, the other half: a tool run should not replace the message.
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    const log = h.dom.window.document.getElementById("log")!;
+    const source = h.sources[0]!;
+
+    source.emit("text", { text: "", turn: "Now let me check the values.", busy: true });
+    source.emit("tool", { name: "bash", status: "running", line: "bash: rg radii" });
+
+    const bubble = log.querySelector(".msg.live .bubble")!;
+    assert.match(bubble.textContent ?? "", /Now let me check the values\./);
+    assert.match(bubble.textContent ?? "", /bash: rg radii/);
+  } finally {
+    h?.close();
+  }
+});

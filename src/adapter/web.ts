@@ -104,7 +104,10 @@ export async function attachWebClient(
   conversationId: number,
   client: SseClient,
 ): Promise<WebClientHandle> {
-  let lastText = "";
+  // The combined key of the last painted turn, seeded with what an empty turn
+  // produces. Starting at "" would make the first frame — an idle conversation
+  // included — look like a change and paint an empty answer.
+  let lastText = "\u0000";
   let lastTool = "";
 
   // The seam sends the current state as the first frame, so there is nothing to
@@ -115,9 +118,19 @@ export async function attachWebClient(
       // Send the in-flight answer as a whole snapshot, not a delta: the Chat
       // sink paints whole snapshots too, and it means a client that misses a
       // frame is still correct on the next one.
-      if (projected.liveText !== lastText) {
-        lastText = projected.liveText;
-        client.send("text", { text: projected.liveText, busy: projected.busy });
+      //
+      // `turnText` rides along because a turn is several messages: the page needs
+      // what was already said *plus* the one being generated, or each new message
+      // replaces the last on screen and the reader loses work they were reading.
+      // Compared as a pair, since either changing is a repaint.
+      const combined = `${projected.turnText}\u0000${projected.liveText}`;
+      if (combined !== lastText) {
+        lastText = combined;
+        client.send("text", {
+          text: projected.liveText,
+          ...(projected.turnText ? { turn: projected.turnText } : {}),
+          busy: projected.busy,
+        });
       }
       // Tool status is a single line, so send it only when it changes. The
       // `detail` is the same summarising the Chat status line does — a command

@@ -426,9 +426,22 @@ export async function handleWebRequest(
           // byte before emitting a tag, so the HTML the pane assigns cannot
           // contain a script — and this origin can submit messages, so an
           // injected one could drive tools.
+          // Both halves of the live turn are rendered here, for the same reason:
+          // our renderer escapes every byte before emitting a tag, so the HTML the
+          // pane assigns cannot contain a script, and this origin can submit
+          // messages. `turnHtml` is the part already said; `html` is the message in
+          // flight. Rendering only the latter was why a turn's earlier paragraphs
+          // could not be shown while it went on to the next one.
+          const turn = event === "text" ? (data as { turn?: unknown }).turn : undefined;
           const payload =
             event === "text" && typeof (data as { text?: unknown }).text === "string"
-              ? { ...(data as object), html: renderMarkdown((data as { text: string }).text, WEB_RENDER_OPTIONS) }
+              ? {
+                  ...(data as object),
+                  html: renderMarkdown((data as { text: string }).text, WEB_RENDER_OPTIONS),
+                  ...(typeof turn === "string" && turn !== ""
+                    ? { turnHtml: renderMarkdown(turn, WEB_RENDER_OPTIONS) }
+                    : {}),
+                }
               : data;
           res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
         } catch {

@@ -128,6 +128,7 @@ export function serveSessionHost(seam: SessionHost): Host {
   host.serve(ConversationContract, ({ conversation }, _principal, self) => {
     const view = self.state("view", ViewSchema, {
       liveText: "",
+      turnText: "",
       busy: false,
       lastAssistantText: "",
       tools: [],

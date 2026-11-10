@@ -54,8 +54,18 @@ export function viewFramePainter(
     // snapshot first would put an answer behind a stale "Thinking…".
     if (wasBusy === true && projected.busy === false) hooks.onSettle?.();
     wasBusy = projected.busy;
-    if (projected.liveText !== painted) {
-      painted = projected.liveText;
+    // What the turn has already said, then the message being generated. A turn is
+    // several messages — say something, call a tool, say something else — and
+    // painting only `liveText` meant each message replaced the last in the Chat
+    // placeholder, so the answer appeared to shrink backwards as the turn went on.
+    // Joined with a blank line, which is where the model's own paragraph breaks are.
+    const body = projected.turnText
+      ? projected.liveText
+        ? `${projected.turnText}\n\n${projected.liveText}`
+        : projected.turnText
+      : projected.liveText;
+    if (body !== painted) {
+      painted = body;
       if (painted !== "") stream.onSnapshot(painted);
     }
     const tool = activeTool(projected.tools);
@@ -127,7 +137,11 @@ export async function attachViewSink(options: ViewSinkOptions): Promise<ViewSink
 
   // Belt and braces for the ordering: if a frame somehow did not arrive first. The painter
   // handles "nothing changed" itself, so this is safe even when the snapshot repeats.
-  if (projected.liveText === "" && handle.snapshot.liveText !== "") apply(handle.snapshot);
+  // Either half counts: a turn whose live message is momentarily empty still has
+  // text worth painting, and checking only `liveText` skipped it.
+  const blank = projected.liveText === "" && projected.turnText === "";
+  const filled = handle.snapshot.liveText !== "" || handle.snapshot.turnText !== "";
+  if (blank && filled) apply(handle.snapshot);
 
   return {
     current: () => projected,

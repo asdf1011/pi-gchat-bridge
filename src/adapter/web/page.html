@@ -133,6 +133,14 @@
   #log .bubble .status { font: .82em var(--mono);
     opacity: .75; white-space: pre-wrap; word-break: break-word; }
   #log .bubble .status + * { margin-top: .5rem; }
+  /* The live turn, in the order it was said: what the turn has already covered, then
+     the message being generated, then the status line. Each is its own block so a
+     paragraph the model has moved on from stays where it was read, and a tool run is
+     visible under the words that announced it rather than in place of them. */
+  #log .bubble .said + .current,
+  #log .bubble .said + .status,
+  #log .bubble .current + .status { margin-top: .7rem; }
+  #log .bubble .status { margin-top: .5rem; }
   #log .images { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .5rem; }
   #log .images img { max-width: min(24rem, 100%); max-height: 24rem; border-radius: .6rem; display: block; }
   #log .bubble > .body:not(:empty) + .status { margin-top: .5rem; }
@@ -703,6 +711,10 @@ const textBox = document.getElementById('text');
 // mid-turn shows the conversation *and* the half-finished reply.
 let transcript = [];
 let liveText = '';
+/** What this turn has already said, before the message now being generated. */
+let turnText = '';
+/** Its rendering, done server-side like `liveHtml`, so the page holds no renderer. */
+let turnHtml = '';
 let liveHtml = '';
 let busy = false;
 let statusLine = '';
@@ -1038,14 +1050,34 @@ function paint() {
     );
   }
   // The live turn: the streaming answer, and the status of whatever is running.
-  if (liveText || busy || statusLine) {
-    const row = messageRow('assistant', liveText ? (liveHtml || escapeText(liveText)) : '', undefined, true);
-    // The bubble exists from the moment the turn starts, so the reply has a home
-    // before it has any text — and the tool line goes *inside* it, the way Chat
-    // paints a status into the message it is editing.
+  if (liveText || turnText || busy || statusLine) {
+    // A turn is several messages: it says something, calls a tool, says something
+    // else. Rendering only the message being generated meant each step *replaced*
+    // the last — the paragraph you were reading vanished the instant the model
+    // started on its next move, and "thinking…" took its place. So what the turn
+    // has already said stays, and the live part is appended beneath it.
+    const row = messageRow('assistant', '', undefined, true);
     const bubble = row.querySelector('.bubble');
+    if (turnText) {
+      const said = document.createElement('div');
+      said.className = 'said';
+      said.innerHTML = turnHtml || escapeText(turnText);
+      bubble.append(said);
+    }
+    if (liveText) {
+      const current = document.createElement('div');
+      current.className = 'current';
+      current.innerHTML = liveHtml || escapeText(liveText);
+      bubble.append(current);
+    }
+    // The status is its own line *under* the text rather than a replacement for it,
+    // so a tool run and the words that announced it are visible together.
     const status = document.createElement('div');
     status.className = 'status';
+    // A tool line if one is running; otherwise "thinking…" only when there is
+    // nothing being written. Text is arriving on the frames, so the stream itself is
+    // the evidence of progress — printing "thinking…" under a message that is
+    // actively growing would be noise competing with the answer.
     status.textContent = statusLine || (busy && !liveText ? 'thinking…' : '');
     if (status.textContent) bubble.append(status);
     log.append(row);
@@ -1137,6 +1169,10 @@ function connectStream(id) {
     const d = JSON.parse(e.data);
     const wasBusy = liveText !== '';
     liveText = d.text;
+    // The frame carries the turn so far as well as the message in flight; both are
+    // needed to show a long answer while it is being assembled.
+    turnText = typeof d.turn === 'string' ? d.turn : '';
+    turnHtml = typeof d.turnHtml === 'string' ? d.turnHtml : '';
     liveHtml = d.html || '';
     busy = Boolean(d.busy);
     if (busy) statusLine = '';
@@ -1147,6 +1183,8 @@ function connectStream(id) {
       setTimeout(() => {
         void loadHistory().then(() => {
           liveText = '';
+          turnText = '';
+          turnHtml = '';
           liveHtml = '';
           paint();
         });

@@ -23,7 +23,7 @@ function turnHost() {
   const messages: { entryId: number; role: "user" | "assistant"; text: string; at?: number; origin?: string }[] = [];
   const frames = new Set<(view: unknown) => void>();
   const state = { liveText: "", busy: false };
-  const view = () => ({ liveText: state.liveText, busy: state.busy, lastAssistantText: "", tools: [] });
+  const view = () => ({ liveText: state.liveText, turnText: "", busy: state.busy, lastAssistantText: "", tools: [] });
   const publish = (): void => {
     for (const frame of frames) frame(view());
   };

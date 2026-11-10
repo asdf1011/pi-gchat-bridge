@@ -49,6 +49,21 @@ export interface ToolLike {
 export interface ProjectedView {
   /** The answer being streamed right now; empty when nothing is generating. */
   liveText: string;
+  /**
+   * What this turn has already said, that `liveText` no longer holds.
+   *
+   * A turn is not one message. The model says something, calls a tool, says
+   * something else, calls another — and `liveText` is only the message being
+   * generated now. Without this, each of those steps *replaces* the last on screen:
+   * the paragraph you were reading vanishes the instant the model starts thinking
+   * about its next move, and is replaced by "thinking…". Prepending it keeps the
+   * turn readable as it is assembled, which is what a reader watching a long answer
+   * is actually doing.
+   *
+   * Only the current turn's own text: an earlier turn's answer is transcript, and
+   * `lastAssistantText` is the field for that.
+   */
+  turnText: string;
   /** The current tool round, in call order, with arguments recovered from the transcript. */
   tools: ToolLike[];
   /** True while a run owns the conversation. */
@@ -94,6 +109,29 @@ function currentRoundArguments(entries: readonly EntryLike[]): Map<string, { nam
   return new Map();
 }
 
+/**
+ * The text this turn has already produced, from the transcript.
+ *
+ * A turn begins at the newest user entry: everything the assistant said after it was
+ * said on the way to where it is now. Only the *text* is taken — an assistant entry
+ * that was really a tool call contributes nothing, and one that both spoke and
+ * called a tool contributes the words, which is exactly what a reader saw happen.
+ *
+ * The current generation is excluded, because `liveText` carries it: including the
+ * partial message twice would make the pane stutter as it streams.
+ */
+function turnTextOf(entries: readonly EntryLike[]): string {
+  const parts: string[] = [];
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry?.kind === "pi.user") break; // the turn starts after the newest prompt
+    if (entry?.kind !== "pi.assistant") continue;
+    const text = messageText(entry.model?.[0]);
+    if (text) parts.unshift(text);
+  }
+  return parts.join("\n\n");
+}
+
 export function projectView(view: ViewLike | undefined): ProjectedView {
   const live = (view?.docs?.["pi.live"] ?? {}) as {
     run?: unknown;
@@ -114,6 +152,10 @@ export function projectView(view: ViewLike | undefined): ProjectedView {
 
   return {
     liveText: messageText(live.generation?.message),
+    // Only while a turn is running. Once it settles the text becomes transcript and
+    // the reader renders it from there; reporting it here as well would show the
+    // same paragraphs twice, once live and once as the finished answer.
+    turnText: live.run === undefined ? "" : turnTextOf(entries),
     tools: (live.tools ?? []).map((tool) => {
       const call = args.get(tool.callId);
       return {

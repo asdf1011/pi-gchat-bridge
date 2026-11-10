@@ -134,6 +134,7 @@ export async function handleV1(
       conversationId,
       view: {
         liveText: view.liveText,
+        turnText: view.turnText,
         busy: view.busy,
         lastAssistantText: view.lastAssistantText,
         tools: view.tools,

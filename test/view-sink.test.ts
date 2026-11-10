@@ -191,3 +191,51 @@ test("the settle edge fires once, and only when a turn actually ended", async ()
   paint(state(false));
   assert.equal(settles, 1, "one edge, one read");
 });
+
+test("the turn so far is painted under the live message, not replaced by it", async () => {
+  // A turn says something, calls a tool, says something else. Painting only the
+  // message in flight made the Chat placeholder shrink backwards: each new message
+  // replaced the one the reader was on.
+  const stream = fakeStream();
+  const fake = fakeSeam({ entries: [], docs: {} });
+  await attachViewSink({ seam: fake.seam, conversationId: 1, stream });
+
+  const withSay = (text: string, said: { kind: string; model: unknown[] }[]) => ({
+    entries: said,
+    docs: { "pi.live": { run: { taskId: 1 }, generation: { message: { content: [{ type: "text", text }] } } } },
+  });
+
+  const saidOnce = [
+    { kind: "pi.user", model: [{ role: "user", content: [{ type: "text", text: "go" }] }] },
+    {
+      kind: "pi.assistant",
+      model: [{ role: "assistant", content: [{ type: "text", text: "Looking at that." }, { type: "toolCall", id: "c1", name: "read", arguments: {} }] }],
+    },
+  ];
+  fake.push(withSay("Now I'll do", saidOnce));
+  fake.push(withSay("Now I'll do a focused pass.", saidOnce));
+
+  const last = stream.snapshots.at(-1)!;
+  assert.match(last, /Looking at that\./);
+  assert.match(last, /Now I'll do a focused pass\./);
+  // In order, and separated so the two paragraphs do not run together.
+  assert.ok(last.indexOf("Looking at that.") < last.indexOf("Now I'll do"), "earlier text comes first");
+  assert.match(last, /Looking at that\.\n\nNow I'll do a focused pass\./);
+});
+
+test("an empty live message still shows what the turn already said", async () => {
+  // Between messages the generation is empty for a moment. The words already said
+  // must not blink out — that gap is exactly the "thinking…" replace the report was
+  // about.
+  const stream = fakeStream();
+  const fake = fakeSeam({ entries: [], docs: {} });
+  await attachViewSink({ seam: fake.seam, conversationId: 1, stream });
+  fake.push({
+    entries: [
+      { kind: "pi.user", model: [{ role: "user", content: [{ type: "text", text: "go" }] }] },
+      { kind: "pi.assistant", model: [{ role: "assistant", content: [{ type: "text", text: "Working on it." }] }] },
+    ],
+    docs: { "pi.live": { run: { taskId: 1 }, generation: { message: { content: [{ type: "text", text: "" }] } } } },
+  });
+  assert.equal(stream.snapshots.at(-1), "Working on it.");
+});

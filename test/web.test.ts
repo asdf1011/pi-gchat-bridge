@@ -43,7 +43,7 @@ function client(): SseClient & { sent: Sent[]; close(): void } {
 
 /** What a conversation looks like to a viewer: the projection, nothing more. */
 function view(text: string, tools: ProjectedView["tools"] = []): ProjectedView {
-  return { liveText: text, tools, busy: text !== "", lastAssistantText: text };
+  return { liveText: text, turnText: "", tools, busy: text !== "", lastAssistantText: text };
 }
 
 interface FakeOptions {

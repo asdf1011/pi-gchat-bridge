@@ -15,6 +15,8 @@ import { hostNamed, method, remote } from "@earendil-works/chord";
 
 export const ViewSchema = Type.Object({
   liveText: Type.String(),
+  /** What the turn has already said, before the message now being generated. */
+  turnText: Type.String(),
   busy: Type.Boolean(),
   lastAssistantText: Type.String(),
   tools: Type.Array(
