@@ -17,13 +17,26 @@ import { MAX_WEB_IMAGES } from "../src/adapter/web.js";
 import type { NamedConversation, SessionHost } from "../src/session-host/api.js";
 import type { ProjectedView } from "../src/session-host/projection.js";
 
-const view: ProjectedView = { liveText: "", busy: false, lastAssistantText: "", tools: [] };
+const view: ProjectedView = { liveText: "", turnText: "", busy: false, lastAssistantText: "", tools: [] };
 
 const submitted: unknown[] = [];
 
-function fakeSeam(
-  options: { conversations?: NamedConversation[]; artifacts?: unknown[]; history?: unknown[] } = {},
-): SessionHost {
+/**
+ * The seam calls these routes make, with the fixture's overrides.
+ *
+ * `comments` and `addComment` were passed by several tests but never declared here,
+ * so they travelled as excess properties the compiler could not see. Tests are
+ * typechecked now, which is how that surfaced.
+ */
+interface FakeSeamOptions {
+  conversations?: NamedConversation[];
+  artifacts?: unknown[];
+  history?: unknown[];
+  comments?: unknown[];
+  addComment?: unknown;
+}
+
+function fakeSeam(options: FakeSeamOptions = {}): SessionHost {
   return {
     // Ids are assigned, because paging is anchored on them: a fixture without ids is a fixture the
     // route cannot page, which is exactly what the route should refuse to invent.

@@ -14,6 +14,10 @@ interface Binding {
   thinking?: string;
   name?: string;
   createdAt: number;
+  /** Last use, for the recent list. Equal to `createdAt` until a turn is taken. */
+  updatedAt?: number;
+  /** Opening words, shown when there is no title yet. */
+  preview?: string;
 }
 
 interface FakeOptions {

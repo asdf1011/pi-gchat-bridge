@@ -257,11 +257,23 @@ test("a painter driven over a link paints a turn end to end", async () => {
         streams.push(record);
         return {
           stream: {
-            text: (full: string) => record.calls.push(`text:${full.length}`),
-            tool: (name: string) => record.calls.push(`tool:${name}`),
-            clearTool: () => record.calls.push("clear"),
-            finish: async (text: string) => record.calls.push(`finish:${text.length}`),
-            abandon: async () => record.calls.push("abandon"),
+            // Bodies, not expression-bodied `push`: `push` returns a number, and these
+            // are declared to return void.
+            text: (full: string) => {
+              record.calls.push(`text:${full.length}`);
+            },
+            tool: (name: string) => {
+              record.calls.push(`tool:${name}`);
+            },
+            clearTool: () => {
+              record.calls.push("clear");
+            },
+            finish: async (text: string) => {
+              record.calls.push(`finish:${text.length}`);
+            },
+            abandon: async () => {
+              record.calls.push("abandon");
+            },
           },
           paint: () => {},
           detach: () => {},

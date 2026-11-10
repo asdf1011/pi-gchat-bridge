@@ -70,16 +70,28 @@ test("a thread keeps the newest exchanges rather than growing forever", () => {
   assert.equal(replies[0]!.text, "reply 10", "oldest dropped");
 });
 
+/**
+ * The id a short id resolves to, asserting it resolved to a comment at all.
+ *
+ * `findByShortId` returns `T | { ambiguous: true } | undefined`, and reading `.id`
+ * straight off that is what the compiler objects to — correctly: an ambiguous
+ * prefix has no id, and the old fixture-shaped access only worked because tests
+ * were not typechecked.
+ */
+function resolvedId(result: { id: string } | { ambiguous: true } | undefined): string | undefined {
+  return result && "id" in result ? result.id : undefined;
+}
+
 test("a short id resolves, and an ambiguous prefix is refused rather than guessed", () => {
   const comments = [comment("2f4f5da0-aaaa"), comment("9c1e0000-bbbb")];
-  assert.equal(findByShortId(comments, "2f4f5da0")?.id, "2f4f5da0-aaaa");
-  assert.equal(findByShortId(comments, "2F4F")?.id, "2f4f5da0-aaaa", "case-insensitive, prefix");
-  assert.equal(findByShortId(comments, "ffff"), undefined);
+  assert.equal(resolvedId(findByShortId(comments, "2f4f5da0")), "2f4f5da0-aaaa");
+  assert.equal(resolvedId(findByShortId(comments, "2F4F")), "2f4f5da0-aaaa", "case-insensitive, prefix");
+  assert.equal(resolvedId(findByShortId(comments, "ffff")), undefined);
 
   const colliding = [comment("abcd1111-aaaa"), comment("abcd2222-bbbb")];
   assert.deepEqual(findByShortId(colliding, "abcd"), { ambiguous: true });
   // A longer prefix disambiguates, which is the escape hatch the tool result names.
-  assert.equal(findByShortId(colliding, "abcd2222")?.id, "abcd2222-bbbb");
+  assert.equal(resolvedId(findByShortId(colliding, "abcd2222")), "abcd2222-bbbb");
 });
 
 test("resolving is silent: it touches neither the transcript nor the model", () => {

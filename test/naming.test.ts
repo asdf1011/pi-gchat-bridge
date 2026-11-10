@@ -40,10 +40,12 @@ function fakeSeam(conversations: NamedConversation[], options: { failFirstTurn?:
 }
 
 test("only conversations without a title need one", () => {
-  assert.equal(needsTitle(conversation({ conversationId: 1 })), true);
-  assert.equal(needsTitle(conversation({ conversationId: 1, label: "Disk images" })), false);
+  // `needsTitle` reads three fields: it does not need an id, a model or a time, and
+  // passing them was a fixture habit rather than a requirement.
+  assert.equal(needsTitle({ name: "threads/1" }), true);
+  assert.equal(needsTitle({ name: "threads/1", label: "Disk images" }), false);
   // A validation thread is machinery, not a conversation a person reads.
-  assert.equal(needsTitle({ conversationId: 2, name: "validation:spaces/S/T", model: "m", createdAt: 0 }), false);
+  assert.equal(needsTitle({ name: "validation:spaces/S/T" }), false);
 });
 
 test("it names every untitled conversation and then stops", async () => {

@@ -32,9 +32,13 @@ import { WEB_PAGE } from "../src/adapter/web.js";
 interface FakeSource {
   url: string;
   closed: boolean;
+  /** `EventSource.readyState`, which the page reads to tell CLOSED from OPEN. */
+  readyState: number;
   listeners: Map<string, ((event: { data: string }) => void)[]>;
   emit(event: string, data: unknown): void;
   triggerError(): void;
+  /** `EventSource.close()`: the page calls it before replacing a stream. */
+  close(): void;
 }
 
 interface Harness {
@@ -1439,6 +1443,8 @@ test("a list of choices is buttons, and pressing one sends its command", async (
     h.dom.window.fetch = async (input: unknown) => {
       const url = String(input);
       h!.requests.push({ url, method: "POST", body: "" });
+      // Only `ok`, `status` and `json` are read by the page; the cast says so rather
+      // than pretending this is a whole `Response`.
       return {
         ok: true,
         status: 200,
@@ -1447,7 +1453,7 @@ test("a list of choices is buttons, and pressing one sends its command", async (
           title: "Recent conversations",
           rows: [{ label: "earlier", detail: "2h ago", command: "/resume 9", current: false }],
         }),
-      };
+      } as unknown as Response;
     };
     const box = doc.getElementById("text") as HTMLTextAreaElement;
     box.value = "/sessions";

@@ -17,7 +17,9 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { Harness, MemoryStorage, createRegistry } from "@earendil-works/pi-durable";
-import { createModels, type Model } from "@earendil-works/pi-ai/models";
+import { createModels } from "@earendil-works/pi-ai/models";
+// `Model` lives on the package root; `./models` only carries the registry.
+import type { Model } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
@@ -40,10 +42,12 @@ function modelRuntime(): ModelRuntime {
       id: "flash",
       name: "flash",
       api: "openai-completions",
+      baseUrl: "https://example.invalid",
       reasoning: true,
       input: ["text"],
       contextWindow: 1000,
-      outputWindow: 100,
+      maxTokens: 100,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     } as Model<any>,
   };
   return {
@@ -88,7 +92,7 @@ async function setup() {
 
   const seam = inProcessSessionHost({ host, roots: [] });
 
-  const router = new DurableRouter(host, { model: { provider: "deepseek", modelId: "flash" } });
+  const router = new DurableRouter(seam, { model: { provider: "deepseek", modelId: "flash" } });
   const state = { setTopicCard() {} } as never;
   return { host, seam, router, client, state, secrets, sent, cards, dir };
 }

@@ -18,7 +18,17 @@ import test, { after } from "node:test";
 
 import { Ledger } from "../src/durable/ledger.js";
 import { Painter, type PaintStream, type PaintSurface } from "../src/durable/painter.js";
-import type { MessageLike } from "../src/durable/entries.js";
+import type { EntryRef } from "../src/durable/entries.js";
+
+/**
+ * A transcript row as the painter reads it.
+ *
+ * `MessageLike` is the *raw* pre-grouping shape; by the time `entriesSince` answers,
+ * an entry always has an id, and the painter depends on that (`entryId > since`).
+ * Using the loose type here let a fixture without ids typecheck against a signature
+ * that requires them.
+ */
+type Row = Omit<EntryRef, "conversationId"> & { origin?: string };
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "paint-"));
 after(() => fs.rmSync(scratch, { recursive: true, force: true }));
@@ -26,7 +36,7 @@ after(() => fs.rmSync(scratch, { recursive: true, force: true }));
 let counter = 0;
 
 /** A transcript: entry id → the messages that entry carries. */
-type Transcript = Record<number, MessageLike[]>;
+type Transcript = Record<number, Row[]>;
 
 function fakeSurface() {
   const streams: { conversationId: number; calls: string[] }[] = [];
@@ -39,8 +49,15 @@ function fakeSurface() {
         text: (full) => record.calls.push(`text:${full.length}`),
         tool: (name) => record.calls.push(`tool:${name}`),
         clearTool: () => record.calls.push("clear"),
-        finish: async (text) => record.calls.push(`finish:${text.length}`),
-        abandon: async () => record.calls.push("abandon"),
+        // Braces, not a bare `push`: `push` returns the new length, and a method
+        // declared `Promise<void>` that resolves to a number is the kind of drift
+        // that only matters when somebody awaits the value.
+        finish: async (text) => {
+          record.calls.push(`finish:${text.length}`);
+        },
+        abandon: async () => {
+          record.calls.push("abandon");
+        },
       };
       // `paint` is the transport's frame→stream rule: the fake records it so a test can see
       // that a pushed frame reached the placeholder.
@@ -54,7 +71,9 @@ function fakeSurface() {
       };
       return { stream, paint, detach() {} };
     },
-    post: async (conversationId, text) => posted.push({ conversationId, text }),
+    post: async (conversationId, text) => {
+      posted.push({ conversationId, text });
+    },
   };
   return {
     surface,
@@ -81,7 +100,7 @@ function painterFor(
 ) {
   const fake = fakeSurface();
   const conversationId = options.conversationId ?? 1;
-  const messages: MessageLike[] = [];
+  const messages: Row[] = [];
   for (const id of Object.keys(transcript).map(Number).sort((a, b) => a - b)) {
     for (const message of transcript[id] ?? []) messages.push({ ...message, entryId: id });
   }
@@ -107,9 +126,9 @@ async function until(check: () => boolean, ms = 500): Promise<void> {
   while (!check() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
 }
 
-const answer = (text: string, origin = "gchat"): MessageLike => ({ role: "assistant", text, origin, at: 1 });
-const commentary = (text: string): MessageLike => ({ role: "assistant", text, at: 1 });
-const prompt = (text: string, origin: string): MessageLike => ({ role: "user", text, origin, at: 1 });
+const answer = (text: string, origin = "gchat"): Row => ({ role: "assistant", text, origin, at: 1, entryId: 0 });
+const commentary = (text: string): Row => ({ role: "assistant", text, at: 1, entryId: 0 });
+const prompt = (text: string, origin: string): Row => ({ role: "user", text, origin, at: 1, entryId: 0 });
 
 test("a settled answer is painted once, then the cursor is past it", async () => {
   const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
@@ -190,7 +209,7 @@ test("the placeholder becomes the answer in place", async () => {
   ledger.adopt(10, "new");
   let busy = true;
   const fake = fakeSurface();
-  const messages: MessageLike[] = [{ role: "user", text: "hi", origin: "gchat", entryId: 11, at: 1 }];
+  const messages: Row[] = [{ role: "user", text: "hi", origin: "gchat", entryId: 11, at: 1 }];
   const painter = new Painter({
     surface: "gchat",
     ledger,
@@ -262,7 +281,7 @@ test("a turn that produced no answer leaves no placeholder and no message", asyn
   ledger.adopt(10, "new");
   const fake = fakeSurface();
   let busy = true;
-  const messages: MessageLike[] = [{ role: "user", text: "hi", origin: "gchat", entryId: 11, at: 1 }];
+  const messages: Row[] = [{ role: "user", text: "hi", origin: "gchat", entryId: 11, at: 1 }];
   const painter = new Painter({
     surface: "gchat",
     ledger,
@@ -325,7 +344,7 @@ test("a conversation with no position is adopted at the head, not replayed", asy
   // history that predates this bridge is not repainted, and the first thing said after
   // it is.
   const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
-  const { painter, posted } = painterFor(ledger, { 11: [answer("x"), { role: "user", text: "hi", origin: "gchat", at: 1 }] });
+  const { painter, posted } = painterFor(ledger, { 11: [answer("x"), prompt("hi", "gchat")] });
 
   const first = await painter.tick();
   assert.equal(first.painted, 0, "adoption is not painting");
@@ -342,7 +361,7 @@ test("a poke finishes the answer immediately, without waiting for a tick", async
   ledger.adopt(10, "new");
   const { painter, posted } = painterFor(ledger, { 11: [answer("the answer")] });
 
-  await painter.poke(1);
+  await painter.poke();
   assert.deepEqual(posted, [{ conversationId: 1, text: "the answer" }]);
   assert.equal(ledger.cursor, 11);
 });
@@ -425,7 +444,7 @@ test("a running turn opens one observer, and its settle edge posts the answer", 
   type Handlers = { frame(p: unknown): void; settled(): void };
   let handlers: Handlers | undefined;
   let observers = 0;
-  const messages: MessageLike[] = [];
+  const messages: Row[] = [];
   let busy = true;
   const painter = new Painter({
     surface: "gchat",

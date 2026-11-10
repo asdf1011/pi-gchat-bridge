@@ -84,6 +84,25 @@ function click(
   } as IncomingMessage;
 }
 
+/**
+ * The bridge's own `StateStore`, stubbed to the two calls these commands make.
+ *
+ * `/model` remembers the card so the topic titler can retitle it later
+ * (`setTopicCard`). The fixture used to leave `state` out entirely, which the
+ * compiler never saw because tests were not typechecked — a `/model` test reaching
+ * that path would have thrown on `undefined.setTopicCard`.
+ */
+function fakeState() {
+  const cards: { key: string; card: unknown }[] = [];
+  return {
+    cards,
+    setTopicCard: (key: string, card: unknown) => {
+      cards.push({ key, card });
+    },
+    takeTopicCard: () => undefined,
+  } as unknown as Parameters<typeof runCommand>[0]["state"];
+}
+
 function ctx(
   client: ChatClient,
   router: AgentRouter,
@@ -93,6 +112,7 @@ function ctx(
   return {
     client,
     router,
+    state: fakeState(),
     incoming,
     sessionKey: "spaces/S/threads/T",
     actionKey: "spaces/S/threads/T",

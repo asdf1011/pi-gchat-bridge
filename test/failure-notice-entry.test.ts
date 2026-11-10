@@ -64,7 +64,7 @@ test("a failure notice is readable in the transcript as the reply", async () => 
   );
   assert.equal(typeof entryId, "number");
 
-  const messages = await host.history(created.conversationId);
+  const messages = (await host.history(created.conversationId)) ?? [];
   const last = messages.at(-1);
   assert.ok(last, "the notice is in the transcript");
   assert.equal(last!.role, "assistant");
@@ -82,7 +82,7 @@ test("the notice is stamped as an answer, so the painter posts it instead of ign
   const entryId = await host.writeFailureNotice(created.conversationId, submission, "top up with /quota");
   assert.equal(typeof entryId, "number");
 
-  const messages = await host.history(created.conversationId);
+  const messages = (await host.history(created.conversationId)) ?? [];
   const notice = messages.find((message) => message.entryId === entryId);
   assert.ok(notice, "the notice carries its entry id");
   assert.notEqual(notice!.origin, undefined, "and so an origin, which is what makes it an answer");
@@ -105,7 +105,7 @@ test("the notice inherits the surface that asked", async () => {
   const entryId = await host.writeFailureNotice(created.conversationId, submissionId, "no balance");
   assert.equal(typeof entryId, "number");
 
-  const messages = await host.history(created.conversationId);
+  const messages = (await host.history(created.conversationId)) ?? [];
   const notice = messages.find((message) => message.entryId === entryId);
   assert.equal(notice?.origin, "webui");
 });

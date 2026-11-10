@@ -9,7 +9,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Harness, MemoryStorage, createRegistry } from "@earendil-works/pi-durable";
-import { createModels, type Model } from "@earendil-works/pi-ai/models";
+import { createModels } from "@earendil-works/pi-ai/models";
+// `Model` lives on the package root; `./models` only carries the registry.
+import type { Model } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
@@ -36,8 +38,8 @@ import {
  */
 function fakeModelRuntime(): ModelRuntime {
   const models: Record<string, Model<any>> = {
-    "llama-local/small": { provider: "llama-local", id: "small", name: "small", api: "openai-completions", reasoning: false, input: ["text"], contextWindow: 1000, outputWindow: 100 } as Model<any>,
-    "deepseek/flash": { provider: "deepseek", id: "flash", name: "flash", api: "openai-completions", reasoning: true, input: ["text"], contextWindow: 1000, outputWindow: 100 } as Model<any>,
+    "llama-local/small": { provider: "llama-local", id: "small", name: "small", api: "openai-completions", baseUrl: "https://example.invalid", reasoning: false, input: ["text"], contextWindow: 1000, maxTokens: 100, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } } as Model<any>,
+    "deepseek/flash": { provider: "deepseek", id: "flash", name: "flash", api: "openai-completions", baseUrl: "https://example.invalid", reasoning: true, input: ["text"], contextWindow: 1000, maxTokens: 100, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } } as Model<any>,
   };
   return {
     getModel: (provider: string, modelId: string) => models[`${provider}/${modelId}`],

@@ -76,14 +76,14 @@ test("redacts before the optional guard runs", async () => {
     seenByGuard = messages[0]?.content;
     return messages;
   };
-  const out = await protectMessages([{ role: "user", content: `k=${KEY}` }], registry, guard);
+  const out = await protectMessages([{ role: "user", content: `k=${KEY}`, timestamp: 0 }], registry, guard);
   assert.equal(out[0]?.content, "k=[secret:STRIPE_KEY]");
   // The guard must never receive the real value.
   assert.equal(seenByGuard, "k=[secret:STRIPE_KEY]");
 });
 
 test("works with no guard installed", async () => {
-  const out = await protectMessages([{ role: "user", content: KEY }], registry, null);
+  const out = await protectMessages([{ role: "user", content: KEY, timestamp: 0 }], registry, null);
   assert.equal(out[0]?.content, "[secret:STRIPE_KEY]");
 });
 
@@ -95,7 +95,7 @@ test("a throwing guard propagates, so the request is not sent clean", async () =
     throw new Error("keychain unavailable");
   };
   await assert.rejects(
-    () => protectMessages([{ role: "user", content: "clean text" }], registry, guard),
+    () => protectMessages([{ role: "user", content: "clean text", timestamp: 0 }], registry, guard),
     /keychain unavailable/,
   );
 });
@@ -105,7 +105,7 @@ test("the thrown error does not carry the secret", async () => {
     throw new Error("boom");
   };
   try {
-    await protectMessages([{ role: "user", content: KEY }], registry, guard);
+    await protectMessages([{ role: "user", content: KEY, timestamp: 0 }], registry, guard);
     assert.fail("expected a rejection");
   } catch (error) {
     assert.equal(String((error as Error).message).includes(KEY), false);
@@ -145,7 +145,7 @@ test("beforeRequest returns undefined when nothing matched, preserving the cache
 test("beforeRequest returns replacement messages when a secret is present", async () => {
   const { generation } = handlersOf(createSecretRedactor({ registry, useOutboundGuard: false }));
   const handler = generation.beforeRequest;
-  const out = await handler({ messages: [{ role: "user", content: KEY }] }, fakeApi(), fakeContext());
+  const out = await handler({ messages: [{ role: "user", content: KEY, timestamp: 0 }] }, fakeApi(), fakeContext());
   assert.equal(out?.messages[0]?.content, "[secret:STRIPE_KEY]");
 });
 
@@ -177,7 +177,7 @@ test("without the optional package the guard resolves to null, not an error", as
   const handler = generation.beforeRequest;
   // No @prjct.app/pi-secrets in this project: the request still goes through,
   // redacted by the built-in registry only.
-  const out = await handler({ messages: [{ role: "user", content: KEY }] }, fakeApi(), fakeContext());
+  const out = await handler({ messages: [{ role: "user", content: KEY, timestamp: 0 }] }, fakeApi(), fakeContext());
   assert.equal(out.messages[0].content, "[secret:STRIPE_KEY]");
 });
 

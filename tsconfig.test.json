@@ -1,0 +1,31 @@
+{
+  // Tests and the scripts that drive them, typechecked but never built.
+  //
+  // `tsconfig.json` includes only `src` and emits to `dist`, so nothing under
+  // `test/` was ever checked. That is how a required property added to a seam type
+  // (`ProjectedView.turnText`) broke five tests while the compiler stayed silent —
+  // the fixtures were wrong and only a runtime assertion noticed. Fail fast: a
+  // fixture that no longer matches the shape it claims to be is a compile error now.
+  //
+  // `noEmit` because these are run through tsx, which strips types rather than
+  // compiling them; the build would otherwise try to write test output to dist.
+  "compilerOptions": {
+    "target": "ES2024",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2024"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "types": ["node"]
+  },
+  // `test/stream.test.ts` is excluded while its rewrite is in flight: the working
+  // copy has a `Parameters<typeof ... constructor>` cast that does not typecheck, and
+  // fixing somebody else's uncommitted work would make this commit about something
+  // else. Remove the exclusion once that change lands.
+  "include": ["test/**/*.ts", "src/**/*.ts"],
+  "exclude": ["test/stream.test.ts"]
+}
