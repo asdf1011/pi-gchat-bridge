@@ -26,6 +26,15 @@ append-only, crash-safe conversation runtime. One process owns a SQLite store
 watched and driven from Chat and from a browser at the same time (see
 [Web frontend](#web-frontend)).
 
+**Four listeners, one of which writes.** The store is owned by the host
+(`dist/durable/main.js`), which serves `/v1`, `/healthz` and `/idle` on `PORT` and holds
+no Chat credentials. The **Chat adapter** (`dist/chat-host.js`, `BRIDGE_CHAT_PORT`) holds
+the service account, the Pub/Sub receiver, the delivery cursor and the painter, and serves
+`/notify`; the **web adapter** (`dist/web-host.js`, `BRIDGE_WEB_PORT`) serves the page; the
+**artifact origin** (`BRIDGE_ARTIFACTS_PORT`) is a separate origin on purpose, because those
+documents are scripted and framed. The adapters are forked by the host and talk to it over a
+chord link, so **restarting either one cannot interrupt a turn** — the turn is the host's.
+
 ## One-time setup (Google Cloud Console)
 
 1. **Create a project** at <https://console.cloud.google.com/projectcreate> (or reuse one).
@@ -60,6 +69,9 @@ npm start            # runs the durable engine (tsx src/durable/main.ts)
 For production, point your container at `./start-bridge.sh`, which supervises
 the process, restarts it on crash, and starts cron and the local-model router.
 `npm run start:sdk` runs the old SDK host instead.
+
+Set `BRIDGE_CHAT_PORT` too (`.env.example` has it at 8084): the Chat adapter runs in its
+own process and the host will not start without somewhere to point it.
 
 That's it — the bot now answers messages in any space it's installed in, and
 the same conversations are visible at `/web`.
@@ -108,7 +120,7 @@ twice.
 - **The binding is a document, not a file.** A session-scoped document maps
   `chatKey → conversationId`, written in the *same commit* that creates the
   conversation, so a crash cannot leave a conversation no thread points at.
-- **`/secret`** lists stored secrets (names and a tail, never values); **`/secret set NAME`** posts a card for out-of-band entry; **`/secret remove NAME`** deletes. Values never enter the conversation — see [Security notes](#security-notes).
+- **`/secret`** lists stored secrets (names and a tail, never values); **`/secret set NAME`** posts a card for out-of-band entry; **`/secret remove NAME`** deletes. Values never enter the conversation — see [Security notes](#security-notes). In the browser the same three forms exist, gated on the same `SECRET_USERS` allow-list, and the store is reached through the seam: an adapter may write a secret and **no operation returns one**.
 - **`/sessions`** lists conversations; **`/resume`** rebinds a thread to one of
   them. `/name` gives one a display name (Chat-side label only).
 - **Legacy history was imported once, at cutover.** The one-shot migration tools
@@ -211,12 +223,21 @@ Pointing it back at `:8090` "works" but reintroduces the eviction.
 The same conversations, in a browser. The bridge serves a small page (no build
 step) at `/web` — or under whatever prefix a reverse proxy gives it.
 
-- **`GET /web`** — the page
+- **`GET /web`** — the page (served by the web adapter when `BRIDGE_WEB_ENGINE=link`)
 - **`GET /web/api/conversations`** — the index, newest first
+- **`GET /web/api/c/:id/history?before=`** — a page of transcript, **anchored**: `before` is
+  the oldest entry id held and `before=0` is the first paint. Markdown is rendered
+  server-side here, because this origin can submit messages and a client-side renderer
+  would be an injection path that can drive tools
 - **`GET /web/api/c/:id/events`** — `text/event-stream`: whole snapshots plus
   the current tool status
 - **`POST /web/api/c/:id/message`** — submit a message (`whenBusy: "steer"`),
   with optional inline images
+- **`POST /web/api/c/:id/commands`** — the slash commands, answered with one of four shapes
+  (`text`, `list`, `choice`, `form`) rather than a card; `/model` returns a form whose
+  thinking levels follow the model you pick
+- **`GET /web/api/c/:id/artifacts`**, **`…/comments`** — the artifact drawer and the review
+  comments
 
 **Images.** Three ways in, one place to land: paste a screenshot, press 📎 to
 pick files, or drop them on the pane. They become thumbnails above the composer
