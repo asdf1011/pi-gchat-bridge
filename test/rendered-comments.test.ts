@@ -119,3 +119,86 @@ test("an empty selection takes the button away again", async () => {
     "a dismissed selection leaves nothing behind");
   dom.window.close();
 });
+
+/* --- the affordance on a touch device ------------------------------------------------ */
+
+/**
+ * Render with a coarse pointer, the way a phone reports itself.
+ *
+ * jsdom has no `matchMedia`, so it is stubbed rather than assumed: the document asks the
+ * pointer media feature (not a width), and the test has to answer it the same way a
+ * phone would.
+ */
+function renderTouch(bodyHtml: string): JSDOM {
+  const dom = render(bodyHtml, []);
+  Object.defineProperty(dom.window, "matchMedia", {
+    configurable: true,
+    value: (query: string) => ({ matches: query.includes("pointer: coarse"), media: query }),
+  });
+  return dom;
+}
+
+/** Select a node and wait for the document's settle timer. */
+async function selectIn(dom: JSDOM, selector: string, until: () => boolean): Promise<void> {
+  const doc = dom.window.document;
+  const range = doc.createRange();
+  range.selectNodeContents(doc.querySelector(selector)!);
+  const selection = dom.window.getSelection()!;
+  selection.removeAllRanges();
+  selection.addRange(range);
+  doc.dispatchEvent(new dom.window.Event("selectionchange"));
+  for (let i = 0; i < 100 && !until(); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+test("on a touch device the document draws no button, and reports the selection instead", async () => {
+  // A finger raises the system selection menu and its drag handles over the space beside
+  // the text, and no web API lets a page add itself to that menu. So there is nothing to
+  // draw here — the parent shows the action, outside the document's reach.
+  const dom = renderTouch("<p>selectable prose</p>");
+  const posted: unknown[] = [];
+  dom.window.parent.postMessage = (data: unknown) => posted.push(data);
+
+  await selectIn(dom, "p", () => posted.some((m) => (m as { t: string }).t === "pi-artifact-select-touch"));
+
+  assert.equal(dom.window.document.querySelector("button.cm-add"), null, "no button on a touch device");
+  assert.equal(
+    posted.some((m) => (m as { t: string }).t === "pi-artifact-select"),
+    false,
+    "and nothing that opens the composer by itself",
+  );
+  const touch = posted.find((m) => (m as { t: string }).t === "pi-artifact-select-touch") as
+    | { message?: { file?: string; intent?: string } }
+    | undefined;
+  assert.ok(touch, "the selection is reported to the page");
+  assert.equal(typeof touch!.message?.file, "string");
+  // The intent is set, so the page may focus the field: the reader asked to comment.
+  assert.equal(touch!.message?.intent, "comment");
+  dom.window.close();
+});
+
+test("on a touch device a dismissed selection tells the page to put the bar away", async () => {
+  const dom = renderTouch("<p>selectable prose</p>");
+  const posted: unknown[] = [];
+  dom.window.parent.postMessage = (data: unknown) => posted.push(data);
+
+  await selectIn(dom, "p", () => posted.some((m) => (m as { t: string }).t === "pi-artifact-select-touch"));
+  posted.length = 0;
+
+  dom.window.getSelection()!.removeAllRanges();
+  dom.window.document.dispatchEvent(new dom.window.Event("selectionchange"));
+  for (let i = 0; i < 100 && posted.length === 0; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  // One message, and it is the one every device already sends: the page treats the clear
+  // as the single place that forgets a selection, so the bar cannot be left up by a
+  // second channel that failed to agree.
+  assert.deepEqual(
+    posted.map((m) => (m as { t: string }).t),
+    ["pi-artifact-clear"],
+    "only the clear message — the touch channel is not told twice",
+  );
+  dom.window.close();
+});

@@ -275,17 +275,56 @@ const COMMENT_SCRIPT = `
     affordance = null;
   }
 
+  /**
+   * A coarse pointer means a finger, and a finger means the platform's own menu.
+   *
+   * Deliberately the pointer media feature rather than a width: a small laptop window
+   * is not a
+   * phone, and a tablet with a keyboard is one device with two answers. What matters
+   * is whether the selection came with tear-drop handles and a system toolbar, and
+   * that follows the input device.
+   */
+  function isTouch() {
+    try {
+      return window.matchMedia("(pointer: coarse)").matches;
+    } catch (e) {
+      return false;
+    }
+  }
+
   function showAffordance(range, message) {
     hideAffordance();
+    // On a touch device the page draws nothing. Selecting text raises the system menu
+    // (Copy / Select all / Share) directly above the selection and two drag handles at
+    // its bottom corners; a button of ours sits on top of one or the other, and there is
+    // no web API to add ourselves to the system menu instead. So the *parent* shows the
+    // action, in a bar above the composer, where none of that reaches.
+    if (isTouch()) {
+      message.intent = "comment";
+      parent.postMessage({ t: "pi-artifact-select-touch", message: message }, "*");
+      return;
+    }
     var rect;
     try {
       rect = range.getBoundingClientRect();
     } catch (e) {
       rect = null;
     }
-    // A zero rect is what a headless DOM reports; pinning the button top-left there is better than
-    // throwing, because the tests drive exactly this path.
-    var top = Math.max(4, ((rect && rect.top) || 8) - 34);
+    // Below the selection, not above it. Above is where a desktop browser puts its own
+    // selection toolbar, so a button there is covered by it or collides with it.
+    //
+    // A zero rect is what a headless DOM reports; pinning the button top-left there is
+    // better than throwing, because the tests drive exactly this path.
+    var GAP = 30;   // clears the selection's own handles on touch
+    var BUTTON_H = 34;
+    var selectionTop = (rect && rect.top) || 8;
+    var selectionBottom = rect && rect.bottom ? rect.bottom : selectionTop;
+    // Below the selection when it fits, above only when it does not: near the bottom of
+    // the viewport there is no room underneath, and above is then the lesser evil.
+    var below = selectionBottom + GAP;
+    var top = below + BUTTON_H <= (window.innerHeight || 600)
+      ? below
+      : Math.max(4, selectionTop - BUTTON_H);
     var left = Math.max(4, Math.min((window.innerWidth || 800) - 44, ((rect && rect.right) || 8) + 6));
     var button = document.createElement("button");
     button.type = "button";
@@ -319,6 +358,10 @@ const COMMENT_SCRIPT = `
       var built = describe();
       if (!built) {
         hideAffordance();
+        // No touch message here: the clear message below already tells the page the
+        // selection is gone, on every device, and the page treats it as the one place
+        // that forgets a selection. A second "nothing selected" would be a second thing
+        // to keep in step.
         // A selection that went away is the reader dismissing the composer, so say so: the parent
         // closes the bar, unless something has been typed into it.
         parent.postMessage({ t: "pi-artifact-clear", file: FRAME.file }, "*");
@@ -524,17 +567,56 @@ export const RENDER_SCRIPT = `
     affordance = null;
   }
 
+  /**
+   * A coarse pointer means a finger, and a finger means the platform's own menu.
+   *
+   * Deliberately the pointer media feature rather than a width: a small laptop window
+   * is not a phone, and a tablet with a keyboard is one device with two answers. What
+   * matters
+   * is whether the selection came with tear-drop handles and a system toolbar, and
+   * that follows the input device.
+   */
+  function isTouch() {
+    try {
+      return window.matchMedia("(pointer: coarse)").matches;
+    } catch (e) {
+      return false;
+    }
+  }
+
   function showAffordance(range, message) {
     hideAffordance();
+    // On a touch device the page draws nothing. Selecting text raises the system menu
+    // (Copy / Select all / Share) directly above the selection and two drag handles at
+    // its bottom corners; a button of ours sits on top of one or the other, and there is
+    // no web API to add ourselves to the system menu instead. So the *parent* shows the
+    // action, in a bar above the composer, where none of that reaches.
+    if (isTouch()) {
+      message.intent = "comment";
+      parent.postMessage({ t: "pi-artifact-select-touch", message: message }, "*");
+      return;
+    }
     var rect;
     try {
       rect = range.getBoundingClientRect();
     } catch (e) {
       rect = null;
     }
-    // A zero rect is what a headless DOM reports; pinning the button top-left there is better than
-    // throwing, because the tests drive exactly this path.
-    var top = Math.max(4, ((rect && rect.top) || 8) - 34);
+    // Below the selection, not above it. Above is where a desktop browser puts its own
+    // selection toolbar, so a button there is covered by it or collides with it.
+    //
+    // A zero rect is what a headless DOM reports; pinning the button top-left there is
+    // better than throwing, because the tests drive exactly this path.
+    var GAP = 30;   // clears the selection's own handles on touch
+    var BUTTON_H = 34;
+    var selectionTop = (rect && rect.top) || 8;
+    var selectionBottom = rect && rect.bottom ? rect.bottom : selectionTop;
+    // Below the selection when it fits, above only when it does not: near the bottom of
+    // the viewport there is no room underneath, and above is then the lesser evil.
+    var below = selectionBottom + GAP;
+    var top = below + BUTTON_H <= (window.innerHeight || 600)
+      ? below
+      : Math.max(4, selectionTop - BUTTON_H);
     var left = Math.max(4, Math.min((window.innerWidth || 800) - 44, ((rect && rect.right) || 8) + 6));
     var button = document.createElement("button");
     button.type = "button";
@@ -605,6 +687,10 @@ export const RENDER_SCRIPT = `
       var built = describe();
       if (!built) {
         hideAffordance();
+        // No touch message here: the clear message below already tells the page the
+        // selection is gone, on every device, and the page treats it as the one place
+        // that forgets a selection. A second "nothing selected" would be a second thing
+        // to keep in step.
         parent.postMessage({ t: "pi-artifact-clear", file: FRAME.file }, "*");
         return;
       }

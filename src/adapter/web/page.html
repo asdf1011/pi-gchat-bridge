@@ -466,6 +466,22 @@
     padding: .6rem .75rem; display: flex; flex-direction: column; gap: .45rem;
     max-height: 70%; overflow: auto; }
   #comment-bar[hidden], #comment-sheet[hidden] { display: none; }
+  /* The touch affordance: one row, at the foot of the drawer. It replaces the small
+     floating button the desktop build draws beside the selection, because on a phone
+     that space belongs to the system's own selection menu. Kept to a single line so it
+     costs the document as little height as possible while a selection is active. */
+  #selection-bar { position: absolute; left: 0; right: 0; bottom: 0; z-index: 3;
+    display: flex; align-items: stretch; gap: .4rem; padding: .4rem .5rem;
+    background: Canvas; border-top: 1px solid #8886; box-shadow: 0 -6px 24px #0002; }
+  #selection-bar[hidden] { display: none; }
+  #selection-comment { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: .45rem;
+    padding: .5rem .7rem; text-align: left; font-size: .9em; }
+  /* The quoted text is ellipsised, not wrapped: a bar that grows to three lines covers
+     the document it is describing. */
+  #selection-comment .what { flex: none; font-weight: 600; }
+  #selection-comment .on { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; opacity: .7; font-weight: 400; }
+  #selection-dismiss { flex: none; padding: .5rem .7rem; }
   #comment-bar .addr, #comment-sheet .addr { font: .78em var(--mono, monospace); opacity: .75;
     display: flex; gap: .5rem; align-items: baseline; }
   #comment-bar .addr span, #comment-sheet .addr span { flex: 1; min-width: 0; overflow: hidden;
@@ -620,6 +636,17 @@
       <!-- Composing a comment on a selection, from inside the framed document.
            The document can only *report* a selection; this is where it becomes
            a message, because this origin is the one allowed to send. -->
+      <!-- On a touch device the document draws no button: the system selection menu and
+           its drag handles own the space around the text, and no web API lets a page add
+           itself to that menu. So the action lives here instead — outside the document,
+           above the composer, where nothing the platform draws can reach it. -->
+      <div id="selection-bar" hidden>
+        <button type="button" id="selection-comment">
+          <span class="what">Comment</span>
+          <span class="on"></span>
+        </button>
+        <button type="button" id="selection-dismiss" title="Dismiss" aria-label="Dismiss">✕</button>
+      </div>
       <div id="comment-bar" hidden>
         <div class="addr"><span id="comment-addr"></span></div>
         <p class="quote" id="comment-quote" hidden></p>
@@ -2458,6 +2485,8 @@ async function setArtifactsOpen(open) {
 // origin is the string "null", which no check can distinguish).
 
 const commentBar = document.getElementById('comment-bar');
+const selectionBar = document.getElementById('selection-bar');
+const selectionOn = document.querySelector('#selection-comment .on');
 const commentAddr = document.getElementById('comment-addr');
 const commentQuote = document.getElementById('comment-quote');
 const commentText = document.getElementById('comment-text');
@@ -2523,6 +2552,8 @@ function showCommentBar(selection) {
     commentError.hidden = true;
   }
   commentBar.hidden = false;
+  // The bar and the composer would otherwise compete for the same strip.
+  selectionBar.hidden = true;
   // Focus follows intent. The document only sends `intent: "comment"` when somebody clicked the
   // affordance beside their selection — an explicit "I want to write something" — and focusing then
   // is right: it opens the keyboard, which is what they asked for. Selection alone never focuses,
@@ -2532,7 +2563,36 @@ function showCommentBar(selection) {
   }
 }
 
+/**
+ * Show the touch affordance for a selection.
+ *
+ * The document reports the selection and draws nothing, because on a phone the space
+ * around selected text belongs to the system menu and its handles. This bar is where
+ * the action goes instead: at the foot of the drawer, above the composer, out of reach
+ * of anything the platform draws.
+ *
+ * It only offers to *start* a comment. Once the composer is open the bar gets out of
+ * the way — two boxes competing for the same strip would be worse than either alone.
+ */
+function showSelectionBar(selection) {
+  if (!selection) {
+    selectionBar.hidden = true;
+    return;
+  }
+  pendingSelection = selection;
+  // A draft in progress is somebody already writing; do not cover it with a prompt to
+  // start writing.
+  if (!commentBar.hidden) {
+    selectionBar.hidden = true;
+    return;
+  }
+  const quote = (selection.quote || '').replace(/\s+/g, ' ').trim();
+  selectionOn.textContent = quote ? '“' + quote.slice(0, 80) + (quote.length > 80 ? '…' : '') + '”' : '';
+  selectionBar.hidden = false;
+}
+
 function closeCommentBar() {
+  selectionBar.hidden = true;
   pendingSelection = null;
   commentBar.hidden = true;
   commentText.value = '';
@@ -2714,9 +2774,18 @@ window.addEventListener('message', (event) => {
   if (!data || typeof data !== 'object') return;
   if (data.t === 'pi-artifact-select' && typeof data.file === 'string') {
     showCommentBar(data);
+  } else if (data.t === 'pi-artifact-select-touch') {
+    // A touch device: the document drew nothing and sent the selection here instead.
+    const picked = data.message && typeof data.message.file === 'string' ? data.message : null;
+    showSelectionBar(picked);
   } else if (data.t === 'pi-artifact-open' && typeof data.id === 'string') {
     void openThread(data.id);
   } else if (data.t === 'pi-artifact-clear') {
+    // The selection is gone, so the touch affordance has nothing to offer. This
+    // arrives on every device — the document sends it whenever `describe()` comes
+    // back empty — which makes it the one place that reliably forgets a selection,
+    // rather than a second message to keep in step.
+    selectionBar.hidden = true;
     // The reader dismissed the selection. Close the composer, but never over a
     // draft, and never while the field has focus — tapping the field itself can
     // collapse the document's selection on some browsers, and that tap means
@@ -2756,6 +2825,17 @@ commentBar.addEventListener('pointerdown', (event) => {
   setTimeout(() => commentText.focus(), 0);
 });
 
+document.getElementById('selection-comment').onclick = () => {
+  if (!pendingSelection) return;
+  // The same entry point the desktop button uses, with the same meaning: the reader
+  // has said they want to write, so the composer may take focus and raise the keyboard.
+  const selection = { ...pendingSelection, intent: 'comment' };
+  selectionBar.hidden = true;
+  showCommentBar(selection);
+};
+document.getElementById('selection-dismiss').onclick = () => {
+  selectionBar.hidden = true;
+};
 document.getElementById('comment-send').onclick = () => void sendComment();
 document.getElementById('comment-cancel').onclick = () => closeCommentBar();
 document.getElementById('comment-sheet-close').onclick = () => closeThread();
