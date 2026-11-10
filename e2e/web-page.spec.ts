@@ -1204,3 +1204,28 @@ test("the thinking section lists levels, and choosing one applies it", async ({ 
   expect(applied[0]!.values).toEqual({ model: "deepseek/deepseek-flash", thinking: "low" });
   expect(errors).toEqual([]);
 });
+
+test("a phone resize while the picker is open does not close it", async ({ page }) => {
+  // The reported bug: tapping the caret on a phone made it flicker and do nothing.
+  // A tap on a phone is enough to fire `resize` — browser chrome collapsing, the
+  // address bar reflowing — and the handler used to treat *any* resize as "the
+  // anchor moved, close it". On the sheet there is no anchor to move.
+  const errors = watchErrors(page);
+  await stubApi(page, { format: FORMAT, models: MODELS });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/7/");
+
+  await page.locator("#send-menu").click();
+  await expect(page.locator("#picker")).toBeVisible();
+
+  // What the browser does by itself on the first scroll or tap.
+  await page.setViewportSize({ width: 390, height: 780 });
+  await page.waitForTimeout(200);
+
+  // Still open, still usable, still full width.
+  await expect(page.locator("#picker")).toBeVisible();
+  await expect(page.locator("#picker-list .item")).toHaveCount(MODELS.length);
+  const box = (await page.locator("#picker").boundingBox())!;
+  expect(box.width).toBeGreaterThanOrEqual(389);
+  expect(errors).toEqual([]);
+});

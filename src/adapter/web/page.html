@@ -2150,13 +2150,28 @@ document.addEventListener('keydown', (event) => {
   event.stopPropagation();
   closePicker();
 });
-// A resize can move the caret out from under a desktop popup, and turning a phone
-// sideways crosses the sheet breakpoint. Closing is simpler than re-anchoring.
+/**
+ * Re-place the picker when the window changes, rather than closing it.
+ *
+ * This used to close on any resize, which broke the picker on a phone outright:
+ * tapping the caret is enough to fire `resize` there — browser chrome collapsing
+ * as the page scrolls, the address bar reflowing, an on-screen keyboard settling.
+ * The sheet opened and was shut again within a frame, so the caret looked like it
+ * did nothing at all.
+ *
+ * Closing was only ever a shortcut for "the anchor moved". On the sheet there is
+ * no anchor to move, and on desktop re-placing is one function call, so the honest
+ * response to a resize is to re-place.
+ */
 window.addEventListener('resize', () => {
-  if (pickerOpen) closePicker();
+  if (!pickerOpen) return;
+  // The menu always holds the model list — the thinking levels ride below it — so it
+  // is searchable wherever it is shown. `placePicker` still gates on `isNarrow()`:
+  // the search box only appears on the sheet.
+  placePicker(true);
 });
 
-// --- Artifacts: a drawer over the conversation, hidden until asked for. ---// --- Artifacts: a drawer over the conversation, hidden until asked for. ---
+// --- Artifacts: a drawer over the conversation, hidden until asked for. ---
 //
 // The list comes from this origin (`api/c/<id>/artifacts`), so no CORS. The file
 // itself is framed from the artifact host, which is a *different* origin: it is
