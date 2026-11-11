@@ -131,16 +131,20 @@ URL parse, `identify()`/trusted-proxy warning, try/catch with a JSON 500 and a
 headers-sent guard. Extract `serveRoutes(routes, { auth, onError })` in
 `src/shared/`. ~60 lines per process, and future CORS/auth fixes land once.
 
-## 9. Multi-process testing (pending)
+## 9. Multi-process testing (partly done)
 
-Unit coverage is excellent (60 test files, seam guard, idempotency,
-submit-over-link), but the fork + `ipcLink` + chord-accept wiring in `main.ts`
-is only exercised in production. Add an e2e case that runs the real children
-and exercises: chat adapter restart mid-turn (turn survives), host restart with
-an open web client (re-link, view replication resumes), and a generation-2
-child getting a fresh link after a crash. One Playwright case that kills the
-web adapter mid-turn and asserts the turn completes would pay for itself the
-first time a deploy regresses it.
+**Done: the supervision wiring, with a real child.** `test/adapter-supervision.test.ts` forks the
+fixture adapter through `forkAdapter`, reads the host's state *through the link*, `SIGKILL`s the child,
+and asserts a second generation answers on the same port and reads the same state — plus a narrower
+case showing one chord host serves two generations. It runs the code `main.ts` runs (`forkAdapter`,
+`acceptAdapterLink`, the supervisor) against a real process, with a fake seam so no store or model is
+involved. The fork adapter gained `execArgv` for it: production forks compiled JavaScript, a test forks
+TypeScript.
+
+**Still open: the mid-turn cases.** "Kill the adapter while a turn is running and the turn completes"
+needs a turn, which needs a model — so it belongs in an e2e that can run one, not here. Same for "host
+restart with an open web client: re-link, view replication resumes". Both are worth writing; neither
+can be faked cheaply, and a fake would prove the wrong thing.
 
 ## 10. Documentation shape (pending)
 

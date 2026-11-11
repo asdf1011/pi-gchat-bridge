@@ -40,6 +40,13 @@ export interface ForkAdapterOptions {
   onChild?(child: ChildProcess): void;
   /** Where the child's log lines go. Defaults to `logger.info`. */
   log?(line: string): void;
+  /**
+   * Node flags for the child.
+   *
+   * Production forks compiled JavaScript and needs none. A test forks TypeScript, so it passes
+   * `["--import", "tsx"]` — the same loader the test process itself runs under.
+   */
+  execArgv?: string[];
 }
 
 /**
@@ -58,6 +65,7 @@ export function forkAdapter(
       fork(options.entry.pathname, [], {
         stdio: ["ignore", "pipe", "inherit", "ipc"],
         env: { ...process.env, ...(options.env ?? {}) },
+        ...(options.execArgv ? { execArgv: options.execArgv } : {}),
       }),
     onStart: (child) => {
       child.stdout?.on("data", (chunk: Buffer) => {
