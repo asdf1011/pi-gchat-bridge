@@ -181,9 +181,32 @@ to be where the current code only needs what it is:
 frame (`refused to connect`), and the note in the rendered document that inline code used to be
 excluded — which is why a rule that looks arbitrary is not.
 
+## 12. Dead code, second and third passes (**done**)
+
+The first pass (in §5) took the seam operations with no callers at all. The later passes took what the
+migration *orphaned* — code whose only caller was itself, or died with the SDK host:
+
+- **Seam**: `usage` joined `replyToComment`, `unbind` and `writeNotice`. Its last caller was a card
+  that no longer exists.
+- **Functions**: `httpSnapshot` (the one-shot view call, replaced by the observe poll), `storeUsage`,
+  `sessionStatsCard`, `NullReceiver` (the `RECEIVER=none` path now means "no receiver", not a Null
+  object), `legacySessionFile`/`sessionFileFor` (JSONL paths — `keyFor` and `chatTarget` are all that
+  is left of `session-key.ts`).
+- **Constants**: `SESSION_ABORT_TIMEOUT_MS`, `REDACTION_FAILED`.
+- **Config**: `stallTimeoutMs`, `watchdogIntervalMs`, `sessionIdleMs` (the SDK host's watchdog and
+  session cache), and `artifactsBaseUrl` (read by the web adapter from the environment, so the host
+  carried an unused copy). Three env vars and their README rows went with them.
+- **Docs**: the README's "Stuck turns" described the watchdog in the present tense, including a
+  paragraph about aborting and reopening a JSONL session that nothing runs.
+
+Method, since it is repeatable: scan every exported value for references outside its own file (281
+exports; 45 with none), then check the short list by hand — most were used inside their own module and
+merely over-exported, which is churn to "fix". The same scan over `Config` fields and seam operations
+took the rest.
+
 ## Deletions enabled
 
-- SDK host + `agent-sessions` + legacy commands/notify/session-file: ~2,500 lines
+- SDK host + `agent-sessions` + legacy commands/notify/session-file: ~2,850 lines
 - In-process web engine mode in `main.ts`: ~80 lines + one env var
 - Dead comment blocks and shadow-cursor narration: ~50 lines
 - Duplicated HTTP wrapper across three processes: ~120 lines
