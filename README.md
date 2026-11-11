@@ -312,9 +312,6 @@ decision for a bridge with shell access.
 | `BRIDGE_SESSIONS_DIR` | `./sessions` | Legacy JSONL sessions — read by the importer and the old engine only |
 | `BRIDGE_STATE_FILE` | `./state.json` | Legacy dedupe state — superseded by the store's submission ids |
 | `PORT` | `8080` | Health endpoint (0 disables) |
-| `BRIDGE_STALL_TIMEOUT_MS` | `1200000` (20 min) | Watchdog: force-reset a session streaming with no agent activity for this long (0 disables) |
-| `BRIDGE_WATCHDOG_INTERVAL_MS` | `30000` | Watchdog scan interval |
-| `BRIDGE_SESSION_IDLE_MS` | `0` | Evict an idle, non-streaming session from memory after this long (0 disables) |
 | `ALLOWED_SPACES` | — | Comma-separated spaces (name or ID) the bridge responds in; empty = all |
 | `ALLOWED_USERS` | — | Comma-separated users (name or ID) allowed to trigger pi, including card clicks; empty = anyone |
 | `SECRET_USERS` | — | Comma-separated users allowed to use `/secret`; empty = same as `ALLOWED_USERS` |
@@ -368,20 +365,14 @@ the judgement calls. See `evals/README.md`.
 
 ### Stuck turns
 
-The old watchdog (`BRIDGE_STALL_TIMEOUT_MS`) forced a hung *session* to reset.
-On the durable engine this is the harness's job: a run that stops making
-progress is parked and resumed on the next start, and `harness.resume()` runs
-at startup. A turn that ends without an answer is now logged with its status,
-reason, duration and conversation id, and Chat is told which of those it was —
-*a stopped turn*, a *finished-but-empty* one, or a *failed* one — because those
+A run that stops making progress is the harness's business: it is parked and resumed on the next
+start (`harness.resume()` at startup), so a restart is a recovery rather than a loss. A turn that ends
+without an answer is logged with its status, reason, duration and conversation id, and Chat is told
+which of those it was — *a stopped turn*, a *finished-but-empty* one, or a *failed* one — because they
 need different responses from a person.
 
-The historical case, kept for context:
-The watchdog checks each streaming session for agent activity (any emitted
-event) and, after `BRIDGE_STALL_TIMEOUT_MS` of silence, aborts the stuck run,
-drops the incomplete trailing turn from the session file (so the hung tool call
-is never re-run), and reopens the session. Deferred "busy" messages are then
-redelivered by Pub/Sub to the fresh session.
+The one deadline the bridge still owns is a steer: `BRIDGE_STEER_WAIT_MS` (10s) bounds how long a
+message can wait behind a tool that never returns before the tool is aborted so the message can land.
 
 ## Roadmap
 

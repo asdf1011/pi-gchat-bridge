@@ -34,14 +34,8 @@ export interface Config {
   artifactsDir: string;
   sessionsDir: string;
   stateFile: string;
-  /** Watchdog: force-reset sessions streaming with no activity for this long (0 = disabled). */
-  stallTimeoutMs: number;
-  /** Watchdog: scan interval. */
-  watchdogIntervalMs: number;
   /** Steer: how long to wait for an in-flight tool call before aborting to redirect (ms). */
   steerWaitMs: number;
-  /** Evict an idle, non-streaming session from memory after this long (0 = disabled). */
-  sessionIdleMs: number;
   /** Restrict responding to these spaces (resource name or ID). Empty = all. */
   allowedSpaces: string[];
   /** Restrict which users can trigger pi (resource name or ID). Empty = all. */
@@ -60,8 +54,6 @@ export interface Config {
   notifyToken: string;
   /** Bearer token for web writes. Empty means no check (tailnet-only deployment). */
   webToken: string;
-  /** Where the artifact origin lives, for links from the web pane. Empty hides them. */
-  artifactsBaseUrl: string;
   /** Origin of the chat UI, allowed to frame artifact documents. */
   webOrigin: string;
   /** Re-title the /model "Model switched" card with a local-model topic (gchat display only). */
@@ -150,16 +142,12 @@ export function loadConfig(): Config {
     artifactsDir: artifactsDir === "" ? "" : path.resolve(artifactsDir),
     sessionsDir,
     stateFile,
-    stallTimeoutMs: Number(process.env.BRIDGE_STALL_TIMEOUT_MS ?? 20 * 60 * 1000),
-    watchdogIntervalMs: Number(process.env.BRIDGE_WATCHDOG_INTERVAL_MS ?? 30_000),
     steerWaitMs: Number(process.env.BRIDGE_STEER_WAIT_MS ?? 10_000),
-    sessionIdleMs: Number(process.env.BRIDGE_SESSION_IDLE_MS ?? 0),
     allowedSpaces: listEnv("ALLOWED_SPACES"),
     allowedUsers: listEnv("ALLOWED_USERS"),
     secretUsers: listEnv("SECRET_USERS"),
     notifyToken: process.env.BRIDGE_NOTIFY_TOKEN ?? "",
     webToken: process.env.BRIDGE_WEB_TOKEN ?? "",
-    artifactsBaseUrl: process.env.BRIDGE_ARTIFACTS_BASE_URL ?? "",
     // Derived from the artifact base's sibling by default is impossible to guess,
     // so it is explicit; unset means "same origin only".
     webOrigin: process.env.BRIDGE_WEB_ORIGIN ?? "",
