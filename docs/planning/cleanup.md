@@ -221,14 +221,32 @@ took the rest.
 - Dead comment blocks and shadow-cursor narration: ~50 lines
 - Duplicated HTTP wrapper across three processes: ~120 lines
 
-## 11. Move root-directory state into `data/` (pending, needs a deploy)
+## 11. Move root-directory state into `data/` (**done**)
 
-`bridge.sqlite`, `bridge-ledger.json` and `state.json` sit at the repository root, next to the
-source. They are ignored by git, but they are also *inside* the working tree, which is why a
-`grep -r` over the repo can hit a 54 MB database and why a stray `git clean -xdf` is a data-loss
-event rather than a tidy-up.
+The store, the cursor, the adapter's idempotency file and the old backups now live in `data/`:
+`bridge.sqlite` (+ WAL), `bridge-ledger.json`, `state.json`, `backups/`. Nothing that matters is inside
+the working tree any more — which is the point: `grep -r` no longer walks a 56 MB database, and a stray
+`git clean -xdf` is a tidy-up rather than a data-loss event.
 
-The move is one default plus one environment change (`BRIDGE_DB`, `BRIDGE_LEDGER_PATH`,
-`BRIDGE_STATE_FILE`, and `start-bridge.sh` if it names any of them), but it is a **live store**:
-the file has to move during a bridge restart with nothing running, or the host opens an empty
-database and every conversation looks gone. Do it in the deployment, not in a routine CL.
+**How it was done matters more than that it was.** The bridge cannot be stopped and held stopped — the
+supervisor restarts it, and the container may be recreated — so the move had to survive an interruption
+at any point:
+
+1. **copy** (originals untouched: a restart during this phase uses the old path, which still exists);
+2. **switch `.env.durable` atomically** (from here a restart uses the copy, which is complete);
+3. **restart the pid captured before step 1**, wait for health, report.
+
+The first run of that script failed in the instructive way: it captured the pid *after* switching the
+env, by which point the lock it looked for was the new path's and did not exist — so it reported success,
+restarted nothing, and left a stale copy while the live store kept growing. Reverted within the minute
+(the live store was never touched), and the fix is the rule: **every question about the running system
+has to be asked before the system is reconfigured.**
+
+Also changed with it: the restart scripts derive the lock from `BRIDGE_DB` instead of hardcoding
+`$PROJECT/bridge.sqlite.lock`, because the lock is `<dbPath>.lock` and a hardcoded one reports "no bridge
+owns the lock" while one is serving.
+
+**Not moved:** the logs (`bridge-durable.log`, `bridge-restart.log`, `bridge.log`, `cloudflared.log`).
+They are written by `start-bridge.sh` through `$LOG_FILE`, so moving them means editing PID 1's script
+and taking a container restart — worth doing whenever the next container restart happens for another
+reason, not on its own.
