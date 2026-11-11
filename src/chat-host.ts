@@ -36,6 +36,7 @@ import { handleDurableNotify } from "./durable/notify.js";
 import { nameUntitledConversations } from "./durable/naming.js";
 import { readBody } from "./adapter/web-routes.js";
 import { linkSessionHost } from "./session-host/link.js";
+import { serveRoutes } from "./shared/serve-routes.js";
 
 const port = Number(process.env.BRIDGE_CHAT_PORT ?? 0);
 const bind = process.env.BRIDGE_BIND ?? "127.0.0.1";
@@ -93,17 +94,30 @@ logger.info(`[chat-host] default model ${model.provider}/${model.modelId}`);
 const painter = await startChatPainter({ seam, config, client: chat, dbPath });
 const handler = chatHandler({ seam, config, client: chat, router, state, secrets });
 
-const server = http.createServer((req, res) => {
-  void (async () => {
-    const url = new URL(req.url ?? "/", "http://localhost");
-    try {
+const receiver =
+  process.env.RECEIVER === "none"
+    ? undefined
+    : new PubSubReceiver(
+        config.serviceAccountPath,
+        config.pubsubSubscription,
+        state,
+        config.allowedSpaces,
+        config.allowedUsers,
+      );
+
+const server = http.createServer(
+  serveRoutes({
+    trustedProxy: config.trustedProxy,
+    warn: (line) => logger.warn(line),
+    onError: (error) => logger.error("[chat-host] request failed:", (error as Error).message),
+    routes: async ({ req, res, url }) => {
       if (req.method === "GET" && (url.pathname === "/healthz" || url.pathname === "/idle")) {
         // This process's own liveness, not the store's: `/idle` here would be a lie about what is
         // running, which is the host's question. A restart supervisor asks this adapter whether the
         // adapter is up; `/idle` on the host stays where it was.
         res.writeHead(200, { "Content-Type": "text/plain" });
         res.end("ok");
-        return;
+        return true;
       }
       if (req.method === "POST" && url.pathname === "/notify") {
         // The cron side's single write path into Chat. It moved with the adapter because it needs a
@@ -112,7 +126,7 @@ const server = http.createServer((req, res) => {
         if (body === null) {
           res.writeHead(413, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: false, error: "request body too large" }));
-          return;
+          return true;
         }
         let json: unknown;
         try {
@@ -120,7 +134,7 @@ const server = http.createServer((req, res) => {
         } catch {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: false, error: "invalid JSON body" }));
-          return;
+          return true;
         }
         const result = await handleDurableNotify(
           {
@@ -135,32 +149,12 @@ const server = http.createServer((req, res) => {
         );
         res.writeHead(result.status, { "Content-Type": "application/json" });
         res.end(JSON.stringify(result.json));
-        return;
+        return true;
       }
-      const who = identify(req, config.trustedProxy);
-      logger.info(`[chat-host] ${req.method} ${url.pathname} from ${who.email ?? "anonymous"}`);
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: false, error: "not found" }));
-    } catch (error) {
-      logger.error("[chat-host] request failed:", (error as Error).message);
-      if (!res.headersSent) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: false, error: (error as Error).message }));
-      }
-    }
-  })();
-});
-
-const receiver =
-  process.env.RECEIVER === "none"
-    ? undefined
-    : new PubSubReceiver(
-        config.serviceAccountPath,
-        config.pubsubSubscription,
-        state,
-        config.allowedSpaces,
-        config.allowedUsers,
-      );
+      return false;
+    },
+  }),
+);
 
 server.listen(port, bind, () => {
   // stdout, never `process.send`: the IPC channel is the link (see the header).

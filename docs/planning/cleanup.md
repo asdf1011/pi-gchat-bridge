@@ -109,7 +109,15 @@ Split `adapter/commands.ts` by command family (settings vs. conversation
 management vs. secrets) and move Chat card rendering into `src/chat/` (after
 (3)) so commands return plain results and each surface renders its own.
 
-## 8. One HTTP request wrapper, three servers (pending)
+## 8. One HTTP request wrapper, three servers (**done**)
+
+`src/shared/serve-routes.ts` is the skeleton all three servers were writing by hand: parse the URL,
+resolve identity, warn when an identity header arrived from an untrusted peer, try the route table,
+and turn a throw into a JSON 500 — with the headers-sent guard, because a half-written response has no
+status left to change.
+
+The host's own server was converted in the same pass as §4's route table (the two are the same
+extraction), and both adapters now supply only what is theirs: a route table and the proxy address.
 
 `main.ts`, `chat-host.ts`, and `web-host.ts` each hand-roll the same skeleton:
 URL parse, `identify()`/trusted-proxy warning, try/catch with a JSON 500 and a

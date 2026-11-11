@@ -21,9 +21,9 @@ import { createHost, ipcLink } from "@earendil-works/chord";
 import path from "node:path";
 
 import { handleWebRequest } from "./adapter/web-routes.js";
-import { identify } from "./durable/identity.js";
 import { logger } from "./logger.js";
 import { linkSessionHost } from "./session-host/link.js";
+import { serveRoutes } from "./shared/serve-routes.js";
 import { repoRelativePath } from "./durable/artifact-vcs.js";
 
 const port = Number(process.env.BRIDGE_WEB_PORT ?? 0);
@@ -63,33 +63,30 @@ const client = createHost({
 const seam = linkSessionHost({ host: client });
 const model = { provider, modelId };
 
-const server = http.createServer((req, res) => {
-  void (async () => {
-    const url = new URL(req.url ?? "/", "http://localhost");
-    const who = identify(req, trustedProxy);
-    try {
+const server = http.createServer(
+  serveRoutes({
+    trustedProxy,
+    warn: (line) => logger.warn(line),
+    onError: (error) => logger.error("[web-host] request failed:", (error as Error).message),
+    routes: async ({ req, res, url, who }) => {
       if (req.method === "GET" && url.pathname === "/healthz") {
-        // This process's own liveness: the supervisor uses it to decide whether
-        // the *adapter* came back, not whether the session host is healthy.
+        // This process's own liveness: the supervisor uses it to decide whether the *adapter* came
+        // back, not whether the session host is healthy.
         res.writeHead(200, { "Content-Type": "text/plain" });
         res.end("ok");
-        return;
+        return true;
       }
-      const handled = await handleWebRequest(req, res, url, {
+      return handleWebRequest(req, res, url, {
         seam,
         model,
-        // Read here rather than passed down: this process is the one that identifies the reader, so
-        // it is the one that can decide whether the gated commands are theirs.
-        secretUsers: (process.env.SECRET_USERS ?? "").split(",").map((entry) => entry.trim()).filter(Boolean),
-        allowedUsers: (process.env.ALLOWED_USERS ?? "").split(",").map((entry) => entry.trim()).filter(Boolean),
         ...(token ? { token } : {}),
         ...(artifactsBaseUrl ? { artifactsBaseUrl } : {}),
         ...(artifactsDir === ""
           ? {}
           : {
               // The comment names its file the way the viewer does
-              // (`conversation/7/a.sh`); the repository is the conversation's
-              // directory, so strip that much before joining.
+              // (`conversation/7/a.sh`); the repository is the conversation's directory, so strip
+              // that much before joining.
               artifactPath: (conversationId: number, file: string): string => {
                 const dir = path.join(artifactsDir, "conversation", String(conversationId));
                 return path.join(dir, repoRelativePath(dir, file));
@@ -97,18 +94,9 @@ const server = http.createServer((req, res) => {
             }),
         who,
       });
-      if (handled) return;
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: false, error: "not found" }));
-    } catch (error) {
-      logger.error("[web-host] request failed:", (error as Error).message);
-      if (!res.headersSent) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: false, error: (error as Error).message }));
-      }
-    }
-  })();
-});
+    },
+  }),
+);
 
 server.listen(port, bind, () => {
   // stdout is the only safe channel here (see the header), so startup says so
