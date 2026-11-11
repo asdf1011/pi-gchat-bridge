@@ -254,7 +254,9 @@ test("the Chat adapter serves /notify, and the host says where it went", async (
   const callAt = adapter.indexOf("handleDurableNotify(", handlerAt);
   assert.ok(handlerAt >= 0 && callAt > handlerAt, "handleDurableNotify must be called from the HTTP handler");
 
-  const host = await fs.readFile(new URL("../src/durable/main.ts", import.meta.url), "utf8");
+  // The host's route table, not `main.ts`: the routes moved into a module of their own, which is what
+  // makes them testable at all.
+  const host = await fs.readFile(new URL("../src/durable/host-routes.ts", import.meta.url), "utf8");
   assert.match(host, /url\.pathname === "\/notify"/, "the host should answer for the moved route");
   assert.match(host, /notify is served by the Chat adapter/, "...with where to look, not a bare 404");
 });

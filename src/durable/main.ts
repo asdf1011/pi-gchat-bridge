@@ -36,7 +36,8 @@ import { splitMessage } from "../stream.js";
 import { Ledger } from "./ledger.js";
 import { BridgeHost } from "./host.js";
 import { BridgeLockedError } from "./lock.js";
-import { handleV1 } from "../adapter/v1-routes.js";
+import { hostRouteFailure, hostRoutes } from "./host-routes.js";
+import { serveRoutes } from "../shared/serve-routes.js";
 import { readBody } from "../adapter/web-routes.js";
 import { startArtifactsServer } from "../adapter/artifacts-server.js";
 import { artifactRoots } from "./artifacts.js";
@@ -48,7 +49,6 @@ import { ipcLink } from "@earendil-works/chord";
 import { SecretRegistry } from "./extensions/redact.js";
 import { secretsFromEnvironment } from "./extensions/secret-redactor.js";
 import { applyDurableTopicSummary } from "./topic.js";
-import { identify } from "./identity.js";
 import { failureNotice } from "./failure-notice.js";
 import { keyFor } from "../session-key.js";
 import { SecretStore } from "../secret-store.js";
@@ -204,132 +204,31 @@ async function main(): Promise<void> {
   }
   logger.info(`[bridge] default model ${defaultModel.provider}/${defaultModel.modelId}`);
 
-  // --- Health + /notify, the same surface the SDK host exposes. ---
+  // --- The host's own HTTP surface ---
+  //
+  // Four questions a deployment asks of the process that owns the store: `/v1` (what happened),
+  // `/healthz` (are you alive), `/status` (are the models working) and `/idle` (may I restart you).
+  // The table is a module so it can be tested without a bridge; the skeleton around it — URL, identity,
+  // the 500 guard — is shared with both adapters.
   if (config.healthPort > 0) {
-    const server = http.createServer((req, res) => {
-      void (async () => {
-        const url = new URL(req.url ?? "/", "http://localhost");
-        // Resolved once per request. The header is only believed when the socket
-        // peer is the configured proxy, so it cannot be forged by anything that
-        // can merely reach the port.
-        const who = identify(req, config.trustedProxy);
-        if (who.untrustedHeader) {
-          logger.warn(`[web] identity header from untrusted peer ${req.socket.remoteAddress} — ignored`);
-        }
-        try {
-          // /v1: the conversation protocol a second surface reads. Its own module
-          // so the shapes are testable without a bridge, and mounted here because this is
-          // already the process that owns the store.
-          if (
-            await handleV1(req, res, url, {
-              seam: hostSeam,
-              activity,
-              conversations: async () => {
-                const bindings = await host.bindings();
-                return Object.entries(bindings.byChatKey).map(([chatKey, binding]) => ({
-                  conversationId: binding.conversationId,
-                  address: chatKey,
-                  ...(binding.name === undefined ? {} : { name: binding.name }),
-                  lastActivityAt: binding.updatedAt ?? binding.createdAt,
-                }));
-              },
-              ...(config.webToken ? { token: config.webToken } : {}),
-            })
-          ) {
-            return;
-          }
-          if (req.method === "GET" && url.pathname === "/healthz") {
-            res.writeHead(200, { "Content-Type": "text/plain" });
-            res.end("ok");
-            return;
-          }
-          // GET /idle: is any turn running right now?
-          //
-          // Exists for the restart gate. "No child processes" is not the same
-          // question: an agent thinking between tool calls looks idle for a minute at
-          // a time, so a gate built on process silence fires mid-turn and kills the
-          // work it was trying to protect. Only conversations touched recently are
-          // asked, because a dormant thread cannot be mid-turn and each answer costs a
-          // view snapshot.
-          if (req.method === "GET" && url.pathname === "/idle") {
-            const busy: number[] = [];
-            const since = Date.now() - 24 * 60 * 60 * 1000;
-            try {
-              const bindings = await host.bindings();
-              for (const binding of Object.values(bindings.byChatKey)) {
-                if ((binding.updatedAt ?? binding.createdAt) < since) continue;
-                if ((await hostSeam.snapshot(binding.conversationId))?.busy === true) {
-                  busy.push(binding.conversationId);
-                }
-              }
-            } catch (error) {
-              // Cannot tell is not idle: a restart that guesses would kill a turn.
-              res.writeHead(503, { "Content-Type": "application/json" });
-              res.end(JSON.stringify({ idle: false, error: (error as Error).message }));
-              return;
-            }
-            res.writeHead(busy.length === 0 ? 200 : 503, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ idle: busy.length === 0, busy }));
-            return;
-          }
-          // GET /status: is anything wrong with the models, as opposed to with us?
-          //
-          // `/healthz` answers "is this process alive", which stayed `ok` through an
-          // entire outage where every turn died on a 402 — the bridge was up and
-          // useless, and nothing that watched it could tell. This endpoint answers
-          // the other question, from the record the failure sink keeps. 200 when no
-          // provider is failing, 503 when one is persistent (a balance or a key),
-          // so a monitor can distinguish "restart me" from "go and pay".
-          if (req.method === "GET" && url.pathname === "/status") {
-            let failures;
-            try {
-              failures = await hostSeam.modelFailures();
-            } catch (error) {
-              res.writeHead(500, { "Content-Type": "application/json" });
-              res.end(JSON.stringify({ ok: false, error: (error as Error).message }));
-              return;
-            }
-            const blocked = failures.filter((failure) => failure.persistent === true);
-            res.writeHead(blocked.length === 0 ? 200 : 503, { "Content-Type": "application/json" });
-            res.end(
-              JSON.stringify({
-                ok: blocked.length === 0,
-                model: `${defaultModel.provider}/${defaultModel.modelId}`,
-                failing: blocked.length > 0,
-                failures,
-              }),
-            );
-            return;
-          }
-          // /notify is served by the Chat adapter, which is where the Chat client is. This process
-          // answers with where to look rather than a bare 404: a silent one here is how scheduled
-          // notifications stopped once before, and the cron jobs now point at the adapter
-          // (`cron/.env`), so this only catches an address somebody still has from before.
-          if (req.method === "POST" && url.pathname === "/notify") {
-            res.writeHead(404, { "Content-Type": "application/json" });
-            res.end(
-              JSON.stringify({
-                ok: false,
-                error: "notify is served by the Chat adapter",
-                hint: `POST http://${config.bindAddress}:${chatPort}/notify`,
-              }),
-            );
-            return;
-          }
-          res.writeHead(404, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ ok: false, error: "not found" }));
-        } catch (error) {
-          logger.error("[bridge] http handler failed:", (error as Error).message);
-          if (!res.headersSent) {
-            res.writeHead(500, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ ok: false, error: (error as Error).message }));
-          }
-        }
-      })();
-    });
+    const server = http.createServer(
+      serveRoutes({
+        routes: hostRoutes({
+          host,
+          seam: hostSeam,
+          activity,
+          config,
+          chatPort,
+          model: defaultModel,
+        }),
+        trustedProxy: config.trustedProxy,
+        warn: (line) => logger.warn(line),
+        onError: hostRouteFailure,
+      }),
+    );
     server.listen(config.healthPort, config.bindAddress, () => {
       const where = `${config.bindAddress}:${config.healthPort}`;
-      logger.info(`[bridge] health + notify + web on ${where}`);
+      logger.info(`[bridge] health, /v1 and /idle on ${where}`);
       if (config.bindAddress === "0.0.0.0" || config.bindAddress === "::") {
         logger.warn(
           "[bridge] BRIDGE_BIND is all interfaces: anything that can reach this port can submit as the bot. " +

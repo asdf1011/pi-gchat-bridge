@@ -62,17 +62,24 @@ src/shared/      # config, logger, stream, chat-client, secret-store, markdown
 Mechanical (`git mv` + import rewrite), but it lets "src/chat imports src/host
 directly" become a lint error instead of a convention.
 
-## 4. Break up `durable/main.ts` into a route table (in progress)
+## 4. Break up `durable/main.ts` into a route table (**done**)
 
 **Done: the fork boilerplate.** `src/session-host/fork-adapter.ts` owns it: supervise, parse the one
 readiness marker, forward the rest of stdout unchanged, accept the link per generation. It went into
 `session-host/` rather than `adapter/` because the seam guard is right — adapters may not name chord,
 and this file does.
 
-**Remaining: the route table.** `main()` still holds an inline HTTP server (`/v1`, `/healthz`,
-`/idle`, `/status`, the `/notify` tombstone) beside artifact setup and shutdown. Extract a
-`hostRoutes.ts` in the shape `web-routes.ts`/`v1-routes.ts` already model, which is also what §8 needs
-to share the request skeleton.
+**Done: the route table.** `durable/host-routes.ts` is the four questions a deployment asks of the
+process that owns the store — `/v1`, `/healthz` and `/status` (alive, and are the *models* working),
+`GET /idle` for the restart gate — plus the `/notify` tombstone. `main()` keeps only the listener and
+the bind warning.
+
+It is the first time those routes have been out of a 500-line function, which is also the first time
+they could be tested without a bridge. The one test that reads source text for the `/notify` route
+followed it to the new file.
+
+The extraction was worth doing twice: the first attempt was scripted and produced code that treated
+`return;` inside a nested loop as "handled"; the second was by hand and took ten minutes.
 
 ## 5. Audit the `SessionHost` seam for single-consumer methods (pending)
 
