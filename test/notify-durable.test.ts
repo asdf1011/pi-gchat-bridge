@@ -17,7 +17,7 @@ import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { BridgeHost } from "../src/durable/host.js";
 import { handleDurableNotify } from "../src/durable/notify.js";
 import { inProcessSessionHost } from "../src/session-host/inprocess.js";
-import type { DurableRouter } from "../src/adapter/router.js";
+import type { DurableRouter } from "../src/chat/router.js";
 
 function fakeClient() {
   const posted: string[] = [];

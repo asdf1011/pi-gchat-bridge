@@ -29,8 +29,8 @@ import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 import { BridgeHost } from "../src/durable/host.js";
 import { inProcessSessionHost } from "../src/session-host/inprocess.js";
-import { DurableRouter } from "../src/adapter/router.js";
-import { runDurableCommand } from "../src/adapter/commands.js";
+import { DurableRouter } from "../src/chat/router.js";
+import { runDurableCommand } from "../src/chat/commands.js";
 import { SECRET_ACTION, SET_SECRET_ACTION } from "../src/constants.js";
 import { SecretStore } from "../src/secret-store.js";
 import type { IncomingMessage } from "../src/types.js";

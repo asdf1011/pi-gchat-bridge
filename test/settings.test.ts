@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { modelPickerCard, settingsCard, statusCard } from "../src/cards.js";
+import { modelPickerCard, settingsCard, statusCard } from "../src/chat/cards.js";
 import { MODEL_ACTION, SETTINGS_ACTION, THINKING_KEEP, THINKING_LEVELS, THINKING_LEVELS_ACTION } from "../src/constants.js";
 import type { ModelInfo } from "../src/session-host/api.js";
 import { clampToSupported, supportedThinkingLevels } from "../src/settings.js";

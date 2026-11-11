@@ -12,7 +12,7 @@
  */
 import type { ConversationId } from "@earendil-works/pi-durable";
 
-import { modelConfirmCard } from "../cards.js";
+import { modelConfirmCard } from "../chat/cards.js";
 import type { ChatClient } from "../chat-client.js";
 import { logger } from "../logger.js";
 import type { StateStore } from "../state.js";

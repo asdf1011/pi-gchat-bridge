@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { modelConfirmCard } from "../src/cards.js";
+import { modelConfirmCard } from "../src/chat/cards.js";
 // The prompt contract, its normaliser and the HTTP call moved out of the session-file path: they
 // were never about storage, and the module that reads sessions is going away.
 import {

@@ -28,7 +28,7 @@ import {
   startConversation,
   supportedThinkingLevels,
   switchModel,
-} from "../src/adapter/queries.js";
+} from "../src/chat/queries.js";
 
 /**
  * Model lookaside for the query layer. The Harness gets a real (empty) pi-ai

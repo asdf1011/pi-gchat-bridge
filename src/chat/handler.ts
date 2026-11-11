@@ -9,12 +9,12 @@
 import { collectImageAttachments } from "../chat-client.js";
 import { logger } from "../logger.js";
 import { keyFor } from "../session-key.js";
-import { runDurableCommand } from "../adapter/commands.js";
-import { applyDurableTopicSummary } from "./topic.js";
-import { classifyModelFailure, describeModelFailure } from "./model-failure.js";
+import { runDurableCommand } from "./commands.js";
+import { applyDurableTopicSummary } from "../durable/topic.js";
+import { classifyModelFailure, describeModelFailure } from "../durable/model-failure.js";
 import type { ChatClient } from "../chat-client.js";
 import type { Config } from "../config.js";
-import type { DurableRouter } from "../adapter/router.js";
+import type { DurableRouter } from "./router.js";
 import type { HandleResult } from "../receiver.js";
 import type { IncomingMessage } from "../types.js";
 import type { SessionHost } from "../session-host/api.js";

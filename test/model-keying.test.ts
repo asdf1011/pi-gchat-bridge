@@ -31,9 +31,9 @@ import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 import { BridgeHost } from "../src/durable/host.js";
 import { inProcessSessionHost } from "../src/session-host/inprocess.js";
-import { DurableRouter } from "../src/adapter/router.js";
-import { runDurableCommand } from "../src/adapter/commands.js";
-import { conversationStatus, startConversation } from "../src/adapter/queries.js";
+import { DurableRouter } from "../src/chat/router.js";
+import { runDurableCommand } from "../src/chat/commands.js";
+import { conversationStatus, startConversation } from "../src/chat/queries.js";
 import { MODEL_ACTION, THINKING_LEVELS_ACTION } from "../src/constants.js";
 import type { IncomingMessage } from "../src/types.js";
 

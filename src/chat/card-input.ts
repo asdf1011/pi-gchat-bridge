@@ -6,7 +6,7 @@
  * second copy that drifts would mean a dropdown that works on one path and not
  * the other.
  */
-import type { IncomingMessage } from "./types.js";
+import type { IncomingMessage } from "../types.js";
 
 /**
  * Read one widget's value from a CARD_CLICKED event's form inputs, by the

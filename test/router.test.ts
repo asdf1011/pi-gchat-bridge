@@ -19,7 +19,7 @@ import {
   DurableRouter,
   noticeEntry,
   type IncomingChatMessage,
-} from "../src/adapter/router.js";
+} from "../src/chat/router.js";
 import type { SessionHost, SubmitRequest } from "../src/session-host/api.js";
 
 const message = (over: Partial<IncomingChatMessage> = {}): IncomingChatMessage => ({

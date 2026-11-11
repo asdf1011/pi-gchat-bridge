@@ -31,8 +31,8 @@ import {
   settingsCard,
   settingsConfirmCard,
   statusCard,
-} from "../cards.js";
-import { actionParam, anyFormValue, formValue } from "../card-input.js";
+} from "./cards.js";
+import { actionParam, anyFormValue, formValue } from "./card-input.js";
 import { isAllowed } from "../access.js";
 import type { ChatClient } from "../chat-client.js";
 import {

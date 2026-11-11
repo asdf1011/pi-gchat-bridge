@@ -1,5 +1,5 @@
 import type { SessionStats } from "@earendil-works/pi-coding-agent";
-import type { ProviderQuota } from "./quota.js";
+import type { ProviderQuota } from "../quota.js";
 import type {
   ConversationSettingsResult,
   DefaultSettings,
@@ -7,9 +7,9 @@ import type {
   SessionContext,
   SessionInfo,
   SessionUsage,
-} from "./settings.js";
-import { clampToSupported } from "./settings.js";
-import type { ModelInfo } from "./session-host/api.js";
+} from "../settings.js";
+import { clampToSupported } from "../settings.js";
+import type { ModelInfo } from "../session-host/api.js";
 import {
   MODEL_ACTION,
   REMOVE_SECRET_ACTION,
@@ -20,7 +20,7 @@ import {
   THINKING_KEEP,
   THINKING_LEVELS,
   THINKING_LEVELS_ACTION,
-} from "./constants.js";
+} from "../constants.js";
 
 /** Escape text for use inside Chat card/message HTML (e.g. user-supplied names). */
 /**

@@ -45,7 +45,7 @@ with a toggle, then delete the toggle — and this was the deletion:
 
 One configuration axis fewer, and the host has no browser-facing route left.
 
-## 3. Reorganize `src/` by process, not by migration era (pending)
+## 3. Reorganize `src/` by process, not by migration era (in progress)
 
 The layout encodes history, not architecture: `src/durable/` mixes the
 store-owning host with Chat-surface code the Chat adapter imports, and
@@ -59,8 +59,15 @@ src/web/         # web-host, web-routes, page, artifacts-server
 src/shared/      # config, logger, stream, chat-client, secret-store, markdown
 ```
 
-Mechanical (`git mv` + import rewrite), but it lets "src/chat imports src/host
-directly" become a lint error instead of a convention.
+**Done: `src/chat/`.** The Chat adapter's code now lives in one directory — `commands.ts`, `cards.ts`,
+`card-input.ts`, `queries.ts`, `router.ts`, `handler.ts`, `painter.ts` (2,418 lines). Seven files
+moved, and the split is now visible in the tree: `src/durable/` is the store and what serves it,
+`src/chat/` is the surface that talks to Google.
+
+**Remaining:** the same for `src/web/` (`web.ts`, `web-routes.ts`, `view-sink.ts`, `artifacts-server`,
+`markdown.ts`, `page/`) and `src/protocol/` (`v1-routes`, `poll-client`, and the seam types). Neither
+is ambiguous, and neither is urgent; what mattered was that the two surfaces stopped sharing a
+directory with the store, which is what made "chat code in the host process" invisible.
 
 ## 4. Break up `durable/main.ts` into a route table (**done**)
 

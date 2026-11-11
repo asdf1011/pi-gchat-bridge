@@ -22,7 +22,7 @@ import { MAX_MESSAGE_CHARS, type ChatClient } from "../chat-client.js";
 import { defineDoc, type ConversationId } from "@earendil-works/pi-durable";
 import { logger } from "../logger.js";
 import type { SessionHost } from "../session-host/api.js";
-import type { DurableRouter } from "../adapter/router.js";
+import type { DurableRouter } from "../chat/router.js";
 import type { ConversationBinding } from "./bindings-doc.js";
 
 /**

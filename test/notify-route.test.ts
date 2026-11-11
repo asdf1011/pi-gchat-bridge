@@ -29,7 +29,7 @@ import { BridgeHost } from "../src/durable/host.js";
 import { handleDurableNotify } from "../src/durable/notify.js";
 import { readBody } from "../src/adapter/web-routes.js";
 import { inProcessSessionHost } from "../src/session-host/inprocess.js";
-import type { DurableRouter } from "../src/adapter/router.js";
+import type { DurableRouter } from "../src/chat/router.js";
 
 /**
  * The `/notify` branch of `src/durable/main.ts`, transcribed.

@@ -24,7 +24,7 @@ import { fork, type ChildProcess } from "node:child_process";
 import { ipcLink } from "@earendil-works/chord";
 
 import { logger } from "../logger.js";
-import { supervise, type Supervisor } from "../session-host/supervisor.js";
+import { supervise, type Supervisor } from "./supervisor.js";
 import type { Host } from "@earendil-works/chord";
 
 export interface ForkAdapterOptions {
