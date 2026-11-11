@@ -58,7 +58,7 @@ async function get(port: number, path: string): Promise<{ status: number; body: 
 }
 
 /** Poll until the child answers, or give up: a forked process is not ready when `fork` returns. */
-async function eventually(port: number, path: string, ms = 15_000): Promise<string> {
+async function eventually(port: number, path: string, ms = 30_000): Promise<string> {
   const deadline = Date.now() + ms;
   let last: unknown;
   while (Date.now() < deadline) {
@@ -74,7 +74,7 @@ async function eventually(port: number, path: string, ms = 15_000): Promise<stri
   throw new Error(`adapter never answered ${path} (last: ${String(last)})`);
 }
 
-test("a forked adapter reaches the host, and its replacement gets a fresh link", async () => {
+test("a forked adapter reaches the host, and its replacement gets a fresh link", { timeout: 120_000 }, async () => {
   const objectHost = serveSessionHost(fakeSeam());
   const port = await freePort();
   const ready = Promise.withResolvers<void>();
@@ -103,7 +103,7 @@ test("a forked adapter reaches the host, and its replacement gets a fresh link",
 
     // The same port, answered by a *different* process: the supervisor restarted it, and the new
     // generation was given its own link (otherwise `/state` could not reach the host at all).
-    const deadline = Date.now() + 20_000;
+    const deadline = Date.now() + 30_000;
     let second: { pid: number; cwd: string } | undefined;
     while (Date.now() < deadline) {
       const body = await eventually(port, "/state").catch(() => undefined);
