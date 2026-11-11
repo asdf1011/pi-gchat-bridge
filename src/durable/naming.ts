@@ -20,7 +20,7 @@
  * short whatever the thread has become — which is what made this affordable on a
  * local model in the first place.
  */
-import type { TopicSummaryConfig } from "../topic-summary.js";
+import type { TopicSummaryConfig } from "./topic-prompt.js";
 import { summarizeConversationTopic } from "./topic.js";
 import type { SessionHost } from "../session-host/api.js";
 import { logger } from "../logger.js";

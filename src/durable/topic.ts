@@ -23,7 +23,7 @@ import {
   postJson,
   TOPIC_SYSTEM_PROMPT,
   type TopicSummaryConfig,
-} from "../topic-summary.js";
+} from "./topic-prompt.js";
 import { projectView, type ViewLike } from "../session-host/projection.js";
 import type { SessionHost } from "../session-host/api.js";
 

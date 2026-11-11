@@ -3,14 +3,16 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { modelConfirmCard } from "../src/cards.js";
 import { readFirstTurn } from "../src/session-file.js";
+import { summarizeSessionTopic } from "../src/topic-summary.js";
+// The prompt contract, its normaliser and the HTTP call moved out of the session-file path: they
+// were never about storage, and the module that reads sessions is going away.
 import {
   buildTopicPrompt,
   cleanTitle,
   postJson,
-  summarizeSessionTopic,
   MAX_TITLE_CHARS,
   TOPIC_SYSTEM_PROMPT,
-} from "../src/topic-summary.js";
+} from "../src/durable/topic-prompt.js";
 
 const HEADER = '{"type":"session","version":3,"id":"h","timestamp":"t","cwd":"/workspace"}';
 
