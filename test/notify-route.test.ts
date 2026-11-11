@@ -27,7 +27,7 @@ import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 import { BridgeHost } from "../src/durable/host.js";
 import { handleDurableNotify } from "../src/durable/notify.js";
-import { readBody } from "../src/adapter/web-routes.js";
+import { readBody } from "../src/web/routes.js";
 import { inProcessSessionHost } from "../src/session-host/inprocess.js";
 import type { DurableRouter } from "../src/chat/router.js";
 

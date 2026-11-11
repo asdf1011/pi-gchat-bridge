@@ -42,10 +42,10 @@ import {
   webPageVersion,
   webSubmit,
   type PastedImage,
-} from "./web.js";
-import { manifestVersion, mountRootOf, webManifest } from "./web/manifest.js";
+} from "./sink.js";
+import { manifestVersion, mountRootOf, webManifest } from "./manifest.js";
 import { renderMarkdown } from "./markdown.js";
-import { runCommand } from "./command-surface.js";
+import { runCommand } from "../commands/command-surface.js";
 import { currentAddress, MAX_COMMENT_CHARS, modelText } from "../durable/comments.js";
 import { entriesBefore } from "../durable/entries.js";
 import type { SessionHost } from "../session-host/api.js";

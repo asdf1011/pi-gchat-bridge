@@ -7,7 +7,7 @@ import type { AddressInfo } from "node:net";
 
 import { JSDOM } from "jsdom";
 
-import { RENDER_SCRIPT, startArtifactsServer } from "../src/adapter/artifacts-server.js";
+import { RENDER_SCRIPT, startArtifactsServer } from "../src/web/artifacts-server.js";
 import { canonicalPath, type ArtifactFile } from "../src/durable/artifacts.js";
 import { deriveQuoteSelection, selectionFromOffsets } from "../src/durable/comments.js";
 import type { SessionHost } from "../src/session-host/api.js";

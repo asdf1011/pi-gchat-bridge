@@ -15,7 +15,7 @@
  *     happened (a catch-up, a submission that failed before the run began). Nothing else will end the
  *     watch in that case, so it ends itself.
  */
-import { httpPoll } from "../adapter/poll-client.js";
+import { httpPoll } from "../session-host/poll-client.js";
 import { logger } from "../logger.js";
 
 export interface ObserveTurnOptions {

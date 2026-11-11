@@ -12,8 +12,8 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import test from "node:test";
 
-import { apiPath, handleWebRequest, webPath } from "../src/adapter/web-routes.js";
-import { MAX_WEB_IMAGES } from "../src/adapter/web.js";
+import { apiPath, handleWebRequest, webPath } from "../src/web/routes.js";
+import { MAX_WEB_IMAGES } from "../src/web/sink.js";
 import type { NamedConversation, SessionHost } from "../src/session-host/api.js";
 import type { ProjectedView } from "../src/session-host/projection.js";
 

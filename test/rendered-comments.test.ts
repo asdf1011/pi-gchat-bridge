@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { JSDOM } from "jsdom";
 
-import { RENDER_SCRIPT } from "../src/adapter/artifacts-server.js";
+import { RENDER_SCRIPT } from "../src/web/artifacts-server.js";
 
 /** Build the document the server would send, and run its script. */
 function render(bodyHtml: string, comments: { id: string; quote: string; occurrence?: number }[]): JSDOM {

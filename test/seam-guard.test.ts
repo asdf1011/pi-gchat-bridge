@@ -18,9 +18,17 @@ import path from "node:path";
 import test from "node:test";
 
 const projectRoot = new URL("..", import.meta.url).pathname;
-const adapterDir = path.join(projectRoot, "src/adapter");
+/**
+ * The surface directories: the code that talks to a transport.
+ *
+ * They used to be one `src/adapter/`, which also held the seams they must not reach through. The
+ * split by process (see the plan, §3) makes the rule easier to state, not weaker: nothing in `chat/`,
+ * `web/` or `commands/` may name the store library or chord.
+ */
+const surfaceDirs = ["src/chat", "src/web", "src/commands"].map((dir) => path.join(projectRoot, dir));
 
 function sourcesIn(dir: string): { file: string; source: string }[] {
+  if (!fs.existsSync(dir)) return [];
   return fs
     .readdirSync(dir, { withFileTypes: true })
     .filter((entry) => entry.isFile() && entry.name.endsWith(".ts"))
@@ -35,7 +43,7 @@ const FORBIDDEN = ["@earendil-works/pi-durable", "@earendil-works/chord"];
 
 test("no adapter imports pi-durable or chord", () => {
   const offenders: string[] = [];
-  for (const { file, source } of sourcesIn(adapterDir)) {
+  for (const { file, source } of surfaceDirs.flatMap(sourcesIn)) {
     for (const library of FORBIDDEN) {
       if (source.includes(library)) offenders.push(`${file} imports ${library}`);
     }
@@ -45,7 +53,7 @@ test("no adapter imports pi-durable or chord", () => {
 
 test("no adapter reaches through the host into the harness", () => {
   const offenders: string[] = [];
-  for (const { file, source } of sourcesIn(adapterDir)) {
+  for (const { file, source } of surfaceDirs.flatMap(sourcesIn)) {
     for (const smell of ["host.harness", "host.modelRuntime", "host.bindingFor", "host.conversationFor", "host.context"]) {
       if (source.includes(smell)) offenders.push(`${file} uses ${smell}`);
     }
@@ -67,24 +75,27 @@ test("the projection is library-free too, so frames stay plain data", () => {
   }
 });
 
-test("every adapter file is one of the surfaces we know about", () => {
-  // A new file here is fine — it just has to be a deliberate one, because this
-  // directory is the whole reason the seam exists.
+test("every surface file is one of the ones we know about", () => {
+  // A new file here is fine — it just has to be a deliberate one, because these directories are the
+  // whole reason the seam exists.
   const known = new Set([
-    "artifacts-server.ts",
-    "command-surface.ts",
-    "commands.ts",
-    "markdown.ts",
-    "queries.ts",
-    "router.ts",
-    "v1-routes.ts",
-    "poll-client.ts",
-    "view-sink.ts",
-    "web.ts",
-    "web-routes.ts",
+    "chat/card-input.ts",
+    "chat/cards.ts",
+    "chat/commands.ts",
+    "chat/handler.ts",
+    "chat/painter.ts",
+    "chat/queries.ts",
+    "chat/router.ts",
+    "commands/command-surface.ts",
+    "web/artifacts-server.ts",
+    "web/manifest.ts",
+    "web/markdown.ts",
+    "web/routes.ts",
+    "web/sink.ts",
   ]);
-  const unexpected = sourcesIn(adapterDir)
-    .map(({ file }) => path.basename(file))
+  const unexpected = surfaceDirs
+    .flatMap(sourcesIn)
+    .map(({ file }) => file.replace(/^src[/\\]/, "").replace(/\\/g, "/"))
     .filter((name) => !known.has(name));
-  assert.deepEqual(unexpected, [], "new adapter files must be added here, deliberately");
+  assert.deepEqual(unexpected, [], "new surface files must be added here, deliberately");
 });

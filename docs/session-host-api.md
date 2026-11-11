@@ -18,8 +18,9 @@ no chord types in it, so that all of these become transport choices instead of r
 - two web adapters (dev + live) on one host
 - the next surface (voice, a CLI) without touching the host
 
-Success criterion, checkable by a test: `grep -r "@earendil-works/pi-durable" src/adapter/` finds
-nothing, and `grep -r "host.harness" src/adapter/` finds nothing.
+Success criterion, checkable by a test: nothing under `src/chat/`, `src/web/` or `src/commands/`
+names `@earendil-works/pi-durable` or `@earendil-works/chord`, and none of them reaches through the
+host into the harness. `test/seam-guard.test.ts` is that test.
 
 ## What the artifact origin already validated
 

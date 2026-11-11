@@ -267,8 +267,10 @@ export async function webSubmit(
  */
 function assetCandidates(name: string): URL[] {
   return [
-    new URL(`./web/${name}`, import.meta.url),
-    new URL(`../../src/adapter/web/${name}`, import.meta.url),
+    // Next to the compiled module (a build that copies assets), then the source tree — which is how
+    // this deployment serves them: `dist/` carries JavaScript only.
+    new URL(`./${name}`, import.meta.url),
+    new URL(`../../src/web/${name}`, import.meta.url),
   ];
 }
 

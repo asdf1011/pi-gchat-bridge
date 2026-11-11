@@ -45,29 +45,32 @@ with a toggle, then delete the toggle — and this was the deletion:
 
 One configuration axis fewer, and the host has no browser-facing route left.
 
-## 3. Reorganize `src/` by process, not by migration era (in progress)
+## 3. Reorganize `src/` by process, not by migration era (**done**)
 
-The layout encodes history, not architecture: `src/durable/` mixes the
-store-owning host with Chat-surface code the Chat adapter imports, and
-`src/adapter/` mixes web-bridge code with Chat code. Move to:
+The layout encoded history: `src/durable/` held the store-owning host *and* Chat-surface code the
+adapter imports, and `src/adapter/` mixed the Chat layer with the web layer — a directory whose
+meaning was "everything that isn't the host". With the SDK host gone there is no era left to encode.
 
 ```
-src/host/        # store owner: host, ledger, entries, artifacts, vcs, topic
-src/protocol/    # session-host api, link, link-contract, v1-routes, projection
-src/chat/        # chat-host, pubsub-receiver, chat-handler, chat-painter, cards
-src/web/         # web-host, web-routes, page, artifacts-server
-src/shared/      # config, logger, stream, chat-client, secret-store, markdown
+src/chat/       commands, cards, card-input, queries, router, handler, painter   2,418 lines
+src/web/        sink, routes, markdown, artifacts-server, manifest, page.html
+src/commands/   command-surface
+src/session-host/  the seam: api, link, link-contract, inprocess, v1-routes, poll-client,
+                   view-sink, projection, supervisor, fork-adapter
+src/durable/    the host: host, ledger, entries, artifacts, comments, topic, notify, activity…
 ```
 
-**Done: `src/chat/`.** The Chat adapter's code now lives in one directory — `commands.ts`, `cards.ts`,
-`card-input.ts`, `queries.ts`, `router.ts`, `handler.ts`, `painter.ts` (2,418 lines). Seven files
-moved, and the split is now visible in the tree: `src/durable/` is the store and what serves it,
-`src/chat/` is the surface that talks to Google.
+`src/adapter/` is gone. The seam guard now scans the three surface directories instead of one — the
+rule it enforces ("nothing that talks to a transport may name the store library or chord") is easier to
+state after the split, not weaker.
 
-**Remaining:** the same for `src/web/` (`web.ts`, `web-routes.ts`, `view-sink.ts`, `artifacts-server`,
-`markdown.ts`, `page/`) and `src/protocol/` (`v1-routes`, `poll-client`, and the seam types). Neither
-is ambiguous, and neither is urgent; what mattered was that the two surfaces stopped sharing a
-directory with the store, which is what made "chat code in the host process" invisible.
+**One deviation from the proposal:** `src/protocol/` was not created. `src/session-host/` already means
+"the seam and the shapes that cross it", which is what the proposal wanted the name to say; renaming a
+directory that is imported by eighty files to say the same thing is churn. The v1 routes and the poll
+client moved in beside it, which is the substance of the change.
+
+Two things this shook out: the asset loader's fallback path (`src/adapter/web/page.html`) and the seam
+guard's directory — both found by tests, which is the argument for having them.
 
 ## 4. Break up `durable/main.ts` into a route table (**done**)
 

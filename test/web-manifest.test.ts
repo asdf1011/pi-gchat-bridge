@@ -23,9 +23,9 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import test from "node:test";
 
-import { handleWebRequest } from "../src/adapter/web-routes.js";
-import { WEB_ICON, WEB_PAGE } from "../src/adapter/web.js";
-import { mountRootOf } from "../src/adapter/web/manifest.js";
+import { handleWebRequest } from "../src/web/routes.js";
+import { WEB_ICON, WEB_PAGE } from "../src/web/sink.js";
+import { mountRootOf } from "../src/web/manifest.js";
 import type { SessionHost } from "../src/session-host/api.js";
 
 /** No conversation is needed: the manifest is answered before anything asks the seam. */

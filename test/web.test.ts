@@ -13,7 +13,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { attachWebClient, webIndex, webSubmit, type SseClient, type WebOptions } from "../src/adapter/web.js";
+import { attachWebClient, webIndex, webSubmit, type SseClient, type WebOptions } from "../src/web/sink.js";
 import type { NamedConversation, SessionHost, SubmitRequest } from "../src/session-host/api.js";
 import type { ProjectedView } from "../src/session-host/projection.js";
 

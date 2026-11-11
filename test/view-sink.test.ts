@@ -7,7 +7,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { attachViewSink, type StreamTarget } from "../src/adapter/view-sink.js";
+import { attachViewSink, type StreamTarget } from "../src/session-host/view-sink.js";
 import type { SessionHost } from "../src/session-host/api.js";
 import { projectView, type ProjectedView, type ViewLike } from "../src/session-host/projection.js";
 
@@ -143,7 +143,7 @@ test("the shared frame painter is what both transports paint with", async () => 
   // The two view paths (in-process attachment and the wire) must make the same decisions,
   // so the decision lives in one function and this test pins it directly: whole snapshots,
   // no blanking, one tool line per call, cleared when the round ends.
-  const { viewFramePainter } = await import("../src/adapter/view-sink.js");
+  const { viewFramePainter } = await import("../src/session-host/view-sink.js");
   const stream = fakeStream();
   const paint = viewFramePainter(stream);
 
@@ -170,7 +170,7 @@ test("the settle edge fires once, and only when a turn actually ended", async ()
   // What makes the tick a fallback rather than the mechanism: the view says when the turn is
   // over, and the caller reads the entry then. Firing on every idle frame would re-read the
   // transcript continuously; never firing would leave the answer to the next tick.
-  const { viewFramePainter } = await import("../src/adapter/view-sink.js");
+  const { viewFramePainter } = await import("../src/session-host/view-sink.js");
   const stream = fakeStream();
   let settles = 0;
   const paint = viewFramePainter(stream, { onSettle: () => (settles += 1) });

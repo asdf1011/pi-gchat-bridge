@@ -1,3 +1,7 @@
+> **Historical record.** Paths below are where things lived *during* the migration: `src/adapter/`
+> has since been split into `src/chat/`, `src/web/` and `src/commands/`, and the SDK host it
+> describes has been deleted. Read it for the reasoning, not for the layout.
+
 # Migrating pi-gchat-bridge to Pi Durable
 
 Status: plan, not started. Branch: `durable`. Target: `@earendil-works/pi-durable` 1.4.0.

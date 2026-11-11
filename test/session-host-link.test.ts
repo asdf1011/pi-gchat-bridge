@@ -23,7 +23,7 @@ import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { BridgeHost } from "../src/durable/host.js";
 import { inProcessSessionHost } from "../src/session-host/inprocess.js";
 import { linkSessionHost, serveSessionHost } from "../src/session-host/link.js";
-import { runCommand } from "../src/adapter/command-surface.js";
+import { runCommand } from "../src/commands/command-surface.js";
 import { createHost } from "@earendil-works/chord";
 
 /** A host over in-memory storage with a model lookaside: no SQLite, no model. */

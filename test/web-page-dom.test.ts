@@ -26,7 +26,7 @@ import assert from "node:assert/strict";
 import { test, beforeEach } from "node:test";
 import { JSDOM } from "jsdom";
 
-import { WEB_PAGE } from "../src/adapter/web.js";
+import { WEB_PAGE } from "../src/web/sink.js";
 
 /** One recorded EventSource, so a test can emit frames on it. */
 interface FakeSource {

@@ -17,7 +17,7 @@ import os from "node:os";
 import path from "node:path";
 import test, { after } from "node:test";
 
-import { handleV1, type ConversationAddress } from "../src/adapter/v1-routes.js";
+import { handleV1, type ConversationAddress } from "../src/session-host/v1-routes.js";
 import { ActivityFeed } from "../src/durable/activity.js";
 import { runCli, loadState, saveState, say, tail, watch } from "../src/scripts/bridge-cli.js";
 import type { SessionHost, TranscriptMessage } from "../src/session-host/api.js";

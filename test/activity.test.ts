@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import test from "node:test";
 
-import { handleV1 } from "../src/adapter/v1-routes.js";
+import { handleV1 } from "../src/session-host/v1-routes.js";
 import { ActivityFeed, type ActivityEvent } from "../src/durable/activity.js";
 import type { SessionHost } from "../src/session-host/api.js";
 

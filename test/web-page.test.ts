@@ -18,7 +18,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 
-import { WEB_PAGE } from "../src/adapter/web.js";
+import { WEB_PAGE } from "../src/web/sink.js";
 
 /** The contents of the page's single <script> block. */
 function scriptOf(page: string): string {

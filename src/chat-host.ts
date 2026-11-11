@@ -34,7 +34,7 @@ import { chatHandler } from "./chat/handler.js";
 import { startChatPainter } from "./chat/painter.js";
 import { handleDurableNotify } from "./durable/notify.js";
 import { nameUntitledConversations } from "./durable/naming.js";
-import { readBody } from "./adapter/web-routes.js";
+import { readBody } from "./web/routes.js";
 import { linkSessionHost } from "./session-host/link.js";
 import { serveRoutes } from "./shared/serve-routes.js";
 

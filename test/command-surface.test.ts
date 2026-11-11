@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { runCommand } from "../src/adapter/command-surface.js";
+import { runCommand } from "../src/commands/command-surface.js";
 import type { ModelInfo, SessionHost } from "../src/session-host/api.js";
 
 /**

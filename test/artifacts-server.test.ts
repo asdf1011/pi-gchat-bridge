@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
 
-import { RENDER_SCRIPT, startArtifactsServer } from "../src/adapter/artifacts-server.js";
+import { RENDER_SCRIPT, startArtifactsServer } from "../src/web/artifacts-server.js";
 import { canonicalPath, type ArtifactFile } from "../src/durable/artifacts.js";
 import type { SessionHost } from "../src/session-host/api.js";
 

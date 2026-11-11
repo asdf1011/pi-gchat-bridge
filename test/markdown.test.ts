@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { escapeHtml, inline, markdownDocument, renderMarkdown } from "../src/adapter/markdown.js";
+import { escapeHtml, inline, markdownDocument, renderMarkdown } from "../src/web/markdown.js";
 
 test("source HTML is escaped, never passed through", () => {
   const html = renderMarkdown('<script>alert(1)</script>\n\n<img src=x onerror="alert(2)">');

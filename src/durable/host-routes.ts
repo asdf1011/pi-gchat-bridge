@@ -15,7 +15,7 @@
  */
 import type http from "node:http";
 
-import { handleV1 } from "../adapter/v1-routes.js";
+import { handleV1 } from "../session-host/v1-routes.js";
 import { logger } from "../logger.js";
 import type { Config } from "../config.js";
 import type { RouteTable } from "../shared/serve-routes.js";

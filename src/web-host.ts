@@ -20,7 +20,7 @@ import { createHost, ipcLink } from "@earendil-works/chord";
 
 import path from "node:path";
 
-import { handleWebRequest } from "./adapter/web-routes.js";
+import { handleWebRequest } from "./web/routes.js";
 import { logger } from "./logger.js";
 import { linkSessionHost } from "./session-host/link.js";
 import { serveRoutes } from "./shared/serve-routes.js";
