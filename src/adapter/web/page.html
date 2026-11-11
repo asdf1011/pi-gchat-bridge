@@ -441,6 +441,14 @@
      centimetres tall is a game, and people drag onto the conversation. */
   #pane.dropping { outline: 2px dashed color-mix(in srgb, CanvasText 35%, transparent);
     outline-offset: -4px; border-radius: .5rem; }
+  /* Signed out: a bar rather than a toast, because it is a state the page is in until the reader
+     does something — and it must be impossible to miss, since typing has stopped working. */
+  #sign-in { display: flex; gap: .75rem; align-items: center; justify-content: center;
+    padding: .5rem .75rem; font-size: .9em; flex-wrap: wrap;
+    background: color-mix(in srgb, #d33 12%, Canvas); border-bottom: 1px solid #d335;
+    color: color-mix(in srgb, CanvasText 85%, #d33); }
+  #sign-in[hidden] { display: none; }
+  #sign-in a { color: inherit; font-weight: 600; }
   #new-chat { position: fixed; right: 1rem; bottom: 1rem; z-index: 10;
     width: 2.75rem; height: 2.75rem; padding: 0; border-radius: 50%; font-size: 1.3rem;
     border: 1px solid #8886; background: var(--bubble-me); cursor: pointer; }
@@ -600,6 +608,10 @@
     <span id="conv-title"></span>
     <button id="artifacts-toggle" title="Files this conversation wrote" hidden aria-label="Artifacts">🗂</button>
   </header>
+  <div id="sign-in" hidden role="status">
+    <span>Your session has expired.</span>
+    <a id="sign-in-link" href="./">Sign in again</a>
+  </div>
   <div id="pane">
   <div id="log"></div>
   <div id="tool"></div>
@@ -746,6 +758,94 @@ function rel(path) {
 }
 
 /**
+ * A request this page can tell "signed out" from "failed" about.
+ *
+ * Behind Cloudflare Access an expired session answers with a **302 to the login page**. With the
+ * default redirect mode that becomes a cross-origin fetch to `cloudflareaccess.com`, which sends no
+ * CORS headers — so the request rejects with a bare `TypeError`, indistinguishable from the network
+ * being down. `redirect: "manual"` is the only way to see it: the browser refuses to follow and hands
+ * back an opaque-redirect response whose `type` says what happened.
+ *
+ * So every request goes through here, and a failure is classified once. There is no separate probe:
+ * the failure carries the answer. (`EventSource` cannot do this — it follows redirects per spec and
+ * reports a bare error — which is why it asks `session()` instead.)
+ */
+const SIGNED_OUT = Object.freeze({
+  ok: false,
+  status: 0,
+  // Response-shaped on purpose: every call site already handles "not ok" and "empty JSON", so a
+  // signed-out request degrades exactly like a refused one instead of needing a second return type
+  // checked in a dozen places. The banner is already up by then.
+  json: async () => ({}),
+  text: async () => '',
+});
+
+/** True when this is Cloudflare's redirect to the login page, rather than an answer. */
+function isSignInRedirect(response) {
+  // `opaqueredirect` is the documented signal; `status === 0` covers engines that do not expose it.
+  return response.type === 'opaqueredirect' || (response.status === 0 && response.type === 'opaque');
+}
+
+async function apiFetch(url, init) {
+  let response;
+  try {
+    response = await fetch(url, {
+      credentials: 'same-origin',
+      cache: 'no-store',
+      redirect: 'manual',
+      ...(init ?? {}),
+    });
+  } catch (error) {
+    throw error;
+  }
+  if (isSignInRedirect(response)) {
+    showSignIn();
+    return SIGNED_OUT;
+  }
+  return response;
+}
+
+/** The banner: shown once, and it stays until a navigation fixes the session. */
+let signInShown = false;
+function showSignIn() {
+  if (signInShown) return;
+  signInShown = true;
+  // Reconnecting behind a banner reads as "still trying" when the honest message is "you need to do
+  // something", so the stream stops rather than retrying into the same redirect.
+  if (source) {
+    source.close();
+    source = undefined;
+  }
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = undefined;
+  }
+  const bar = document.getElementById('sign-in');
+  const link = document.getElementById('sign-in-link');
+  // Back to where the reader is: Cloudflare puts a `redirect_url` in its redirect, so signing in
+  // returns them to this conversation rather than to the index.
+  if (link) link.href = location.href;
+  if (bar) bar.hidden = false;
+  tool.textContent = '';
+}
+
+/**
+ * Am I still signed in? The one question a stream cannot answer.
+ *
+ * Called when the stream errors, *before* deciding to reconnect: an expired session and a dropped
+ * connection are identical from `EventSource`, and only one of them is worth retrying.
+ */
+async function session() {
+  try {
+    const response = await apiFetch(rel('api/environment'));
+    if (response === SIGNED_OUT) return 'signed-out';
+    return response.ok ? 'ok' : 'failed';
+  } catch {
+    return 'offline';
+  }
+}
+
+/**
  * An installed app has no tab strip and no address bar, so the conversation's name
  * has to be the window title — it is the only thing naming what you are looking at.
  * A browser is left alone: its tab already says "pi bridge", and rewriting that on
@@ -771,6 +871,8 @@ let current;
 let source;
 /** Pending reconnect for a stream the browser has given up on. */
 let reconnectTimer;
+/** Set once the session is known to be gone: the stream stops trying, the banner says why. */
+let signedOut = false;
 /** Consecutive failed attempts, for the backoff. Reset when a stream opens. */
 let reconnectAttempts = 0;
 /** When the open stream last proved it was alive (a frame, or the server's keepalive). */
@@ -1181,7 +1283,7 @@ async function loadHistory() {
   try {
     // No anchor: the newest page. Every page after this one is anchored on the oldest id held, so a
     // turn that appends while somebody is scrolling cannot shift it.
-    const page = await (await fetch(rel('api/c/' + id + '/history?limit=' + HISTORY_PAGE + '&before=0'))).json();
+    const page = await (await apiFetch(rel('api/c/' + id + '/history?limit=' + HISTORY_PAGE + '&before=0'))).json();
     if (id !== current) return;
     transcript = Array.isArray(page?.messages) ? page.messages : [];
     beforeAnchor = page?.before ?? 0;
@@ -1288,7 +1390,7 @@ function connectStream(id) {
     startLivenessWatch(id);
     if (!pageVersion || reloadedForVersion) return;
     try {
-      const environment = await (await fetch(rel('api/environment'))).json();
+      const environment = await (await apiFetch(rel('api/environment'))).json();
       const latest = String(environment.pageVersion || '');
       if (latest && latest !== pageVersion) {
         reloadedForVersion = true;
@@ -1310,6 +1412,20 @@ function connectStream(id) {
     paint();
   });
   source.addEventListener('error', () => {
+    // Before deciding to retry, find out whether retrying *can* work: an expired session answers the
+    // reconnect with Cloudflare's login redirect, and `EventSource` reports that as an error like any
+    // other. This is the one place that can tell them apart — and if the session is gone, the banner
+    // is up and nothing below this line should run.
+    if (signedOut) return;
+    void session().then((state) => {
+      if (state !== 'signed-out') return;
+      signedOut = true;
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = undefined;
+      }
+      tool.textContent = '';
+    });
     // Connection state is not conversation content, so it stays in the footer rather than in the
     // pane — but it must also be *true*. The browser stops retrying permanently once a stream
     // closes (a frozen tab, a phone that locked, a restart that answered 5xx), and then "reconnecting…"
@@ -1388,7 +1504,7 @@ async function loadTitle() {
   const heading = document.getElementById('conv-title');
   heading.textContent = '#' + current;
   try {
-    const conversation = await (await fetch(rel('api/c/' + current))).json();
+    const conversation = await (await apiFetch(rel('api/c/' + current))).json();
     if (conversation && (conversation.name || conversation.chatKey)) {
       heading.textContent = conversation.name || conversation.chatKey;
     }
@@ -1658,31 +1774,39 @@ document.getElementById('send').onsubmit = async (e) => {
   const text = box.value.trim();
   if ((!text && pendingImages.length === 0) || !current) return;
   const sending = pendingImages;
-  pendingImages = [];
-  renderAttachments();
-  box.value = '';
-  // Clearing the box programmatically fires no `input` event, and `saveDraft()`
-  // is only wired to `input`. Without this explicit call the draft outlived the
-  // send, and `open()` refilled the box with the message already sent the next
-  // time the conversation was opened. Save after clearing rather than removing
-  // the key directly, so the empty-box rule stays in one place.
-  saveDraft();
+  // The box is cleared **after** the request is accepted, not before. Clearing first meant a send
+  // that failed — an expired session is the case that made this visible — took the message with it,
+  // and the reader watched their words disappear with no reply and no error.
   fitBox();
   // A line beginning with `/` is a command, not a message: it asks the application something rather
   // than telling the agent something. Images win, because dropping them silently is worse than
   // sending a message beginning with a slash.
   if (text.startsWith('/') && sending.length === 0) {
+    // A command's text is the command, and its answer is the panel: nothing is lost by clearing it,
+    // and leaving it there invites sending `/status` twice.
+    box.value = '';
+    saveDraft();
     await runCommandLine(text);
     return;
   }
-  const response = await fetch(rel('api/c/' + current + '/message'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      text,
-      images: sending.map((image) => ({ data: image.data, mimeType: image.mimeType })),
-    }),
-  });
+  let response;
+  try {
+    response = await apiFetch(rel('api/c/' + current + '/message'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text,
+        images: sending.map((image) => ({ data: image.data, mimeType: image.mimeType })),
+      }),
+    });
+  } catch {
+    // The request never got an answer — a dropped connection, not an expired session (that one is a
+    // redirect, which `apiFetch` classifies). Either way the message stays in the box.
+    pendingImages = sending;
+    renderAttachments();
+    attachNotice_('Could not send — the connection failed. Your message is still here.');
+    return;
+  }
   // Show it immediately, the way Chat echoes your message: waiting for the
   // transcript refetch at the end of the turn made it look lost.
   try {
@@ -1699,10 +1823,23 @@ document.getElementById('send').onsubmit = async (e) => {
         images: sending.map((image) => ({ mimeType: image.mimeType, dataUrl: image.dataUrl })),
       });
       paint();
+      // Accepted: now the box can go, and the draft with it. Clearing programmatically fires no
+      // `input` event and `saveDraft()` is only wired to that, so it is called explicitly — the
+      // draft previously outlived the send and refilled the box on the next open.
+      box.value = '';
+      pendingImages = [];
+      renderAttachments();
+      saveDraft();
+      fitBox();
+    } else {
+      // Refused: keep the text and the images, and say so once. The turn's own error, if any,
+      // arrives on the stream; this is about the *send*.
+      pendingImages = sending;
+      renderAttachments();
+      if (result && result.error) attachNotice_(String(result.error));
     }
   } catch {
-    // A failed submit is already visible as a missing message; the turn's own
-    // error, if any, arrives on the stream.
+    // Unreadable answer: keep the draft, because the alternative is losing it.
   }
 };
 
@@ -1743,7 +1880,7 @@ async function runCommandLine(text, values, preview) {
   if (!current) return;
   let shape;
   try {
-    const response = await fetch(rel('api/c/' + current + '/commands'), {
+    const response = await apiFetch(rel('api/c/' + current + '/commands'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text, ...(values ? { values } : {}), ...(preview ? { preview: true } : {}) }),
@@ -1961,7 +2098,7 @@ function modelLabelOf(key) {
 async function loadModels() {
   if (modelChoices) return modelChoices;
   try {
-    const response = await fetch(rel('api/models'));
+    const response = await apiFetch(rel('api/models'));
     const body = await response.json();
     modelChoices = Array.isArray(body && body.models) ? body.models : [];
   } catch {
@@ -2180,7 +2317,7 @@ async function applyFormat(modelKey, thinking, levels) {
   // is a refusal, not a preference.
   const wanted = thinking !== undefined && levels.includes(thinking) ? thinking : levels[0];
   try {
-    const response = await fetch(rel('api/c/' + current + '/commands'), {
+    const response = await apiFetch(rel('api/c/' + current + '/commands'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -2212,7 +2349,7 @@ async function applyFormat(modelKey, thinking, levels) {
  */
 async function refreshFormat() {
   try {
-    adoptFormat(await (await fetch(rel('api/c/' + current))).json());
+    adoptFormat(await (await apiFetch(rel('api/c/' + current))).json());
   } catch {
     // Keep what we have: it is still the last thing the server said.
   }
@@ -2477,7 +2614,7 @@ async function loadArtifacts(preserve) {
   if (!current) return;
   let rows;
   try {
-    rows = await (await fetch(rel('api/c/' + current + '/artifacts'))).json();
+    rows = await (await apiFetch(rel('api/c/' + current + '/artifacts'))).json();
   } catch {
     rows = [];
   }
@@ -2709,7 +2846,7 @@ async function sendComment() {
   const selection = pendingSelection;
   commentError.hidden = true;
   try {
-    const response = await fetch(rel('api/c/' + current + '/comments'), {
+    const response = await apiFetch(rel('api/c/' + current + '/comments'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -2749,7 +2886,7 @@ function reloadFrame() {
 async function loadComments() {
   if (!current) return;
   try {
-    const rows = await (await fetch(rel('api/c/' + current + '/comments'))).json();
+    const rows = await (await apiFetch(rel('api/c/' + current + '/comments'))).json();
     commentsById = new Map((Array.isArray(rows) ? rows : []).map((row) => [row.id, row]));
   } catch {
     commentsById = new Map();
@@ -2785,7 +2922,7 @@ async function openThread(id) {
   commentSheet.hidden = false;
   document.getElementById('comment-resolve').textContent = comment.resolved ? 'Reopen' : 'Resolve';
   try {
-    const replies = await (await fetch(rel('api/c/' + current + '/comments/' + encodeURIComponent(id) + '/thread'))).json();
+    const replies = await (await apiFetch(rel('api/c/' + current + '/comments/' + encodeURIComponent(id) + '/thread'))).json();
     if (openCommentId !== id) return;
     for (const node of commentThread.querySelectorAll('.comment-turn.answer-pending')) node.remove();
     for (const reply of Array.isArray(replies) ? replies : []) {
@@ -2807,7 +2944,7 @@ async function replyInThread() {
   if (!text) return;
   commentReply.value = '';
   try {
-    const response = await fetch(rel('api/c/' + current + '/comments/' + encodeURIComponent(openCommentId) + '/reply'), {
+    const response = await apiFetch(rel('api/c/' + current + '/comments/' + encodeURIComponent(openCommentId) + '/reply'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text }),
@@ -2824,7 +2961,7 @@ async function resolveComment() {
   const comment = commentsById.get(openCommentId);
   const next = !(comment && comment.resolved);
   try {
-    await fetch(rel('api/c/' + current + '/comments/' + encodeURIComponent(openCommentId) + '/resolve'), {
+    await apiFetch(rel('api/c/' + current + '/comments/' + encodeURIComponent(openCommentId) + '/resolve'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ resolved: next }),
@@ -3000,7 +3137,7 @@ document.addEventListener('keydown', (event) => {
 // hidden unless the deployment says where that is.
 const artifactsReady = (async () => {
   try {
-    const environment = await (await fetch(rel('api/environment'))).json();
+    const environment = await (await apiFetch(rel('api/environment'))).json();
     artifactsBase = String(environment.artifactsBaseUrl || '').replace(/\/$/, '');
     artifactsButton.hidden = artifactsBase === '';
     pageVersion = String(environment.pageVersion || '');
@@ -3018,7 +3155,7 @@ async function loadIndex(offset) {
   indexOffset = Math.max(0, offset || 0);
   let page = { items: [], more: false };
   try {
-    page = await (await fetch(rel('api/conversations?limit=' + PAGE_SIZE + '&offset=' + indexOffset))).json();
+    page = await (await apiFetch(rel('api/conversations?limit=' + PAGE_SIZE + '&offset=' + indexOffset))).json();
   } catch {
     page = { items: [], more: false };
   }
@@ -3057,7 +3194,7 @@ document.getElementById('index-older').onclick = () => void loadIndex(indexOffse
 
 document.getElementById('new-chat').onclick = async () => {
   try {
-    const response = await fetch(rel('api/conversations'), { method: 'POST' });
+    const response = await apiFetch(rel('api/conversations'), { method: 'POST' });
     const created = await response.json();
     if (created && created.conversationId) location.href = mountRoot() + created.conversationId + '/';
   } catch {
