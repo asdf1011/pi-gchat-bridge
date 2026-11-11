@@ -500,21 +500,6 @@ export interface SessionHost {
     options?: { signal?: AbortSignal },
   ): Promise<{ comment: CommentView } | { error: string }>;
 
-  /**
-   * Reply into one comment's thread as the agent.
-   *
-   * Deliberately *not* a submission: a review reply is plumbing, so it must not
-   * appear in Chat and must not come back to the model as context. Reachable
-   * from the agent's own tool; there is no HTTP route, because a person replying
-   * to a thread is a turn (`/comments/:id/reply`).
-   */
-  replyToComment(
-    conversationId: number,
-    commentId: string,
-    text: string,
-    options?: { signal?: AbortSignal },
-  ): Promise<{ id: string } | { error: string }>;
-
   /** Resolve, or reopen, one comment. True when something changed. */
   resolveComment(
     conversationId: number,
@@ -595,9 +580,6 @@ export interface SessionHost {
   /** Point `name` at an existing conversation, keeping the previous label. */
   bind(name: string, conversationId: number, options?: { signal?: AbortSignal }): Promise<NamedConversation | undefined>;
 
-  /** Forget a name's binding. The transcript stays. */
-  unbind(name: string, options?: { signal?: AbortSignal }): Promise<boolean>;
-
   /** Set a conversation's display label. Adapter-facing text only. */
   label(name: string, label: string, options?: { signal?: AbortSignal }): Promise<boolean>;
 
@@ -612,17 +594,6 @@ export interface SessionHost {
 
   /** Write an adapter-authored entry into a conversation. Returns its id. */
   write(conversationId: number, entry: AdapterEntry, options?: { signal?: AbortSignal }): Promise<number>;
-
-  /**
-   * Write a failure notice as an answer, so the asking surface sees it.
-   *
-   * Separate from `write` because the stamp is the point: an ordinary adapter entry is
-   * commentary the painter deliberately never posts, while this one has to appear as the
-   * reply to a prompt that will otherwise have no reply at all. `submission` is what ties
-   * it to that prompt (and to whichever surface asked), so the notice lands in front of
-   * the person who is waiting for an answer rather than in a log.
-   */
-  writeNotice(conversationId: number, submission: number, text: string, options?: { signal?: AbortSignal }): Promise<number | undefined>;
 
   // --- Adapter-owned durable state ----------------------------------------
   //

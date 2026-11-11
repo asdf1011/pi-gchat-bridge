@@ -81,15 +81,25 @@ followed it to the new file.
 The extraction was worth doing twice: the first attempt was scripted and produced code that treated
 `return;` inside a nested loop as "handled"; the second was by hand and took ten minutes.
 
-## 5. Audit the `SessionHost` seam for single-consumer methods (pending)
+## 5. Audit the `SessionHost` seam for single-consumer methods (**partly done**)
 
-The interface has grown to 40+ operations (conversations, transcripts, images,
-projections, artifacts, comments, secrets, models, quotas, settings, failures)
-despite its "small by construction" rule, and `notImplemented` stubs in
-`link.ts` suggest declared-ahead-of-need. Split into capability objects —
-`ConversationReads`, `ConversationWrites`, `ArtifactSurface`,
-`CommentSurface`, `AdminSurface` — composing into `SessionHost`. The chord
-objects can stay; this is about the type each adapter receives.
+Audited all 37 operations for callers. Three had **none**, and they are gone from the interface, the
+in-process implementation, the link contract and the link client — 99 lines:
+
+- `replyToComment` — the agent's "reply into a thread" operation. The *tool* it was written for calls
+  `addComment` instead; the operation never had a caller after the comment-tools rewrite.
+- `unbind` — no adapter unbinds a name. The host keeps its own `unbind` for the store, which is where
+  it was always used.
+- `writeNotice` — a failure notice written *as an answer*. Nothing calls it: the Chat handler words
+  the notice itself and posts it through the painter, which is the only mouth.
+
+The rest are used, most of them once (which is fine — an adapter calls it once).
+
+**The split is not planned.** The item proposed capability objects (`ConversationReads`,
+`CommentSurface`, …). With the dead operations gone, the interface is 34 operations that each have a
+caller, and splitting it would reorganise working code to solve a problem that deleting solved.
+Prefer deletion over decomposition: an operation with no caller is a liability, an operation with one
+caller is the interface.
 
 ## 6. Delete migration residue (**done**)
 

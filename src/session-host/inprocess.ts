@@ -514,14 +514,6 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
       };
     },
 
-    async replyToComment(
-      conversationId: number,
-      commentId: string,
-      text: string,
-    ): Promise<{ id: string } | { error: string }> {
-      return host.addCommentReply(conversationId, commentId, text);
-    },
-
     async resolveComment(conversationId: number, commentId: string, resolved: boolean): Promise<boolean> {
       return host.setCommentResolved(conversationId, commentId, resolved);
     },
@@ -584,10 +576,6 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
       return binding === undefined ? undefined : named(name, binding);
     },
 
-    async unbind(name: string): Promise<boolean> {
-      return host.unbind(name);
-    },
-
     async label(name: string, label: string): Promise<boolean> {
       return host.setLabel(name, label);
     },
@@ -598,10 +586,6 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
 
     async write(conversationId: number, entry: AdapterEntry): Promise<number> {
       return host.writeEntry(conversationId, entry);
-    },
-
-    async writeNotice(conversationId: number, submission: number, text: string): Promise<number | undefined> {
-      return host.writeFailureNotice(conversationId, submission, text);
     },
 
     async recordVerdict(name: string, verdict: AdapterVerdict): Promise<void> {

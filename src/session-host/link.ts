@@ -105,8 +105,6 @@ export function serveSessionHost(seam: SessionHost): Host {
       }),
     bind: async ({ name, conversation }) => (await seam.bind(name, conversation)) ?? null,
     label: ({ name, label }) => seam.label(name, label),
-    writeNotice: async ({ conversationId, submission, text }: { conversationId: number; submission: number; text: string }) =>
-      (await seam.writeNotice(conversationId, submission, text)) ?? null,
     quota: () => seam.quota() as Promise<ProviderQuota[]>,
     modelFailures: () => seam.modelFailures() as Promise<ProviderFailure[]>,
     secrets: () => seam.secrets() as Promise<{ name: string; addedBy?: string }[]>,
@@ -249,10 +247,6 @@ export function serveSessionHost(seam: SessionHost): Host {
       commentThread: async ({ commentId }: { commentId: string }) => [
         ...((await seam.commentThread(conversation, commentId)) ?? []),
       ],
-      replyToComment: async ({ commentId, text }: { commentId: string; text: string }) => {
-        const result = await seam.replyToComment(conversation, commentId, text);
-        return "error" in result ? { error: result.error } : { id: result.id };
-      },
     };
   });
 
@@ -450,21 +444,6 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
       }
     },
 
-    replyToComment: async (conversationId: number, commentId: string, text: string) => {
-      const ref = await conversationRef(host, conversationId, session);
-      if (!ref) return { error: `no such conversation: ${conversationId}` };
-      try {
-        const result = (await host.root((ctx) => ref.replyToComment({ commentId, text }, ctx))) as {
-          id?: string;
-          error?: string;
-        };
-        return result.id === undefined
-          ? { error: result.error ?? "the host declined the reply" }
-          : { id: result.id };
-      } finally {
-        ref.release();
-      }
-    },
 
     commentThread: async (conversationId: number, commentId: string) => {
       const ref = await conversationRef(host, conversationId, session);
@@ -511,14 +490,6 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
       const root = await session();
       const bound = await host.root((ctx) => root.bind({ name, conversation: conversationId }, ctx));
       return bound ?? undefined;
-    },
-    unbind: () => {
-      throw notImplemented("unbind");
-    },
-    writeNotice: async (conversationId: number, submission: number, text: string) => {
-      const root = await session();
-      const id = await host.root((ctx) => root.writeNotice({ conversationId, submission, text }, ctx));
-      return id ?? undefined;
     },
     quota: async () => {
       const root = await session();

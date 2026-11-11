@@ -75,7 +75,6 @@ function fakeSeam(options: FakeSeamOptions = {}): SessionHost {
     commentThread: async () => [
       { kind: "answer", text: "Done: switched to vegetable stock.", submissionId: 7 },
     ],
-    replyToComment: async () => ({ id: "c1" }),
   } as unknown as SessionHost;
 }
 

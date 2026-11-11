@@ -326,15 +326,6 @@ export const ConversationContract = remote("pi-bridge.conversation", {
           Type.Array(CommentReplySchema),
         ),
         /**
-         * The agent replying into a thread. Not a submission: the reply is for the
-         * review pane, so it never reaches Chat and never re-enters the model's
-         * context.
-         */
-        replyToComment: method(
-          Type.Object({ commentId: Type.String(), text: Type.String() }),
-          Type.Object({ id: Type.Optional(Type.String()), error: Type.Optional(Type.String()) }),
-        ),
-        /**
          * Write an adapter-authored entry into the conversation: a notice, not a model turn.
          *
          * `data` is the adapter's own shape. The host stores it and hands it back to readers; it is
@@ -433,22 +424,6 @@ export const SessionContract = remote("pi-bridge.session", {
          * conversation — and because the check reads `models.json` and calls the providers, so it
          * can only run where the host is.
          */
-        /**
-         * Write a failure notice as the answer to a submission.
-         *
-         * Session-level because it names the submission it answers, and that is what decides
-         * which surface the notice returns to. Distinct from a conversation's `write`, which is
-         * commentary the painter never posts; this one must appear as a reply or the turn looks
-         * hung — and it must reach the person who is waiting, not a log.
-         */
-        writeNotice: method(
-          Type.Object({
-            conversationId: Type.Number(),
-            submission: Type.Number(),
-            text: Type.String(),
-          }),
-          Type.Union([Type.Number(), Type.Null()]),
-        ),
         quota: method(Type.Object({}), Type.Array(ProviderQuotaSchema)),
         /**
          * Provider failures the bridge recorded, newest first.
