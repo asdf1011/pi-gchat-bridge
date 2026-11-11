@@ -1,19 +1,14 @@
 /**
  * Routing: a Chat message becomes a submission on the right conversation.
  *
- * This replaces `AgentRouter.handleMessage()` and, with it, three things the old
- * bridge maintained by hand:
+ * Two properties are the store's rather than this file's, which is why none of the bookkeeping an
+ * adapter usually needs appears here:
  *
- *   - **Deduplication** (`state.ts`'s `processed` list). Google Chat delivery is
- *     at-least-once — Pub/Sub redelivers, and the bridge used to remember message
- *     names to avoid answering twice. The Chat message resource name is now the
- *     `requestId`, and the host returns the same submission for a repeated one
- *     instead of running again.
- *   - **The steer queue** (`pendingSteers`, `toolsInFlight`, `steerWaitMs`).
- *     `whenBusy: "steer"` places a message after the current tool round and joins
- *     the running work, which is exactly what the old queue emulated.
- *   - **Busy bookkeeping.** Nothing has to be tracked: a message either starts a
- *     run or steers the one in progress.
+ *   - **Deduplication.** Google Chat delivery is at-least-once: Pub/Sub redelivers. The Chat message
+ *     resource name is the submission's `requestId`, so a redelivered message finds the same
+ *     submission instead of running a second turn.
+ *   - **Busy state.** A message either starts a run or steers the one in progress (`whenBusy`), and
+ *     the host knows which. Nothing here tracks queues or tool rounds.
  *
  * Deliberately thin, and free of Chat API types and of the harness: the sink
  * paints, `stream.ts` handles Chat's rendering limits, and this file only

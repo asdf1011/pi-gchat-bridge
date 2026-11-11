@@ -1,8 +1,7 @@
 /**
  * The web frontend: a second sink on the same conversations Chat uses.
  *
- * This is the point of the whole migration. Chat and a browser are both clients
- * of one conversation; neither owns it. The Chat sink paints a message via
+ * Chat and a browser are both clients of one conversation; neither owns it. The Chat sink paints a message via
  * `ReplyStream`, this one paints a `text/event-stream`, and both subscribe to
  * the same `viewState()`. A turn started in Chat streams into the browser, and a
  * turn started in the browser appears in Chat, because they are not two

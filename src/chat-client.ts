@@ -220,7 +220,7 @@ export class ChatClient {
   }
 
   /**
-   * Replace the cards of an existing bot message (used to update pickers).
+   * Replace the cards of an existing bot message — how a picker is updated in place.
    * NOTE (verified Aug 2026): only `cardsV2` is a valid `updateMask` path —
    * including `fallbackText` makes the whole PATCH fail with 400
    * ("Unsupported path name in message field mask"). The body still carries
@@ -255,7 +255,7 @@ export class ChatClient {
     );
   }
 
-  /** Delete a bot message (used to remove the streaming placeholder). */
+  /** Delete a bot message — how the streaming placeholder is removed. */
   async deleteMessage(messageName: string): Promise<void> {
     await this.auth.request("DELETE", `${CHAT_API_BASE}/${messageName}`);
   }

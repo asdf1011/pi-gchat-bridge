@@ -4,10 +4,9 @@
  * This is the durable replacement for the event wiring in `agent-sessions.ts`
  * (`session.subscribe` → `onDelta`/`showTool`/`clearTool` → `finish`). What it
  * does *not* replace is `ReplyStream` itself, deliberately: every Chat-API
- * quirk — the delayed "Thinking…" placeholder, in-place PATCHes, the 4,000-char
- * chunking, the code-fence repair at a chunk boundary, and the notification
- * trade-off in `finish()` — is platform behaviour that survived the migration
- * unchanged.
+ * quirk — the delayed "Thinking…" placeholder, in-place PATCHes, the 4,000-char chunking, the
+ * code-fence repair at a chunk boundary, and the notification trade-off in `finish()` — is platform
+ * behaviour: Chat's, not ours to simplify.
  *
  * The sink is deliberately dumb: it subscribes, translates, and gets out of the
  * way. Ordering is guaranteed by the caller awaiting the submission *after*
@@ -107,9 +106,8 @@ export interface ViewSink {
 /**
  * Attach a sink to a conversation's view.
  *
- * Tool status follows the same rule as the old bridge: show the newest
- * unfinished call, and clear once none is left, so a fast tool does not leave a
- * stale line (ReplyStream additionally debounces the show).
+ * Tool status: show the newest unfinished call, and clear once none is left, so a fast tool does not
+ * leave a stale line (`ReplyStream` additionally debounces the show).
  */
 export async function attachViewSink(options: ViewSinkOptions): Promise<ViewSink> {
   const { seam, conversationId, stream, onError } = options;

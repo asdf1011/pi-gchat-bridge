@@ -15,11 +15,9 @@
  * | pipe table                 | rows concatenated with NO separator at all    |
  *
  * The last one is the destructive case: a whole table collapses into a run-on
- * paragraph ("… F16258.1 ± 34.03.58 t/s…"), and a heading glued to the row
- * above it. Tables aren't in Chat's Markdown subset (literal pipes are what
- * the README used to promise, but no separator at all is what you get), so we
- * convert each row into a bullet line and label the columns from the header
- * instead of hoping for a table widget.
+ * paragraph ("… F16258.1 ± 34.03.58 t/s…"), and a heading glued to the row above it. Chat's
+ * Markdown has no table widget and no separator row, so each row becomes a bullet line with the
+ * columns labelled from the header.
  *
  * The transform is idempotent: already-converted output passes through
  * unchanged, so it can be applied per streamed PATCH as well as to the final

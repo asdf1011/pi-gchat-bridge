@@ -169,8 +169,8 @@ if (receiver) {
   logger.info("[chat-host] RECEIVER=none: no Pub/Sub, so no Chat messages will arrive");
 }
 
-// Name whatever has no title yet, in the background — the same pass the host used to run, moved
-// with the titler because it is a Chat card that the title is displayed on.
+// Name whatever has no title yet, in the background. It belongs here rather than with the host
+// because a title is a Chat card, and the Chat client is here.
 if (config.topicSummary) {
   void nameUntitledConversations({
     seam,

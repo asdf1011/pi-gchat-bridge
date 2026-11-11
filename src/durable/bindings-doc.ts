@@ -1,25 +1,20 @@
 /**
  * Bindings — which pi-durable conversation a Chat thread talks to.
  *
- * A Chat thread (and, for non-threaded DMs, a space) is the unit the user thinks
- * in; a pi-durable conversation is the unit the harness runs. This document is
- * the join between them, and it replaces two pieces of the old bridge:
+ * A Chat thread (and, for non-threaded DMs, a space) is the unit the user thinks in; a pi-durable
+ * conversation is the unit the harness runs. This document is the join between them: the key
+ * (`session-key.ts`'s `keyFor`) points at a conversation id.
  *
- *   - `session-key.ts` / `keyFor()` naming: the key is still derived the same
- *     way, but it now points at a conversation ID instead of a JSONL filename.
- *   - `state.json`'s `resumeMap`: the binding lives in the same storage as the
- *     transcript, so it is committed atomically with the conversation that
- *     creates it. There is no window where a conversation exists but the bridge
- *     has forgotten which thread owns it.
+ * It lives in the same storage as the transcript, so it is committed atomically with the
+ * conversation it names. There is no window where a conversation exists but the bridge has forgotten
+ * which thread owns it — a window a side file had, and the reason this is a document.
  *
  * Session-scoped (not conversation-scoped) because it indexes conversations:
  * a conversation document belongs to one conversation and cannot name others.
  *
- * Per-conversation agent choices live in pi-durable's own `pi.agent` document
- * (`conversation.configure()`), not here — that is the durable equivalent of the
- * `model_change` / `thinking_level_change` entries the old bridge appended. The
- * copy kept here is for the Chat-side cards, which need to render a choice
- * without opening the conversation.
+ * Per-conversation agent choices live in pi-durable's own `pi.agent` document (`configure()`), not
+ * here. The copy kept here is for the Chat-side cards, which need to render a choice without opening
+ * the conversation.
  */
 import { defineDoc } from "@earendil-works/pi-durable";
 

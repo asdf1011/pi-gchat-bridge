@@ -837,8 +837,8 @@ export async function handleWebRequest(
       return true;
     }
     await seam.noteCommentSubmission(conversationId, commentId, result.submissionId).catch(() => {});
-    // Mirrored by the painter like any other turn. It used to be the one kind of message
-    // Chat never saw, because it was the one submission nobody remembered to mirror.
+    // Mirrored by the painter like any other turn: a comment that starts a turn is a submission, and
+    // the painter is the only mouth.
     res.writeHead(202, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true, submissionId: result.submissionId }));
     return true;

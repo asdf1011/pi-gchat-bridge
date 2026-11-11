@@ -248,9 +248,9 @@ const SLASH_COMMANDS: SlashCommand[] = [
   },
   {
     pattern: /^\/engine\b/,
-    // Read-only, and the one command whose answer is unambiguous about which
-    // bridge replied: the SDK host has no such command, so a reply that says
-    // "engine=durable" cannot have come from it.
+    // Read-only. It answers "which process is replying, and where is its store" — the first thing
+    // to establish when a reply comes from somewhere unexpected, which is what a second bridge on the
+    // same Chat app looks like.
     run: async ({ client, seam, chatKey, spaceName, threadName, display }) => {
       const binding = await seam.resolve(chatKey);
       const status = binding ? await conversationStatus(seam, chatKey) : undefined;

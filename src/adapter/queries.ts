@@ -159,9 +159,8 @@ export async function rebind(seam: SessionHost, chatKey: string, conversationId:
  * Apply a `/model` pick: switch the conversation, or start it on that model when
  * the thread has none yet.
  *
- * Mirrors the old `applyConversationSettings`, including its `created` flag,
- * which the caller uses to post the "Starting a new conversation…" notice and to
- * remember the card for topic titling.
+ * Returns `created` when the pick started a conversation, which the caller uses to post the
+ * "Starting a new conversation…" notice and to remember the card for topic titling.
  */
 export async function applyModelPick(
   seam: SessionHost,

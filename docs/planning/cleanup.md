@@ -156,22 +156,30 @@ needs a turn, which needs a model — so it belongs in an e2e that can run one, 
 restart with an open web client: re-link, view replication resumes". Both are worth writing; neither
 can be faked cheaply, and a fake would prove the wrong thing.
 
-## 10. Documentation shape (partly done)
+## 10. Documentation shape (**done**)
 
-**Done: the architecture narrative moved out of the README.** `docs/architecture.md` holds the four
-listeners, the store, the delivery model, the seam and the two-local-model argument — with the reasons,
-because most of them were learned from a failure and the failure is the part worth keeping. The README
-keeps what a reader needs to *use* the thing: setup, behaviour, configuration, testing, security,
-limitations — and links out for the inside.
+**The architecture narrative left the README.** `docs/architecture.md` holds the four listeners, the
+store, delivery, the seam and the two-local-model argument — with the reasons, because most were
+learned from a failure and the failure is the part worth keeping. The README keeps what a reader needs
+to *use* the thing and links out; it went 592 → 554 lines and lost two sections of duplication plus
+the anchor the env table pointed at.
 
-What went with it: two sections of narrative duplication ("Session model & persistence"'s store
-description, "Two local servers, and why"), and the anchor the env table pointed at.
+**The inline comments were pruned per comment, not swept.** Twelve blocks described how a thing came
+to be where the current code only needs what it is:
 
-**Remaining: the inline comments.** Comment blocks that narrate how a thing came to be, where the
-current code no longer needs the story. That is a judgement per comment, and several of the loudest
-ones are load-bearing — `observeTurn`'s baseline compare, `postJson`'s reason for avoiding `fetch`,
-the painter's frontier rule. Prune the ones that describe the migration, keep the ones that describe a
-constraint.
+- `/engine`'s justification ("the SDK host has no such command") — the SDK host is gone;
+- the router's three bullets about what the *old* bridge maintained by hand, now two lines about what
+  the store owns instead;
+- `bindings-doc`'s account of which two pieces it replaced, now a description of the join and the
+  atomicity that makes it a document;
+- `view-sink`'s "platform behaviour that survived the migration", now "Chat's, not ours to simplify";
+- `queries`' "mirrors the old `applyConversationSettings`", `web.ts`'s "the point of the whole
+  migration", `chat-host`'s "the same pass the host used to run", `chat-markdown`'s "what the README
+  used to promise", `config`'s "(it no longer shares their slots)" — each replaced by the fact.
+
+**Kept, because the history *is* the constraint**: the artifact origin's account of being refused as a
+frame (`refused to connect`), and the note in the rendered document that inline code used to be
+excluded — which is why a rule that looks arbitrary is not.
 
 ## Deletions enabled
 

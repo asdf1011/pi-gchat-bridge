@@ -170,9 +170,8 @@ export function loadConfig(): Config {
     topicSummaryBaseUrl: process.env.BRIDGE_TOPIC_SUMMARY_BASE_URL ?? "http://127.0.0.1:8091/v1",
     topicSummaryApiKey: process.env.BRIDGE_TOPIC_SUMMARY_API_KEY ?? "",
     topicSummaryModel: process.env.BRIDGE_TOPIC_SUMMARY_MODEL ?? "lfm3-vl-2b-q8",
-    // 15 min: CPU inference is slow, and the titler shares the machine with
-    // whatever conversations are running (it no longer shares their slots).
-    // The job is detached, so waiting costs nothing.
+    // 15 min: CPU inference is slow, and the titler shares this machine with whatever conversations
+    // are running. The job is detached, so waiting costs nothing.
     topicSummaryTimeoutMs: Number(process.env.BRIDGE_TOPIC_SUMMARY_TIMEOUT_MS ?? 15 * 60 * 1000),
     replaceOnFinish: (process.env.BRIDGE_REPLACE_ON_FINISH ?? "1") !== "0",
     ledgerPath: (process.env.BRIDGE_LEDGER_PATH ?? "").trim(),
