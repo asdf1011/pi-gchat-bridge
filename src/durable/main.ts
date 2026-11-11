@@ -37,7 +37,7 @@ import { Ledger } from "./ledger.js";
 import { BridgeHost } from "./host.js";
 import { BridgeLockedError } from "./lock.js";
 import { handleV1 } from "../adapter/v1-routes.js";
-import { handleWebRequest, readBody } from "../adapter/web-routes.js";
+import { readBody } from "../adapter/web-routes.js";
 import { startArtifactsServer } from "../adapter/artifacts-server.js";
 import { artifactRoots } from "./artifacts.js";
 import { initArtifactRepo } from "./artifact-vcs.js";
@@ -338,33 +338,6 @@ async function main(): Promise<void> {
             );
             return;
           }
-          // The browser front end lives in one module so the same routes can be
-          // served from the bridge process or from an adapter process. In link
-          // mode the adapter owns them, and this process answers 404 — the tunnel
-          // must point at BRIDGE_WEB_PORT, not here.
-          if (
-            webEngine !== "link" &&
-            (await handleWebRequest(req, res, url, {
-              seam: hostSeam,
-              model: defaultModel,
-              secretUsers: config.secretUsers,
-              allowedUsers: config.allowedUsers,
-              ...(config.webToken ? { token: config.webToken } : {}),
-              ...(config.artifactsBaseUrl ? { artifactsBaseUrl: config.artifactsBaseUrl } : {}),
-              // Where a comment's file lives, for the text the model receives:
-              // the artifact directory is per conversation, and only this side
-              // knows that.
-              ...(config.artifactsDir === ""
-                ? {}
-                : {
-                    artifactPath: (conversationId: number, file: string) =>
-                      path.join(config.artifactsDir, "conversation", String(conversationId), file),
-                  }),
-              who,
-            }))
-          ) {
-            return;
-          }
           res.writeHead(404, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: false, error: "not found" }));
         } catch (error) {
@@ -428,23 +401,23 @@ async function main(): Promise<void> {
 
   // --- The web front end, optionally in its own process. ---
   //
-  // `BRIDGE_WEB_ENGINE=link` forks `dist/web-host.js`, accepts its chord link, and
-  // stops serving `/web` here. The adapter then owns that surface on
-  // `BRIDGE_WEB_PORT`, which is the port the tunnel must point at; everything it
-  // does goes through the seam, so the process holds no database and no Chat
-  // credentials, and restarting it cannot interrupt a turn.
+  // The web adapter is forked, always: `dist/web-host.js` on `BRIDGE_WEB_PORT`, which is the port
+  // the tunnel must point at. Everything it does goes through the seam, so that process holds no
+  // database and no Chat credentials, and restarting it cannot interrupt a turn.
   //
-  // The child is forked from *this* process rather than the supervisor because
-  // the IPC channel is the link: whoever accepts it must be the session host.
-  const webEngine = process.env.BRIDGE_WEB_ENGINE ?? "inprocess";
+  // It used to be a mode (`BRIDGE_WEB_ENGINE=link|inprocess`), the same way the Chat adapter was:
+  // prove the seam with a toggle, delete the toggle. This is the deletion — there is no in-process
+  // `/web` any more, so the duplication and the configuration matrix are both gone.
+  //
+  // The child is forked from *this* process rather than the supervisor because the IPC channel is
+  // the link: whoever accepts it must be the session host.
+  const webPort = Number(process.env.BRIDGE_WEB_PORT ?? 0);
+  if (!webPort) {
+    logger.error("[bridge] BRIDGE_WEB_PORT is not set — the web adapter needs somewhere to listen");
+    process.exit(1);
+  }
   let webSupervisor: Supervisor<import("node:child_process").ChildProcess> | undefined;
-  if (webEngine === "link") {
-    const webPort = Number(process.env.BRIDGE_WEB_PORT ?? 0);
-    if (!webPort) {
-      logger.error("[bridge] BRIDGE_WEB_ENGINE=link needs BRIDGE_WEB_PORT");
-      process.exit(1);
-    }
-    // src/web-host.ts compiles next to the entrypoint, one level up from this file.
+  // src/web-host.ts compiles next to the entrypoint, one level up from this file.
     const entry = new URL("../web-host.js", import.meta.url).pathname;
 
     // The one chord host this process serves, created above and shared: it accepts one link per
@@ -485,8 +458,7 @@ async function main(): Promise<void> {
       },
       log: (message) => logger.warn(message),
     });
-    logger.info("[bridge] web engine=link: /web is served by a supervised adapter process");
-  }
+  logger.info(`[bridge] web adapter forked; /web is served on ${webPort}`);
 
   const shutdown = async (): Promise<void> => {
     logger.info("[bridge] shutting down...");

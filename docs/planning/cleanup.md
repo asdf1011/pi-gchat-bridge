@@ -25,14 +25,19 @@ Delete the legacy engine and everything only it imports:
 
 ~2,500 lines.
 
-## 2. Pick one web engine and delete the other (pending)
+## 2. Pick one web engine and delete the other (**done**)
 
-`BRIDGE_WEB_ENGINE=link|inprocess` duplicates the fork/supervise/link/forward
-machinery and makes `main.ts` serve `/web` inline. The Chat adapter already
-went through this transition: prove the seam with a toggle, then delete the
-toggle. Make `link` unconditional, delete the in-process `/web` serving, and
-remove the env var from README and `.env.example`. Halves the configuration
-matrix.
+`BRIDGE_WEB_ENGINE=link|inprocess` duplicated the fork/supervise/link machinery and made `main.ts`
+serve `/web` inline. The Chat adapter had already been through the same transition — prove the seam
+with a toggle, then delete the toggle — and this was the deletion:
+
+- the in-process `/web` route table left `main.ts` (27 lines), so the host no longer serves a
+  surface it does not own;
+- the fork became unconditional, and `BRIDGE_WEB_PORT` became required rather than conditional;
+- the env var is gone from `src/`, `README.md` and `.env.example`, and the comments that explained
+  it now explain the arrangement instead.
+
+One configuration axis fewer, and the host has no browser-facing route left.
 
 ## 3. Reorganize `src/` by process, not by migration era (pending)
 

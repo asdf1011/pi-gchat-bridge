@@ -223,7 +223,7 @@ Pointing it back at `:8090` "works" but reintroduces the eviction.
 The same conversations, in a browser. The bridge serves a small page (no build
 step) at `/web` — or under whatever prefix a reverse proxy gives it.
 
-- **`GET /web`** — the page (served by the web adapter when `BRIDGE_WEB_ENGINE=link`)
+- **`GET /web`** — the page, served by the web adapter
 - **`GET /web/api/conversations`** — the index, newest first
 - **`GET /web/api/c/:id/history?before=`** — a page of transcript, **anchored**: `before` is
   the oldest entry id held and `before=0` is the first paint. Markdown is rendered
@@ -347,8 +347,7 @@ decision for a bridge with shell access.
 | `BRIDGE_BIND` | `127.0.0.1` | Address the HTTP server binds. Loopback by default; a tunnel or proxy goes in front |
 | `BRIDGE_TRUSTED_PROXY` | — | Address identity headers are trusted from. Empty = trust none, even on loopback |
 | `BRIDGE_WEB_TOKEN` | — | Bearer token for web writes; empty = no check (rely on the proxy) |
-| `BRIDGE_WEB_ENGINE` | `inprocess` | `link` serves `/web` from a forked adapter (`dist/web-host.js`) on `BRIDGE_WEB_PORT` |
-| `BRIDGE_WEB_PORT` | — | Where the web adapter listens. The tunnel's ingress points here, not at `PORT` |
+| `BRIDGE_WEB_PORT` | — (required) | Where the web adapter (`dist/web-host.js`) listens. The tunnel's ingress points here, not at `PORT` |
 | `BRIDGE_CHAT_PORT` | — (required) | Where the Chat adapter (`dist/chat-host.js`) listens — **and where `/notify` is served**. `cron/.env` points there. A request to `PORT`/notify answers with this address |
 | `BRIDGE_SESSIONS_DIR` | `./sessions` | Legacy JSONL sessions — read by the importer and the old engine only |
 | `BRIDGE_STATE_FILE` | `./state.json` | Legacy dedupe state — superseded by the store's submission ids |

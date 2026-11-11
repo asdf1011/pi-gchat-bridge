@@ -1,7 +1,7 @@
 /**
  * The web front end, in its own process.
  *
- * Forked by the session host when `BRIDGE_WEB_ENGINE=link`, and connected to it
+ * Forked by the session host, and connected to it
  * over a Node IPC channel carrying a chord link. Everything it serves comes
  * through `SessionHost`, so this file holds no harness, no database and no
  * Chat credentials — which is the whole point: it can be restarted, or edited
@@ -35,7 +35,7 @@ const artifactsBaseUrl = process.env.BRIDGE_ARTIFACTS_BASE_URL ?? "";
  * path rather than the viewer's key.
  *
  * Read here rather than passed down because this process is the one that serves
- * the routes — with `BRIDGE_WEB_ENGINE=link` the session host never sees a browser
+ * the routes — the session host never sees a browser
  * request. Empty means artifacts are not tracked, and the key is all there is.
  */
 const artifactsDir = (process.env.BRIDGE_ARTIFACTS_DIR ?? "").trim();

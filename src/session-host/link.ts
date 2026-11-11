@@ -25,7 +25,7 @@
  * The settings group — `state`, `models`, `setModel`, `bind`, `label`, `compact`,
  * `abort` — was published when the command surface started calling it: a `/status`
  * or `/model` typed into a web conversation is an adapter calling the seam, and
- * `BRIDGE_WEB_ENGINE=link` therefore needs these to be on the wire. Until then the
+ * an adapter in another process therefore needs these to be on the wire. Until then the
  * commands worked in tests and answered "not published over the link yet" in the
  * deployment that runs them. That is the rule doing its job in both directions: a
  * contract method with no consumer is speculation, and an operation a running

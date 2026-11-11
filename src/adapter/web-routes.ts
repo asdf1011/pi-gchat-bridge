@@ -3,7 +3,7 @@
  *
  * Extracted so the same routes can be served from either side of the seam: the
  * bridge process today, and a separate adapter process once
- * `BRIDGE_WEB_ENGINE=link` is on. The routes only ever touch `SessionHost`, so
+ * web adapter process. The routes only ever touch `SessionHost`, so
  * moving them is a deployment change rather than a port.
  *
  * It handles `/` (redirect), `/web/` (the page), and the API routes the page calls. It
