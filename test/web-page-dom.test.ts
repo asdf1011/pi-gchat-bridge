@@ -283,6 +283,55 @@ test("a conversation page shows the conversation, not a list of them", async () 
   }
 });
 
+/**
+ * The window title, which is what an installed app has instead of a tab strip.
+ *
+ * A browser's tab says the site; a standalone window says nothing else, so the
+ * conversation has to name itself — and has to stop naming itself on the way back
+ * to the index, or a task switcher shows two windows both called after whichever
+ * conversation was read last.
+ */
+test("a conversation names the window, and the index names the app", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      conversations: [
+        { conversationId: 7, chatKey: "spaces/A/threads/T1", model: "deepseek/deepseek-flash", name: "deploy notes" },
+      ],
+    });
+    await h.settle();
+    assert.deepEqual(h.errors, []);
+    // The name comes from the same response as the header, so the two cannot drift.
+    assert.equal(h.dom.window.document.title, "deploy notes — pi bridge");
+  } finally {
+    h?.close();
+  }
+
+  let index: Harness | undefined;
+  try {
+    index = await loadPage({ pathname: "/", conversations: [] });
+    assert.deepEqual(index.errors, []);
+    assert.equal(index.dom.window.document.title, "pi bridge");
+  } finally {
+    index?.close();
+  }
+});
+
+test("a conversation with no name falls back to its id, in the title too", async () => {
+  let h: Harness | undefined;
+  try {
+    // The conversation is not in the list the fake returns, so the header keeps
+    // "#7" — and the title has to say the same thing rather than staying generic.
+    h = await loadPage({ conversations: [] });
+    await h.settle();
+    assert.deepEqual(h.errors, []);
+    assert.equal(h.dom.window.document.getElementById("conv-title")!.textContent, "#7");
+    assert.equal(h.dom.window.document.title, "#7 — pi bridge");
+  } finally {
+    h?.close();
+  }
+});
+
 test("an empty index renders no rows and opens no stream", async () => {
   let h: Harness | undefined;
   try {
@@ -2125,6 +2174,65 @@ test("opening the composer puts the touch bar away", async () => {
     // Two boxes competing for the same strip is worse than either alone.
     assert.equal(doc.getElementById("selection-bar")!.hidden, true);
     assert.equal(doc.getElementById("comment-bar")!.hidden, false, "the composer opened instead");
+  } finally {
+    h?.close();
+  }
+});
+
+/* --- Signed out: a redirect the page can see ---------------------------------- */
+
+test("a redirected request shows the sign-in banner, and keeps the draft", async () => {
+  // Behind Cloudflare Access an expired session answers with a 302 to the login page. With the
+  // default redirect mode that is a CORS failure indistinguishable from the network being down;
+  // `redirect: "manual"` is what makes it visible, and this is the page noticing it.
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ pathname: "/7/", conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    await h.settle();
+    const doc = h.dom.window.document;
+    const box = doc.getElementById("text") as HTMLTextAreaElement;
+
+    // From here on, every request is answered the way Cloudflare answers an expired session.
+    // The shape Cloudflare's redirect leaves behind: opaque, status 0, and `type` saying why.
+    h.dom.window.fetch = (async () => ({
+      ok: false,
+      status: 0,
+      type: "opaqueredirect",
+      json: async () => ({}),
+    })) as unknown as typeof fetch;
+
+    box.value = "please remember me";
+    doc.getElementById("send")!.dispatchEvent(new h.dom.window.Event("submit", { cancelable: true }));
+    await h.settle();
+
+    assert.equal((doc.getElementById("sign-in") as HTMLElement).hidden, false, "the banner is up");
+    assert.match(doc.getElementById("sign-in")!.textContent ?? "", /session has expired/i);
+    // The draft is the thing that must survive: clearing the box before the POST is how a message
+    // typed into an expired session used to vanish without a trace.
+    assert.equal(box.value, "please remember me", "and the message is still in the box");
+    // Back to this page, not to the index: Cloudflare's redirect carries a `redirect_url`.
+    assert.match((doc.getElementById("sign-in-link") as HTMLAnchorElement).href, /\/7\/$/);
+  } finally {
+    h?.close();
+  }
+});
+
+test("a failed request that is not a redirect does not claim the session expired", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ pathname: "/7/", conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    await h.settle();
+    const doc = h.dom.window.document;
+    // A network failure: the fetch rejects. That is a different sentence, or no sentence at all.
+    h.dom.window.fetch = (async () => {
+      throw new TypeError("Failed to fetch");
+    }) as unknown as typeof fetch;
+    const box = doc.getElementById("text") as HTMLTextAreaElement;
+    box.value = "still here";
+    doc.getElementById("send")!.dispatchEvent(new h.dom.window.Event("submit", { cancelable: true }));
+    await h.settle();
+    assert.equal((doc.getElementById("sign-in") as HTMLElement).hidden, true, "no banner for a dropped connection");
+    assert.equal(box.value, "still here");
   } finally {
     h?.close();
   }

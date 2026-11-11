@@ -43,6 +43,7 @@ import {
   webSubmit,
   type PastedImage,
 } from "./web.js";
+import { manifestVersion, mountRootOf, webManifest } from "./web/manifest.js";
 import { renderMarkdown } from "./markdown.js";
 import { runCommand } from "./command-surface.js";
 import { currentAddress, MAX_COMMENT_CHARS, modelText } from "../durable/comments.js";
@@ -183,6 +184,40 @@ export async function handleWebRequest(
     res.end(req.method === "HEAD" ? undefined : WEB_ICON);
     return true;
   }
+  // --- The installable app ---
+  //
+  // The manifest is generated per request, because the page is mount-agnostic and a
+  // manifest is not: `start_url` and `scope` are whatever root this request arrived
+  // under. It is a separate document from the page (a `<link rel="manifest">`), so
+  // it does not touch the page's CSP, and it carries no credentials, so it needs no
+  // token — an installed icon with no token could never open it.
+  if ((req.method === "GET" || req.method === "HEAD") && path.endsWith("/manifest.webmanifest")) {
+    // The raw path, not `webPath`: that strips a mount prefix on the assumption
+    // that "/web" *is* the mount, and here the prefix is exactly what has to be
+    // kept — a manifest scoped to "/web/" on a page served from "/pi/web/" would
+    // capture the wrong part of the origin.
+    const root = mountRootOf(url.pathname);
+    if (root === undefined) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "not found" }));
+      return true;
+    }
+    const body = webManifest({ root, icon: `${root}favicon.svg` });
+    res.writeHead(200, {
+      "Content-Type": "application/manifest+json; charset=utf-8",
+      // Cheap to revalidate, and it must be: the bytes differ per mount, so a
+      // shared cache keyed on path alone would hand one deployment's roots to
+      // another. The ETag comes from the served bytes, like the page's version.
+      "Cache-Control": "no-cache",
+      ETag: `"${manifestVersion(body)}"`,
+      // A manifest is JSON, but nothing here should ever be sniffed into
+      // something executable.
+      "X-Content-Type-Options": "nosniff",
+    });
+    res.end(req.method === "HEAD" ? undefined : body);
+    return true;
+  }
+
   const isPage =
     path === "/" || path === "" || path === "/web" || path === "/web/" || /^\/\d+\/?$/.test(path);
   if ((req.method === "GET" || req.method === "HEAD") && isPage) {

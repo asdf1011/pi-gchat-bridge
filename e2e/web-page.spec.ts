@@ -43,7 +43,7 @@ async function stubApi(
   page: Page,
   options: {
     conversations?: typeof CONVERSATIONS;
-    history?: { role: string; text: string; html?: string; at?: number }[];
+    history?: { role: string; text: string; html?: string; at?: number; entryId?: number }[];
     frames?: { event: string; data: unknown }[];
     onPost?: (body: unknown) => void;
     /** The format the conversation reports: what the two pills show. */
@@ -143,18 +143,29 @@ async function stubApi(
 
   await page.route("**/api/c/*/history*", (route) => {
     // Paged the way the real route pages, so a browser test exercises the same
-    // offsets a real conversation would: `offset` counts back from the newest
-    // message, and a short page means the beginning.
+    // contract a real conversation would.
     const all = options.history ?? [];
     const query = new URL(route.request().url()).searchParams;
     const limit = Number(query.get("limit") ?? 50) || 50;
     const offset = Math.max(0, Number(query.get("offset") ?? 0) || 0);
     const end = Math.max(0, all.length - offset);
     const start = Math.max(0, end - limit);
+    const slice = all.slice(start, end);
+    // Anchored paging, the way the real route does it: `before` is an entry id, not
+    // an offset, so the page walks backwards through a log that may be appending.
+    // The fixture supplies the ids the real host does; without them the page cannot
+    // know where it is, and the paging tests were asking the route to invent an
+    // anchor — which is exactly what the real route refuses to do.
+    const before = Math.max(0, Number(query.get("before") ?? 0) || 0);
+    const held = before === 0 ? slice : all.filter((entry) => (entry.entryId ?? 0) < before).slice(-limit);
     return route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify(all.slice(start, end)),
+      body: JSON.stringify({
+        messages: held,
+        before: held[0]?.entryId ?? before,
+        atStart: before !== 0 && held.length < limit,
+      }),
     });
   });
 
@@ -514,6 +525,7 @@ test("scrolling up loads earlier messages, and the view does not jump", async ({
     text: `message ${i}`,
     html: `<p>message ${i}</p>`,
     at: Date.now() - (160 - i) * 60_000,
+    entryId: i + 1,
   }));
   await stubApi(page, { history });
   await page.setViewportSize({ width: 900, height: 400 });
@@ -558,6 +570,7 @@ test("paging reaches the very beginning and then stops", async ({ page }) => {
     text: `message ${i}`,
     html: `<p>message ${i}</p>`,
     at: Date.now() - (60 - i) * 60_000,
+    entryId: i + 1,
   }));
   await stubApi(page, { history });
   await page.setViewportSize({ width: 900, height: 400 });
@@ -1250,5 +1263,59 @@ test("opening the picker does not focus the search box", async ({ page }) => {
   // And the search still does its job when it is wanted.
   await page.locator("#picker-search").fill("local");
   await expect(page.locator("#picker-list .item")).toHaveCount(1);
+  expect(errors).toEqual([]);
+});
+
+/**
+ * Installability, in a real browser.
+ *
+ * The server's own answer is under test here, not a route stub: the stub helper
+ * intercepts `api/` calls only, and the manifest and the icon are not under `/api`, so both are served
+ * by the running bridge. That is the only way to catch the class of fault that makes
+ * an install silently unavailable — a manifest that is not linked, an icon that
+ * 404s, a start URL outside the scope — because none of those change how a page
+ * *looks*; the browser just never offers the install.
+ */
+test("the page is installable, and the manifest describes where it is served", async ({ page }) => {
+  const errors = watchErrors(page);
+  await stubApi(page);
+  // The index names the app; a conversation names itself. Both from the same rule,
+  // so a standalone window is legible in a task switcher either way.
+  await page.goto("/web/");
+  await expect(page).toHaveTitle("pi bridge");
+
+  // Linked, and resolved to the mount rather than the origin root.
+  const href = await page.locator('link[rel="manifest"]').getAttribute("href");
+  expect(href).toBe("manifest.webmanifest");
+  const manifestUrl = await page.evaluate(() =>
+    new URL(document.querySelector('link[rel="manifest"]')!.getAttribute("href")!, document.baseURI).pathname,
+  );
+  expect(manifestUrl).toBe("/web/manifest.webmanifest");
+
+  // Chrome's own parse of it, not ours: if this fails the install prompt never
+  // appears, whatever the file looks like in a text editor.
+  const fetched = await page.evaluate(async (url) => {
+    const response = await fetch(url);
+    return { status: response.status, type: response.headers.get("content-type"), body: await response.text() };
+  }, manifestUrl);
+  expect(fetched.status).toBe(200);
+  expect(fetched.type).toContain("application/manifest+json");
+  const manifest = JSON.parse(fetched.body) as { start_url: string; scope: string; display: string; icons: { src: string }[] };
+  expect(manifest.start_url).toBe("/web/");
+  expect(manifest.scope).toBe("/web/");
+  expect(manifest.display).toBe("standalone");
+
+  // The icon the manifest names actually loads as an image — an icon that 404s is
+  // the classic "manifest is valid but install is refused".
+  const iconOk = await page.evaluate(async (src) => {
+    const response = await fetch(new URL(src, document.baseURI).pathname);
+    return response.ok && (await response.text()).startsWith("<svg");
+  }, manifest.icons[0]!.src);
+  expect(iconOk).toBe(true);
+
+  // And the standalone window titles itself after the conversation.
+  await page.goto("/7/");
+  await expect(page.locator("#conv-title")).toHaveText("deploy notes");
+  await expect(page).toHaveTitle("deploy notes — pi bridge");
   expect(errors).toEqual([]);
 });

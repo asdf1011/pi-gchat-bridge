@@ -283,6 +283,29 @@ in front of it. Anyone who can reach the port can read every conversation and
 submit as the bot — and this bot can run `bash`. Do not bind `0.0.0.0` unless
 that is genuinely what you want.
 
+### Installing it as an app
+
+The page is a progressive web app in the narrow sense that matters here: it can be
+installed, and once installed it opens as its own window with no browser chrome.
+
+- **`GET /web/manifest.webmanifest`** — generated per request, because `start_url`
+  and `scope` are the mount root of the request that asked for it (`/web/`,
+  `/pi/web/`, or `/` behind a prefix-stripping proxy). A static manifest could only
+  name one of those, and a wrong `start_url` installs an icon that opens the wrong
+  place. The scope is always exactly the mount, never `/`, so an install behind a
+  prefix cannot capture the rest of the origin.
+- **iOS** ignores enough of the manifest that the page also carries
+  `apple-mobile-web-app-capable`, a status-bar style and a title. Install from
+  Safari's share sheet — there is no prompt.
+- **No service worker.** An installed pane is the *same conversation* as the Chat
+  thread, so it has no offline story worth caching: no history to page, no message
+  to submit, no model to answer. A worker would only serve a shell that cannot do
+  anything, and would add an update protocol underneath the `pageVersion` reload
+  the page already does.
+- **Nothing about access changes.** Installing does not authenticate anything: an
+  installed app is still the same origin behind the same proxy policy, and the
+  bridge still has no auth of its own.
+
 ### Reaching it without a VPN client
 
 `tailscale serve` is the simplest option if every device can run Tailscale. For

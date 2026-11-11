@@ -3,6 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+  The document title is the tab title in a browser, and the window title in an
+  installed app: there is no tab strip there to say which app it is. So a
+  conversation page names itself (see `loadTitle`) and the index says what the
+  app is.
+-->
 <title>pi bridge</title>
 <meta name="theme-color" content="#a51f34">
 <!--
@@ -22,6 +28,30 @@
 -->
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <link rel="apple-touch-icon" href="favicon.svg">
+<!--
+  Installable: the same page as an app.
+
+  Relative, like every other URL here, so the manifest resolves against this
+  document's directory — which is the mount root — and the server generates a
+  manifest whose scope and start_url *are* that directory. That is the whole
+  reason the manifest is generated rather than a static file: the page works at
+  /web/, at /pi/web/ behind a prefix-keeping proxy, and at / when the proxy
+  strips it, and the manifest has to say the same thing in each case.
+
+  There is no service worker, deliberately: see `src/adapter/web/manifest.ts`.
+-->
+<link rel="manifest" href="manifest.webmanifest">
+<!--
+  iOS ignores the manifest for the things that matter on a home screen (Safari has
+  no install prompt, and its manifest support does not cover standalone display), so
+  the status-bar style and the title have to be said again the old way.
+  `black-translucent` would put the page under the clock; `default` keeps a bar in the
+  theme colour, which is what the Android side draws too.
+-->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="pi">
+<meta name="mobile-web-app-capable" content="yes">
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
@@ -715,6 +745,19 @@ function rel(path) {
   return mountRoot() + path;
 }
 
+/**
+ * An installed app has no tab strip and no address bar, so the conversation's name
+ * has to be the window title — it is the only thing naming what you are looking at.
+ * A browser is left alone: its tab already says "pi bridge", and rewriting that on
+ * every open would make a tab look like a document it is not.
+ *
+ * Back to the app's name on the index, so switching between them is legible in a
+ * task switcher.
+ */
+function setDocumentTitle(name) {
+  document.title = name ? name + ' — pi bridge' : 'pi bridge';
+}
+
 /** The conversation id this page is showing, from the URL. */
 function conversationIdFromPath() {
   const match = /(\d+)\/?$/.exec(location.pathname);
@@ -1349,6 +1392,9 @@ async function loadTitle() {
     if (conversation && (conversation.name || conversation.chatKey)) {
       heading.textContent = conversation.name || conversation.chatKey;
     }
+    // The same string in the window title as in the header, from the same response,
+    // so an installed app's task switcher cannot disagree with the pane.
+    setDocumentTitle(heading.textContent);
     // The same response carries the format, so the model and thinking pills can
     // say what will answer before anything is typed — one fetch, not two.
     adoptFormat(conversation);
@@ -3029,6 +3075,7 @@ if (openId === undefined) {
   document.getElementById('index').hidden = false;
   document.getElementById('app').hidden = true;
   document.getElementById('new-chat').hidden = false;
+  setDocumentTitle('');
   void loadIndex(0);
 } else {
   document.getElementById('index').hidden = true;
