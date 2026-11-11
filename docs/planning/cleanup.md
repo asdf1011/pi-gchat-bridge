@@ -70,17 +70,21 @@ despite its "small by construction" rule, and `notImplemented` stubs in
 `CommentSurface`, `AdminSurface` — composing into `SessionHost`. The chord
 objects can stay; this is about the type each adapter receives.
 
-## 6. Delete migration residue (pending)
+## 6. Delete migration residue (**done**)
 
-One sweep:
+- The "delivery cursor in shadow mode" comment block in `main.ts`, and the orphaned
+  `feedViewFrames` doc comment left behind when that function moved.
+- Comments referencing `BRIDGE_CHAT_ENGINE=link`/`=process` as a selectable mode — the mode is
+  gone, so the comments described a choice that no longer exists. One of them had also been
+  mangled by the edit that removed the code, mid-sentence.
+- `§17`-style design-doc references: eight of them, in `v1-routes`, `config`, `painter`,
+  `steer-watch`, `activity` and `main`. The reasoning is worth keeping; the section number is
+  not, because the document it names is not in this repo. Each now states the idea instead
+  ("delivery is the reader's state", "one liveness mechanism at a time").
 
-- The "delivery cursor in shadow mode" comment block in `main.ts` with no code
-  following it, and the orphaned `feedViewFrames` doc comment.
-- Comments referencing `BRIDGE_CHAT_ENGINE=link` as a selectable mode.
-- `§17`-style design-doc references that point at nothing in the repo.
-- Root-directory state: `bridge.sqlite*`, `state.json`, `bridge-ledger.json`,
-  the `.log` files, `sessions*/`, `backups/` → a `data/` dir (one env default
-  change) and tighter `.gitignore`.
+The root-directory state move (`bridge.sqlite*`, `state.json`, `bridge-ledger.json`, the logs →
+`data/`) is **not** residue and not safe to do here: it means moving a 54 MB live store, so it
+became its own item (#11) with a deploy step. Everything it lists is already in `.gitignore`.
 
 ## 7. Consolidate the command layers (pending)
 
@@ -123,3 +127,15 @@ they would be actively misleading.
 - In-process web engine mode in `main.ts`: ~80 lines + one env var
 - Dead comment blocks and shadow-cursor narration: ~50 lines
 - Duplicated HTTP wrapper across three processes: ~120 lines
+
+## 11. Move root-directory state into `data/` (pending, needs a deploy)
+
+`bridge.sqlite`, `bridge-ledger.json` and `state.json` sit at the repository root, next to the
+source. They are ignored by git, but they are also *inside* the working tree, which is why a
+`grep -r` over the repo can hit a 54 MB database and why a stray `git clean -xdf` is a data-loss
+event rather than a tidy-up.
+
+The move is one default plus one environment change (`BRIDGE_DB`, `BRIDGE_LEDGER_PATH`,
+`BRIDGE_STATE_FILE`, and `start-bridge.sh` if it names any of them), but it is a **live store**:
+the file has to move during a bridge restart with nothing running, or the host opens an empty
+database and every conversation looks gone. Do it in the deployment, not in a routine CL.

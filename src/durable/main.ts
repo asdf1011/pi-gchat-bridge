@@ -106,7 +106,7 @@ async function main(): Promise<void> {
    * it). Chat is the surface that would otherwise be missing those turns, and a
    * conversation that only half appears in one client is not much use.
    */
-  // The server's own account of what it is doing. Subscribers are connections (§17), and the
+  // The server's own account of what it is doing. Subscribers are connections, not readers, and the
   // per-turn watching is one attachment per running turn — not per reader. Late-bound because
   // the seam is built below, and this object is only used once requests start arriving.
   const activity = new ActivityFeed({ seam: { attach: (id, frame) => hostSeam.attach(id, frame) } });
@@ -158,15 +158,13 @@ async function main(): Promise<void> {
     onTurnStarted: (conversationId) => activity.started(conversationId),
   });
 
-  // The Chat adapter's view of the seam.
+  // The Chat adapter runs in its own process, always.
   //
-  // `BRIDGE_CHAT_ENGINE=link` gives it a *linked* seam in this same process: two chord objects, a
-  // memory pair between them, and the adapter reaching the host the way it will when it is finally
-  // forked. That is the extraction with the fork left out, and it is worth the round trip: an
-  // The Chat adapter runs in its own process, always. It held the same seam in-process long enough
-  // to prove the seam was complete (that is what `BRIDGE_CHAT_ENGINE=link` was for, and it is gone
-  // now that the deployment has run on it), and what is left is the arrangement that matters:
-  // this process owns the store, and the adapter cannot touch it.
+  // It held the seam in-process long enough to prove the seam was complete — a linked seam over a
+  // memory pair, so that an operation the adapter needs but the link does not publish failed here, in
+  // a log line, rather than at the moment a second process started and Chat went quiet. That served
+  // its purpose and is gone; what is left is the arrangement that matters: this process owns the
+  // store, and the adapter cannot touch it.
   //
   // The child is forked from *this* process rather than the supervisor because the IPC channel is
   // the link: whoever accepts it must be the session host.
@@ -241,7 +239,7 @@ async function main(): Promise<void> {
           logger.warn(`[web] identity header from untrusted peer ${req.socket.remoteAddress} — ignored`);
         }
         try {
-          // /v1: the conversation protocol a second surface reads (§17). Its own module
+          // /v1: the conversation protocol a second surface reads. Its own module
           // so the shapes are testable without a bridge, and mounted here because this is
           // already the process that owns the store.
           if (
@@ -489,26 +487,6 @@ async function main(): Promise<void> {
     });
     logger.info("[bridge] web engine=link: /web is served by a supervised adapter process");
   }
-
-  // --- The bridge's own delivery cursor, in shadow mode -------------------------
-  //
-  // Step one of moving delivery off the server (§17 of the design doc): the bridge
-  // keeps a position per conversation and walks it forward, *posting nothing*. It
-  // proves the cursor arithmetic — adoption at the head, gaps getting adopted rather
-  // than skipped, an unfinished post being reported — while the legacy path keeps
-  // doing the actual posting, so a bug here costs a log line and never a message.
-  //
-  // The state is deliberately the bridge's, not the server's: "how much of this have
-  // I seen" is a fact about this surface, and it survives a conversation outliving
-  // the bridge.
-
-  /**
-   * Feed view frames into a stream, whichever way they arrived.
-   *
-   * The same rule the in-process sink applies — newest unfinished tool, cleared once none
-   * is left, and nothing said when neither changed — kept in one function so the two view
-   * modes cannot drift in how they paint.
-   */
 
   const shutdown = async (): Promise<void> => {
     logger.info("[bridge] shutting down...");

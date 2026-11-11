@@ -1,7 +1,7 @@
 /**
  * A steer that is waiting behind a tool that will not return.
  *
- * A steer is placed at a boundary (spec §6): `postTools` once the round's tools
+ * A steer is placed at a turn boundary: `postTools` once the round's tools
  * settle, otherwise `final`. That is the right rule for a tool that returns, and a
  * trap for one that does not. `finishToolRound` reads the round's outcomes with
  * policy `allSettled`, so the round cannot end while any tool in it runs; a tool

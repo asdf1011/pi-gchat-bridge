@@ -14,7 +14,7 @@
  *
  * A hint is deliberately not a delivery: losing one costs latency, never a message, because the
  * transcript and the bridge's cursor are the record. That is what makes this compatible with
- * §17 — a subscriber list is a set of *open connections*, not remembered positions, and a bridge
+ * Delivery is the reader's state — a subscriber list is a set of *open connections*, not remembered positions, and a bridge
  * that was away holds no subscription and therefore misses nothing it cannot re-read.
  *
  * The turn watcher that produces `settled` is the server minding its own business: one view

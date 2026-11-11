@@ -1,7 +1,7 @@
 /**
  * The Chat adapter, in its own process.
  *
- * Forked by the session host when `BRIDGE_CHAT_ENGINE=process`, connected over a Node IPC channel
+ * Forked by the session host and connected over a Node IPC channel
  * carrying a chord link. This process holds the Chat credentials, the Pub/Sub receiver, the delivery
  * cursor, the painter and the command layer; it holds **no store**. Everything it knows about a
  * conversation comes through `SessionHost`, which is the same interface the in-process engine used —

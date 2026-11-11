@@ -16,7 +16,8 @@
  *
  *   - **no cursor on the server.** `since` is the caller's own position. A surface that
  *     stops for a week resumes by remembering where it was, not by asking the server what
- *     it missed, and the server is not asked to remember who is reading it (§17).
+ *     it missed, and the server is not asked to remember who is reading it: delivery is the
+ *     reader's state, and nobody else can hold it.
  *   - **no deliveries endpoint.** Confirming a delivery is for a surface that *posts
  *     somewhere*; a reader's confirmation is its own cursor advancing. Endpoints without a
  *     consumer are how a protocol grows a second, accidental architecture.

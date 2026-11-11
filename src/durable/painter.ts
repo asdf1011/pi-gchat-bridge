@@ -42,7 +42,8 @@
  *     transcript can say what it said.
  *   - **`tick`** is *discovery*, and nothing else: it adopts conversations it has never seen,
  *     and reads the ones nobody is watching — a dormant thread, or every thread in in-process
- *     mode. It is the residual polling §18 allows, and it never runs for a watched thread.
+ *     mode. It is the only polling left, and it never runs for a watched thread: one liveness
+ *     mechanism at a time, and the subscription is the one that counts.
  */
 import type { EntryRef, MessageLike } from "./entries.js";
 import type { Ledger } from "./ledger.js";

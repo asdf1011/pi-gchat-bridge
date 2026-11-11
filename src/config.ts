@@ -85,7 +85,8 @@ export interface Config {
    * Where the bridge's own cursor lives. Empty means "beside the database".
    *
    * The bridge's only durable state: "how much of this have I seen" is a fact about one surface,
-   * and a conversation outlives any surface (§17).
+   * and a conversation outlives any surface. The server has no memory of its readers, so it
+   * cannot store this for us.
    */
   ledgerPath: string;
   /** How often the sweep runs where there is no push path — in-process mode's mechanism. */
