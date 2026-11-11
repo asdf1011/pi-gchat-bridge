@@ -12,28 +12,17 @@ and skills — see [pi.dev](https://pi.dev).
 available to Workspace organizations — personal Gmail accounts can use Chat
 itself but can't install third-party Chat apps like this bridge.
 
-## How messages arrive
+## How it works, in one paragraph
 
-Chat events are delivered via a **Cloud Pub/Sub pull subscription** — no public
-endpoint, no tunnel, works for DMs *and* spaces. The bridge pulls events,
-hands them to pi, and replies by posting a placeholder message that is **edited
-in place** as pi streams, so you watch the answer appear live.
+Chat events arrive over a **Cloud Pub/Sub pull subscription** — no public endpoint, no tunnel, DMs
+and spaces alike — and replies are posted as a **placeholder edited in place** as pi streams, so you
+watch the answer appear. Conversations live in a SQLite store on
+**[Pi Durable](https://earendil.com/posts/pi-durable/)**, owned by exactly one process; Chat and the
+browser are *clients* of it, which is what lets two surfaces watch and drive the same conversation at
+once.
 
-The bridge runs on **[Pi Durable](https://earendil.com/posts/pi-durable/)** — an
-append-only, crash-safe conversation runtime. One process owns a SQLite store
-(`bridge.sqlite`); Chat is a *client* of it, not the owner. That is what makes
-**two frontends on one conversation** possible: the same conversation can be
-watched and driven from Chat and from a browser at the same time (see
-[Web frontend](#web-frontend)).
-
-**Four listeners, one of which writes.** The store is owned by the host
-(`dist/durable/main.js`), which serves `/v1`, `/healthz` and `/idle` on `PORT` and holds
-no Chat credentials. The **Chat adapter** (`dist/chat-host.js`, `BRIDGE_CHAT_PORT`) holds
-the service account, the Pub/Sub receiver, the delivery cursor and the painter, and serves
-`/notify`; the **web adapter** (`dist/web-host.js`, `BRIDGE_WEB_PORT`) serves the page; the
-**artifact origin** (`BRIDGE_ARTIFACTS_PORT`) is a separate origin on purpose, because those
-documents are scripted and framed. The adapters are forked by the host and talk to it over a
-chord link, so **restarting either one cannot interrupt a turn** — the turn is the host's.
+The inside of that — the four listeners, the seam, the painter, the `/v1` protocol and why each is
+shaped the way it is — is in **[docs/architecture.md](docs/architecture.md)**.
 
 ## One-time setup (Google Cloud Console)
 
@@ -108,53 +97,26 @@ the same conversations are visible at `/web`.
   > still **can't send** images — that's a platform limit, see
   > [Known limitations](#known-limitations).
 
-## Session model & persistence
+## Conversations and persistence
 
-Conversations live in **`bridge.sqlite`**, written by exactly one process. The
-store is append-only: every model call, tool call and document change is a
-commit, so an interrupted run resumes rather than being lost, and a message
-that Pub/Sub redelivers is recognised by its id instead of being answered
-twice.
+Conversations live in **`bridge.sqlite`**, written by exactly one process, append-only: an
+interrupted run resumes rather than being lost, and a message Pub/Sub redelivers is recognised by its
+id instead of being answered twice. The shape of that store — bindings as documents, the lock, why
+the transcript never travels — is in [docs/architecture.md](docs/architecture.md).
 
-- **The binding is a document, not a file.** A session-scoped document maps
-  `chatKey → conversationId`, written in the *same commit* that creates the
-  conversation, so a crash cannot leave a conversation no thread points at.
-- **`/secret`** lists stored secrets (names and a tail, never values); **`/secret set NAME`** posts a card for out-of-band entry; **`/secret remove NAME`** deletes. Values never enter the conversation — see [Security notes](#security-notes). In the browser the same three forms exist, gated on the same `SECRET_USERS` allow-list, and the store is reached through the seam: an adapter may write a secret and **no operation returns one**.
-- **`/sessions`** lists conversations; **`/resume`** rebinds a thread to one of
-  them. `/name` gives one a display name (Chat-side label only).
-- **Legacy history was imported once, at cutover.** The one-shot migration tools
-  (`import-all`, `import-legacy`, `replay`, `prefix-probe`) were deleted once the
-  cutover was done — they are in git history if a re-import is ever needed. What
-  remains is `src/durable/smoke.ts`: one real prompt through one real model
-  against a scratch database, the only end-to-end check that needs no Chat app,
-  no Pub/Sub and no credentials.
-- **One process owns the database.** `bridge.sqlite.lock` is a pid file: a
-  second bridge refuses to start rather than serving the same Chat messages
-  from a second, blind in-memory harness. Two supervisors cannot run either
-  (`.start-bridge.pid`).
-
-### Two local servers, and why
-
-`lfm-server.sh` runs the same model **twice**: the conversation router on
-`:8090` and a titler on `:8091`. That looks wasteful and is deliberate.
-
-- **A title is a one-shot summary.** It is never resumed, so caching its prompt
-  is worthless — but it is long, and on CPU it is expensive to prefill.
-- **Sharing slots is the problem.** Titles used to go to the conversation
-  router. With `-np 2`, every title took a slot and evicted that slot's KV
-  prefix — i.e. it silently destroyed precisely the cache that makes
-  conversations fast. Because the summary is long and the conversation prefix
-  is what got thrown away, this was the single worst way to spend those slots.
-- **Pinning `id_slot` does not fix it.** It protects one slot by permanently
-  spending the other, so a title and a conversation could still never run at
-  the same time — and the pinned slot's contents still get overwritten.
-- **Separate processes cost little and remove it entirely.** The titler runs
-  `-np 1 -c 8192` (a title needs a fraction of the context) for roughly 180 MiB,
-  and the bridge sends `cache_prompt: false` on every title request, so the
-  titler's slot accumulates nothing it will never reuse.
-
-The bridge defaults `BRIDGE_TOPIC_SUMMARY_BASE_URL` to `:8091` for this reason.
-Pointing it back at `:8090` "works" but reintroduces the eviction.
+- **`/secret`** lists stored secrets (names and a tail, never values); **`/secret set NAME`** opens a
+  card for out-of-band entry; **`/secret remove NAME`** deletes. Values never enter the conversation
+  — see [Security notes](#security-notes). The browser has the same three forms on the same
+  `SECRET_USERS` allow-list, and the store is reached through the seam: an adapter may write a secret
+  and **no operation returns one**.
+- **`/sessions`** lists conversations; **`/resume`** rebinds a thread to one of them. `/name` gives
+  one a display name (Chat-side label only). `/resume` is Chat's alone: the browser addresses
+  conversations by id, so binding a name to one there would only duplicate a row.
+- **Legacy history was imported once, at cutover.** The one-shot migration tools (`import-all`,
+  `import-legacy`, `replay`, `prefix-probe`) were deleted once the cutover was done — they are in git
+  history if a re-import is ever needed. What remains is `src/durable/smoke.ts`: one real prompt
+  through one real model against a scratch database, the only end-to-end check that needs no Chat
+  app, no Pub/Sub and no credentials.
 
 ### Model and thinking level
 
@@ -359,7 +321,7 @@ decision for a bridge with shell access.
 | `BRIDGE_SECRETS_FILE` | `~/.pi-bridge/secrets.json` | Where `/secret` stores values. Deliberately outside `PI_CWD` |
 | `BRIDGE_REPLACE_ON_FINISH` | `1` | `1`: post the final answer as a new message (the completion notification), then delete the streaming placeholder (leaves a "Message deleted" stub). `0`: keep the patched placeholder as the answer (no stub; the notification is the one posted when the placeholder appears). |
 | `BRIDGE_TOPIC_SUMMARY` | `1` | Re-title the `/model` "Model switched" card with a local-model topic line once the first reply lands. `0` keeps the plain wording. |
-| `BRIDGE_TOPIC_SUMMARY_BASE_URL` | `http://127.0.0.1:8091/v1` | The **titler** server (see [Two local servers](#two-local-servers-and-why)). Not the conversation router. |
+| `BRIDGE_TOPIC_SUMMARY_BASE_URL` | `http://127.0.0.1:8091/v1` | The **titler** server — a second copy of the local model, for the reasons in [docs/architecture.md](docs/architecture.md#titles-and-the-second-local-model). Not the conversation router. |
 | `BRIDGE_TOPIC_SUMMARY_MODEL` | `lfm3-vl-2b-q8` | Model id requested from that endpoint. |
 | `BRIDGE_TOPIC_SUMMARY_TIMEOUT_MS` | `900000` (15 min) | Give up on a title after this long — CPU inference is slow and the server may have one slot. The job is detached, so waiting is free. |
 

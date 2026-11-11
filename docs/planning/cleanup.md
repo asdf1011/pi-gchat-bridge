@@ -156,13 +156,22 @@ needs a turn, which needs a model — so it belongs in an e2e that can run one, 
 restart with an open web client: re-link, view replication resumes". Both are worth writing; neither
 can be faked cheaply, and a fake would prove the wrong thing.
 
-## 10. Documentation shape (pending)
+## 10. Documentation shape (partly done)
 
-Move the architecture narrative out of the ~35k README ("four listeners, one of
-which writes", session model, painter) into `docs/architecture.md`, keeping the
-README to setup + behavior. Prune the inline comments that narrate design
-history rather than current code — especially alongside (1)–(3), after which
-they would be actively misleading.
+**Done: the architecture narrative moved out of the README.** `docs/architecture.md` holds the four
+listeners, the store, the delivery model, the seam and the two-local-model argument — with the reasons,
+because most of them were learned from a failure and the failure is the part worth keeping. The README
+keeps what a reader needs to *use* the thing: setup, behaviour, configuration, testing, security,
+limitations — and links out for the inside.
+
+What went with it: two sections of narrative duplication ("Session model & persistence"'s store
+description, "Two local servers, and why"), and the anchor the env table pointed at.
+
+**Remaining: the inline comments.** Comment blocks that narrate how a thing came to be, where the
+current code no longer needs the story. That is a judgement per comment, and several of the loudest
+ones are load-bearing — `observeTurn`'s baseline compare, `postJson`'s reason for avoiding `fetch`,
+the painter's frontier rule. Prune the ones that describe the migration, keep the ones that describe a
+constraint.
 
 ## Deletions enabled
 
