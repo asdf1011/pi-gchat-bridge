@@ -40,9 +40,13 @@ db_path() {
 
 lock_path() { echo "$(db_path).lock"; }
 
-bridge_pid() {
-  local lock owner
-  lock=$(lock_path)
+# The pid serving *this* store. Takes the path, because it is asked twice: once for the
+# store being moved away from, once (defensively) for the one being moved to. Asking the
+# environment instead is the bug the first run had — after the switch, `.env.durable`
+# names the new path, whose lock does not exist yet, so the script concluded no bridge
+# was running and left the copy stale while the live store kept growing.
+bridge_pid_on() {
+  local lock="$1.lock" owner
   if [ -f "$lock" ]; then
     owner=$(cat "$lock" 2>/dev/null || true)
     if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
@@ -76,6 +80,9 @@ if [ "$quiet" -lt "$QUIET" ]; then
 fi
 
 SOURCE=$(db_path)
+# Captured before the copy: this is the store that is live right now, and the pid that
+# holds it is the one to restart. Both become unknowable once `.env.durable` changes.
+LIVE_PID=$(bridge_pid_on "$SOURCE")
 if [ "$SOURCE" = "$DATA/bridge.sqlite" ]; then
   log "already on $SOURCE; nothing to do"
   exit 0
@@ -122,13 +129,12 @@ grep -E '^BRIDGE_(DB|STATE_FILE)=' "$ENV_FILE" | sed 's/^/  /' >> "$LOG"
 
 # 3. Restart and report. The supervisor re-reads .env.durable on each loop iteration, so
 # killing the node process is enough; a container restart would work too.
-PID=$(bridge_pid)
-if [ -z "$PID" ]; then
-  log "no bridge owns $(lock_path); it will pick the new path up on its next start"
+if [ -z "$LIVE_PID" ]; then
+  log "no bridge owned $SOURCE; the next start will use $DATA/bridge.sqlite"
   exit 0
 fi
-log "restarting bridge pid $PID"
-kill "$PID"
+log "restarting bridge pid $LIVE_PID (was serving $SOURCE)"
+kill "$LIVE_PID"
 
 for i in $(seq 1 45); do
   sleep 2
