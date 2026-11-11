@@ -455,14 +455,6 @@ export const SessionContract = remote("pi-bridge.session", {
          * an adapter that cannot wait cannot say why a turn produced nothing.
          */
         awaitSubmission: method(Type.Object({ submissionId: Type.Number() }), SettledSchema),
-        /** Store-wide token and cost totals, as the host tallies them. */
-        usage: method(
-          Type.Object({}),
-          Type.Object({
-            models: Type.Record(Type.String(), Type.Unknown()),
-            tools: Type.Record(Type.String(), Type.Unknown()),
-          }),
-        ),
         /**
          * The notification validator's record for a name.
          *

@@ -107,13 +107,6 @@ export async function entriesAfter(
   return { entries, newest, reachedCursor };
 }
 
-/**
- * Log helper kept beside the reader: a history read that fails is a conversation to skip, not a
- * process to stop.
- */
-export function logUnreadable(conversationId: number, error: unknown): void {
-  logger.warn(`[entries] conversation ${conversationId}: ${(error as Error).message}`);
-}
 
 /** One page-walk backwards from an entry: what came before it. */
 export interface EntryPrefix {

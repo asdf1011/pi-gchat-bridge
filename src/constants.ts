@@ -34,8 +34,6 @@ export type ThinkingLevelName = (typeof THINKING_LEVELS)[number];
 export const THINKING_KEEP = "keep";
 
 /** How long to wait for a session abort to clear before force-resetting (ms). */
-export const SESSION_ABORT_TIMEOUT_MS = 15_000;
-
 /** `SwitchModelResult.error` value meaning the conversation is busy (redeliver later). */
 export const BUSY = "busy";
 

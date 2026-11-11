@@ -181,31 +181,6 @@ export function errorCard(message: string): unknown[] {
   ];
 }
 
-/** Card showing a conversation's session stats (tokens, cost). */
-export function sessionStatsCard(stats: SessionStats, name?: string): unknown[] {
-  const t = stats.tokens;
-  const lines = [
-    name ? `<b>${escapeHtml(name)}</b>` : "",
-    `File: <b>${escapeHtml(stats.sessionFile?.split("/").pop() ?? "(in-memory)")}</b>`,
-    `Messages: ${stats.totalMessages} (${stats.userMessages} user · ${stats.assistantMessages} assistant · ${stats.toolResults} tool results · ${stats.toolCalls} tool calls)`,
-    `Tokens: ${t.total.toLocaleString()} total (${t.input.toLocaleString()} in · ${t.output.toLocaleString()} out · ${t.cacheRead.toLocaleString()} cache read)`,
-    `Cost: <b>$${stats.cost.toFixed(4)}</b>`,
-    stats.contextUsage ? `Context now: ${stats.contextUsage.tokens?.toLocaleString() ?? "unknown"} tokens (${stats.contextUsage.percent?.toFixed(0) ?? "?"}% of ${stats.contextUsage.contextWindow.toLocaleString()})` : "",
-  ].filter(Boolean);
-  return [
-    {
-      cardId: "session-stats",
-      card: {
-        header: { title: "Session" },
-        sections: [
-          {
-            widgets: [{ textParagraph: { text: lines.join("<br>") } }],
-          },
-        ],
-      },
-    },
-  ];
-}
 
 /** Quick status card: current model + thinking level + conversation token usage. */
 export function statusCard(info: {

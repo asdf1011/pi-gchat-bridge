@@ -133,13 +133,6 @@ export async function listConversations(seam: SessionHost): Promise<NamedConvers
   return [...(await seam.list())];
 }
 
-/** Token/cost totals for the whole store, for a future `/status` overview. */
-export async function storeUsage(
-  seam: SessionHost,
-): Promise<{ models: Record<string, unknown>; tools: Record<string, unknown> }> {
-  return seam.usage();
-}
-
 /** Give a conversation a display name (`/name`). Chat-side label only. */
 export async function renameConversation(seam: SessionHost, chatKey: string, name: string): Promise<boolean> {
   return seam.label(chatKey, name);

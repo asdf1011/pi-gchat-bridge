@@ -292,15 +292,11 @@ test("a submission's origin crosses the link, and comes back in history", async 
 
 /* --- What the Chat bridge needs before it can live in its own process ------ */
 
-test("info and usage cross the link", async () => {
+test("info crosses the link", async () => {
   const { inProcess, linked } = await bothEnds();
   const info = await linked.info();
   assert.equal(info.dbPath, (await inProcess.info()).dbPath);
   assert.equal(typeof info.cwd, "string");
-
-  const usage = await linked.usage();
-  assert.equal(typeof usage.models, "object");
-  assert.equal(typeof usage.tools, "object");
 });
 
 test("an adapter-written entry and the first turn come back over the link", async () => {

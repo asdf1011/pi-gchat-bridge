@@ -113,7 +113,6 @@ export function serveSessionHost(seam: SessionHost): Host {
     removeSecret: ({ name }: { name: string }) => seam.removeSecret(name),
     info: () => seam.info(),
     awaitSubmission: ({ submissionId }: { submissionId: number }) => seam.awaitSubmission(submissionId),
-    usage: () => seam.usage(),
     recordVerdict: async ({ name, verdict }: { name: string; verdict: AdapterVerdict }) => {
       await seam.recordVerdict(name, verdict);
       return null;
@@ -540,13 +539,7 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
         ref.release();
       }
     },
-    usage: async () => {
-      const root = await session();
-      return (await host.root((ctx) => root.usage({}, ctx))) as {
-        models: Record<string, unknown>;
-        tools: Record<string, unknown>;
-      };
-    },
+
     awaitSubmission: async (submissionId: number) => {
       const root = await session();
       return (await host.root((ctx) => root.awaitSubmission({ submissionId }, ctx))) as Settled;

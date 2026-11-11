@@ -641,10 +641,6 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
       return host.modelFailures();
     },
 
-    async usage(): Promise<{ models: Record<string, unknown>; tools: Record<string, unknown> }> {
-      return host.usage();
-    },
-
     async submit(conversationId: number, request: SubmitRequest): Promise<SubmitResult> {
       const conversation = await conversationOf(conversationId);
       if (!conversation) return { error: `no such conversation: ${conversationId}` };

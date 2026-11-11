@@ -39,32 +39,3 @@ export async function httpPoll(options: {
   if (!response.ok) throw new Error(`poll: HTTP ${response.status}`);
   return (await response.json()) as PollResult;
 }
-
-/**
- * One snapshot: what does this conversation look like *now*.
- *
- * The painting half of the poll protocol. A surface showing a running turn asks this every few
- * hundred milliseconds and paints the answer as it grows — three updates a second, which is finer
- * than the 250ms debounce the Chat bridge already applies to its own placeholders.
- */
-export async function httpSnapshot(options: {
-  baseUrl: string;
-  conversationId: number;
-  token?: string;
-  signal?: AbortSignal;
-}): Promise<{ liveText: string; busy: boolean; tools: unknown } | undefined> {
-  const headers: Record<string, string> = { Accept: "application/json" };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
-  const response = await fetch(
-    `${options.baseUrl.replace(/\/$/, "")}/v1/conversations/${options.conversationId}`,
-    { headers, ...(options.signal ? { signal: options.signal } : {}) },
-  );
-  if (response.status === 404) return undefined;
-  if (!response.ok) throw new Error(`snapshot: HTTP ${response.status}`);
-  const body = (await response.json()) as { view?: { liveText?: string; busy?: boolean; tools?: unknown } };
-  return {
-    liveText: body.view?.liveText ?? "",
-    busy: body.view?.busy === true,
-    tools: body.view?.tools ?? [],
-  };
-}

@@ -678,6 +678,4 @@ export interface SessionHost {
    */
   modelFailures(options?: { signal?: AbortSignal }): Promise<readonly ProviderFailure[]>;
 
-  /** Store-wide token and cost totals. */
-  usage(options?: { signal?: AbortSignal }): Promise<{ models: Record<string, unknown>; tools: Record<string, unknown> }>;
 }

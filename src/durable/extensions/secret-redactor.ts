@@ -160,8 +160,6 @@ export function resetOutboundGuardForTests(): void {
 }
 
 /** Why a request was refused. Kept short: it is shown to the model. */
-export const REDACTION_FAILED = "redaction failed; request not sent";
-
 /**
  * The redaction decision for one request.
  *
