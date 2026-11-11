@@ -6,9 +6,8 @@
   "description": "Bridge between Google Chat and the pi coding agent",
   "scripts": {
     "start": "tsx src/durable/main.ts",
-    "start:sdk": "tsx src/index.ts",
     "bridge-cli": "tsx src/scripts/bridge-cli.ts",
-    "dev": "tsx watch src/index.ts",
+    "dev": "tsx watch src/durable/main.ts",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json && tsc --noEmit -p tsconfig.e2e.json",
     "build": "tsc",
     "test": "node scripts/changed-tests.mjs",

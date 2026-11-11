@@ -2,8 +2,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { modelConfirmCard } from "../src/cards.js";
-import { readFirstTurn } from "../src/session-file.js";
-import { summarizeSessionTopic } from "../src/topic-summary.js";
 // The prompt contract, its normaliser and the HTTP call moved out of the session-file path: they
 // were never about storage, and the module that reads sessions is going away.
 import {
@@ -40,42 +38,7 @@ function fakePost(reply: unknown, opts?: { fail?: string }) {
 
 const CONFIG = { baseUrl: "http://127.0.0.1:8090/v1/", model: "lfm3-vl-2b-q8", timeoutMs: 1000 };
 
-test("readFirstTurn takes the first visible text and ignores thinking/tool blocks", async () => {
-  const file = writeSession([
-    HEADER,
-    '{"type":"model_change","id":"mc","parentId":null,"timestamp":"t","provider":"zai","modelId":"glm"}',
-    userMsg([{ type: "text", text: "What's going on here" }, { type: "image", data: "QUJD", mimeType: "image/png" }]),
-    // A thinking-only assistant turn must not satisfy "assistant said something".
-    assistantMsg([{ type: "thinking", thinking: "SECRET REASONING" }, { type: "toolCall", name: "bash", arguments: {} }]),
-    '{"type":"message","id":"tr","parentId":"a","timestamp":"t","message":{"role":"toolResult","content":[{"type":"text","text":"TOOL OUTPUT"}]}}',
-    assistantMsg([{ type: "text", text: "That's a noise-monitoring sign." }]),
-    userMsg([{ type: "text", text: "A LATER QUESTION" }]),
-  ]);
-  try {
-    const turn = await readFirstTurn(file);
-    assert.equal(turn.userText, "What's going on here");
-    assert.equal(turn.assistantText, "That's a noise-monitoring sign.");
-    assert.deepEqual(turn.image, { data: "QUJD", mimeType: "image/png" });
-    // Private reasoning and tool output must never reach the title prompt.
-    assert.ok(!JSON.stringify(turn).includes("SECRET"));
-    assert.ok(!JSON.stringify(turn).includes("TOOL OUTPUT"));
-    assert.ok(!JSON.stringify(turn).includes("LATER QUESTION"));
-  } finally {
-    fs.rmSync(file);
-  }
-});
 
-test("readFirstTurn accepts a plain-string user content (older session files)", async () => {
-  const file = writeSession([HEADER, userMsg("how much free disk is there?")]);
-  try {
-    const turn = await readFirstTurn(file);
-    assert.equal(turn.userText, "how much free disk is there?");
-    assert.equal(turn.assistantText, "");
-    assert.equal(turn.image, undefined);
-  } finally {
-    fs.rmSync(file);
-  }
-});
 
 test("cleanTitle strips labels, quotes and trailing punctuation", () => {
   assert.equal(cleanTitle('TITLE: "Disk space check."'), "Disk space check");
@@ -107,81 +70,10 @@ test("buildTopicPrompt notes an image-only message instead of sending empty text
   assert.match(prompt, /USER: \(the user sent a photo with no text\)/);
 });
 
-test("summarizeSessionTopic returns a cleaned title and sends the image when present", async () => {
-  const file = writeSession([
-    HEADER,
-    userMsg([{ type: "text", text: "What's going on here" }, { type: "image", data: "QUJD", mimeType: "image/png" }]),
-    assistantMsg([{ type: "text", text: "It's a noise-monitoring sign." }]),
-  ]);
-  const { calls, post } = fakePost({ choices: [{ message: { content: '"Noise monitoring sign."' } }] });
-  try {
-    const title = await summarizeSessionTopic(file, CONFIG, { post });
-    assert.equal(title, "Noise monitoring sign");
-    assert.equal(calls.length, 1);
-    // Trailing slash in baseUrl must not produce "//chat/completions".
-    assert.equal(calls[0].url, "http://127.0.0.1:8090/v1/chat/completions");
-    assert.equal(calls[0].body.model, "lfm3-vl-2b-q8");
-    // Our own timeout is passed to the transport (not undici's hidden 300s).
-    assert.equal(calls[0].timeoutMs, 1000);
-    // Thinking would eat the token budget on a reasoning-capable template.
-    assert.equal(calls[0].body.chat_template_kwargs.enable_thinking, false);
-    // The image is forwarded so photo-only messages are still describable.
-    const parts = calls[0].body.messages[1].content;
-    assert.equal(parts[1].type, "image_url");
-    assert.equal(parts[1].image_url.url, "data:image/png;base64,QUJD");
-  } finally {
-    fs.rmSync(file);
-  }
-});
 
-test("summarizeSessionTopic sends a plain string when there is no image", async () => {
-  const file = writeSession([
-    HEADER,
-    userMsg("how much free disk is there?"),
-    assistantMsg([{ type: "text", text: "About 12 GB." }]),
-  ]);
-  const { calls, post } = fakePost({ choices: [{ message: { content: "Disk space check" } }] });
-  try {
-    const title = await summarizeSessionTopic(file, CONFIG, { post });
-    assert.equal(title, "Disk space check");
-    assert.equal(typeof calls[0].body.messages[1].content, "string");
-    assert.match(calls[0].body.messages[1].content, /USER: how much free disk is there\?/);
-  } finally {
-    fs.rmSync(file);
-  }
-});
 
-test("summarizeSessionTopic throws on a transport error so the caller keeps the card", async () => {
-  const file = writeSession([HEADER, userMsg("hello")]);
-  const { post } = fakePost(null, { fail: "HTTP 503: overloaded" });
-  try {
-    await assert.rejects(() => summarizeSessionTopic(file, CONFIG, { post }), /HTTP 503/);
-  } finally {
-    fs.rmSync(file);
-  }
-});
 
-test("summarizeSessionTopic skips an empty session without calling the model", async () => {
-  const file = writeSession([HEADER]);
-  const { calls, post } = fakePost({ choices: [{ message: { content: "unused" } }] });
-  try {
-    const title = await summarizeSessionTopic(file, CONFIG, { post });
-    assert.equal(title, undefined);
-    assert.equal(calls.length, 0);
-  } finally {
-    fs.rmSync(file);
-  }
-});
 
-test("summarizeSessionTopic returns undefined when the reply has no usable text", async () => {
-  const file = writeSession([HEADER, userMsg("hello"), assistantMsg([{ type: "text", text: "ok" }])]);
-  const { post } = fakePost({ choices: [{ message: { content: "   " } }] });
-  try {
-    assert.equal(await summarizeSessionTopic(file, CONFIG, { post }), undefined);
-  } finally {
-    fs.rmSync(file);
-  }
-});
 
 test("postJson POSTs JSON to the local server and parses the reply (no undici 300s header deadline)", async () => {
   // A real loopback server: the whole point of postJson is its transport

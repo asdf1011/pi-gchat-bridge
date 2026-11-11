@@ -85,3 +85,15 @@ export interface IncomingMessage {
   /** Raw Chat event type: "MESSAGE" | "CARD_CLICKED" | ... */
   eventType?: string;
 }
+
+/**
+ * One image as a surface hands it over.
+ *
+ * It lived in `session-file.ts`, the SDK host's JSONL reader, which meant the *adapter* imported a
+ * session-file module to name an image. Plain data, so it belongs with the other wire shapes.
+ */
+export interface PiImage {
+  type: "image";
+  data: string;
+  mimeType: string;
+}

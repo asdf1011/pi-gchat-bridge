@@ -19,7 +19,7 @@
  * paints, `stream.ts` handles Chat's rendering limits, and this file only
  * decides what to submit and under which name.
  */
-import type { PiImage } from "../session-file.js";
+import type { PiImage } from "../types.js";
 import type { ContentPart, NamedConversation, SessionHost } from "../session-host/api.js";
 
 /** An image as Google Chat gives it to us: base64 data plus its media type. */

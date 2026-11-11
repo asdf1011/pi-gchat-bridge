@@ -8,7 +8,7 @@
  */
 import { collectImageAttachments } from "../chat-client.js";
 import { logger } from "../logger.js";
-import { AgentRouter } from "../agent-sessions.js";
+import { keyFor } from "../session-key.js";
 import { runDurableCommand } from "../adapter/commands.js";
 import { applyDurableTopicSummary } from "./topic.js";
 import { classifyModelFailure, describeModelFailure } from "./model-failure.js";
@@ -50,7 +50,7 @@ export function chatHandler(options: ChatHandlerOptions): ChatHandler {
     const threadKey = incoming.message.threadKey;
     // keyFor() is unchanged from the SDK host: threadKey wins, then the thread
     // name, then the space — so a thread stays one conversation across engines.
-    const chatKey = AgentRouter.keyFor(spaceName, threadName, threadKey);
+    const chatKey = keyFor(spaceName, threadName, threadKey);
     const actionKey = incoming.action?.parameters?.find((p) => p.key === "session")?.value ?? chatKey;
 
     logger.info(

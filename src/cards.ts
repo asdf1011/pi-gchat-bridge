@@ -4,12 +4,12 @@ import type {
   ConversationSettingsResult,
   DefaultSettings,
   DefaultSettingsResult,
-  ModelInfo,
   SessionContext,
   SessionInfo,
   SessionUsage,
-} from "./agent-sessions.js";
-import { clampToSupported } from "./agent-sessions.js";
+} from "./settings.js";
+import { clampToSupported } from "./settings.js";
+import type { ModelInfo } from "./session-host/api.js";
 import {
   MODEL_ACTION,
   REMOVE_SECRET_ACTION,

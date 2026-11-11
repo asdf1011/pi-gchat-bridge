@@ -50,7 +50,7 @@ import { secretsFromEnvironment } from "./extensions/secret-redactor.js";
 import { applyDurableTopicSummary } from "./topic.js";
 import { identify } from "./identity.js";
 import { failureNotice } from "./failure-notice.js";
-import { AgentRouter } from "../agent-sessions.js";
+import { keyFor } from "../session-key.js";
 import { SecretStore } from "../secret-store.js";
 
 /**

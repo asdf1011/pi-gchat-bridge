@@ -8,22 +8,28 @@ SDK→durable migration left behind, plus a few structural consolidations.
 To be done as a series of CLs, in roughly this order. Each CL should build,
 typecheck, and pass `npm test` on its own.
 
-## 1. Retire the SDK host and its private code (pending)
+## 1. Retire the SDK host and its private code (**done**)
 
-Delete the legacy engine and everything only it imports:
+Deleted: `src/index.ts`, `src/commands.ts`, `src/notify.ts`, `src/session-file.ts`,
+`src/topic-summary.ts`, `src/agent-sessions.ts` — **2,846 lines**, and three test files with them
+(`agent-sessions`, `session-file`, `commands`). `start:sdk` is gone, `dev` watches the durable
+entrypoint, and `BRIDGE_ENGINE` is out of the README and `.env.example`.
 
-- `src/index.ts`, `src/commands.ts`, `src/notify.ts`, `src/session-file.ts`,
-  `src/topic-summary.ts`, and most of `src/agent-sessions.ts` — kept only for
-  `npm run start:sdk`, which exists for rollback the cutover no longer needs.
-- Move `AgentRouter.keyFor(...)` (the one static the durable side uses) into
-  `session-key.ts`, then delete the rest of `agent-sessions.ts` (~1,123 lines).
-- Drop `start:sdk`, the `dev` script's watch of `src/index.ts`, the
-  `sessions/`, `sessions.pre-1.4.0/`, `state.json`/`bridge-ledger.json` legacy
-  paths, and the restart scripts that still reason about the old process model.
-- Rollback story, if still wanted, is a git tag, not a second engine in every
-  build.
+It took three commits, because "delete it" was not the first step:
 
-~2,500 lines.
+1. **The title prompt moved out** (`durable/topic-prompt.ts`). `topic-summary.ts` held two things:
+   a prompt contract and a normaliser that every surface needs, and a session-file reader only the
+   SDK host needs. The durable side imported six symbols from the first half.
+2. **The shared shapes moved out** (`src/settings.ts`, `src/types.ts`). `ConversationSettingsResult`,
+   `DefaultSettings`, `DefaultSettingsResult`, `SessionInfo`, `SessionUsage`, `SessionContext`,
+   `clampToSupported` and `supportedThinkingLevels` — the *adapter* was importing a 1,123-line class
+   module to name these. `PiImage` went to `types.ts` for the same reason.
+3. **The helpers the durable notify path used** (`chunkText`, `postText`, `unauthorized`,
+   `parseVerdict`) moved into `durable/notify.ts`, their only caller.
+
+Two follow-ons worth knowing: `cards.ts` now takes `ModelInfo` from the seam (one definition, not
+two identical ones), and `chat-handler`/`main` take `keyFor` from `session-key` rather than through
+`AgentRouter`. Test count went 730 → 696: the deleted tests tested deleted code.
 
 ## 2. Pick one web engine and delete the other (**done**)
 

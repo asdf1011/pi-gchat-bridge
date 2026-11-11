@@ -1,11 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { readLastThinkingLevel } from "../src/session-file.js";
 import { modelPickerCard, settingsCard, statusCard } from "../src/cards.js";
 import { MODEL_ACTION, SETTINGS_ACTION, THINKING_KEEP, THINKING_LEVELS, THINKING_LEVELS_ACTION } from "../src/constants.js";
-import type { ModelInfo } from "../src/agent-sessions.js";
-import { clampToSupported, supportedThinkingLevels } from "../src/agent-sessions.js";
+import type { ModelInfo } from "../src/session-host/api.js";
+import { clampToSupported, supportedThinkingLevels } from "../src/settings.js";
 
 const MODELS: ModelInfo[] = [
   { provider: "deepseek", id: "deepseek-flash", label: "DeepSeek Flash (deepseek)" },
@@ -24,28 +23,6 @@ function widgets(card: unknown[], kind: "selectionInput" | "buttonList"): any[] 
   walk(card);
   return found;
 }
-
-test("readLastThinkingLevel returns the last thinking_level_change", async () => {
-  const tmp = `/tmp/pi-gchat-thinking-${Date.now()}.jsonl`;
-  fs.writeFileSync(
-    tmp,
-    [
-      JSON.stringify({ type: "session", version: 3, id: "s", timestamp: "t", cwd: "/w" }),
-      JSON.stringify({ type: "thinking_level_change", thinkingLevel: "high" }),
-      JSON.stringify({ type: "message", message: { role: "user", content: "hi" } }),
-      JSON.stringify({ type: "thinking_level_change", thinkingLevel: "off" }),
-    ].join("\n") + "\n",
-  );
-  assert.equal(await readLastThinkingLevel(tmp), "off");
-  fs.rmSync(tmp);
-});
-
-test("readLastThinkingLevel is undefined when the session never changed it", async () => {
-  const tmp = `/tmp/pi-gchat-thinking-none-${Date.now()}.jsonl`;
-  fs.writeFileSync(tmp, JSON.stringify({ type: "session", version: 3, id: "s" }) + "\n");
-  assert.equal(await readLastThinkingLevel(tmp), undefined);
-  fs.rmSync(tmp);
-});
 
 test("model picker carries both dropdowns and a keep-current thinking option", () => {
   const card = modelPickerCard(MODELS, "key", "DeepSeek Flash (deepseek)", {

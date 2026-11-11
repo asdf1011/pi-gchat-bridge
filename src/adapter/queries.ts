@@ -16,7 +16,7 @@
  *     coding-agent JSONL, not durable conversations; importing them is the
  *     one-shot M7 tool, not a runtime query.
  */
-import type { ConversationSettingsResult } from "../agent-sessions.js";
+import type { ConversationSettingsResult } from "../settings.js";
 import { THINKING_KEEP } from "../constants.js";
 import type { ConversationState, ModelInfo, NamedConversation, SessionHost } from "../session-host/api.js";
 

@@ -68,7 +68,6 @@ npm start            # runs the durable engine (tsx src/durable/main.ts)
 
 For production, point your container at `./start-bridge.sh`, which supervises
 the process, restarts it on crash, and starts cron and the local-model router.
-`npm run start:sdk` runs the old SDK host instead.
 
 Set `BRIDGE_CHAT_PORT` too (`.env.example` has it at 8084): the Chat adapter runs in its
 own process and the host will not start without somewhere to point it.
@@ -342,7 +341,6 @@ decision for a bridge with shell access.
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | — (required) | Path to service account key |
 | `PUBSUB_SUBSCRIPTION` | — (required) | `projects/.../subscriptions/...` |
 | `PI_CWD` | bridge dir | Working dir for pi tools |
-| `BRIDGE_ENGINE` | `durable` | `durable` (Pi Durable) or `sdk` (the old SDK host, kept for rollback) |
 | `BRIDGE_DB` | `./bridge.sqlite` | The durable store. One process owns it |
 | `BRIDGE_BIND` | `127.0.0.1` | Address the HTTP server binds. Loopback by default; a tunnel or proxy goes in front |
 | `BRIDGE_TRUSTED_PROXY` | — | Address identity headers are trusted from. Empty = trust none, even on loopback |

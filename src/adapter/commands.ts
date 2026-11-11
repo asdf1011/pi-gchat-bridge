@@ -54,7 +54,7 @@ import type { HandleResult } from "../receiver.js";
 import type { StateStore } from "../state.js";
 import type { IncomingMessage } from "../types.js";
 import type { SessionHost } from "../session-host/api.js";
-import type { ConversationSettingsResult, DefaultSettings, DefaultSettingsResult, SessionInfo } from "../agent-sessions.js";
+import type { ConversationSettingsResult, DefaultSettings, DefaultSettingsResult, SessionInfo } from "../settings.js";
 import {
   applyModelPick,
   conversationStatus,
