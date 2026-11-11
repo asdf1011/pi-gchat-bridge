@@ -38,8 +38,28 @@ engine_port() {
 # this directory (`BRIDGE_DB=/tmp/… node dist/durable/main.js`) matches the same
 # pattern, so the script killed the developer's throwaway process and declared the
 # real bridge healthy — healthy because it had never been touched.
+
+# Where the database (and its lock) actually is.
+#
+# The lock is `<BRIDGE_DB>.lock`, so hardcoding `$PROJECT/bridge.sqlite.lock` breaks the
+# moment the store moves — and breaks *silently*: these scripts would report "no bridge
+# owns the lock" while one is serving, which reads as "nothing to restart". The path is
+# read from `.env.durable` here because these run as their own processes, without it in
+# the environment, and fall back to the historical location.
+db_path() {
+  local configured=""
+  if [ -f "$PROJECT/.env.durable" ]; then
+    configured=$(sed -n 's/^BRIDGE_DB=//p' "$PROJECT/.env.durable" | tail -1)
+  fi
+  if [ -n "$configured" ]; then
+    echo "$configured"
+  else
+    echo "$PROJECT/bridge.sqlite"
+  fi
+}
+
 bridge_pid() {
-  local lock="$PROJECT/bridge.sqlite.lock"
+  local lock="$(db_path).lock"
   if [ -f "$lock" ]; then
     local owner
     owner=$(cat "$lock" 2>/dev/null || true)
