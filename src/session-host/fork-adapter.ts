@@ -1,0 +1,89 @@
+/**
+ * Forking an adapter: supervise it, follow its log, and accept its link.
+ *
+ * Both adapters need exactly this, and it was written twice — once for the web child and once for the
+ * Chat child — with the same three parts in the same order:
+ *
+ *   1. `fork(entry, [], { stdio: ["ignore","pipe","inherit","ipc"] })`, because the IPC channel is
+ *      the chord link and stdout is the only safe place to announce readiness;
+ *   2. a `supervise()` loop, so a crashed adapter comes back with backoff instead of leaving its
+ *      surface down until someone restarts the bridge;
+ *   3. `objectHost.accept(ipcLink(child), …)` per generation, because a dead child's channel is gone
+ *      and the next one needs its own.
+ *
+ * Two details are easy to get wrong and are handled here rather than in each caller:
+ *
+ *   - **stdout is parsed for one marker and then forwarded verbatim.** A piped stdout that is
+ *     parsed and dropped is a process with no log: the Chat adapter ran for two hours like that, with
+ *     every `[chat]` and `[paint]` line it wrote silently discarded.
+ *   - **the link is accepted in `onStart`**, not after the readiness line, so a fast child cannot
+ *     make a request before its link exists.
+ */
+import { fork, type ChildProcess } from "node:child_process";
+
+import { ipcLink } from "@earendil-works/chord";
+
+import { logger } from "../logger.js";
+import { supervise, type Supervisor } from "../session-host/supervisor.js";
+import type { Host } from "@earendil-works/chord";
+
+export interface ForkAdapterOptions {
+  /** The compiled entrypoint, e.g. `new URL("../chat-host.js", import.meta.url)`. */
+  entry: URL;
+  /** Extra environment for the child; the parent's is inherited first. */
+  env?: Record<string, string>;
+  /** The line the child prints once it can serve, e.g. `WEB_ADAPTER_LISTENING `. */
+  marker: string;
+  /** Called with the marker's payload (`bind:port`), and separately with each new child. */
+  onReady?(where: string, child: ChildProcess): void;
+  /** Called with every child generation, so the caller can accept its link. */
+  onChild?(child: ChildProcess): void;
+  /** Where the child's log lines go. Defaults to `logger.info`. */
+  log?(line: string): void;
+}
+
+/**
+ * Keep one adapter process alive.
+ *
+ * `acceptLink` is separate from `onChild` because accepting is the chord host's job and the caller
+ * owns it: this module must not know whether the deployment links one adapter or two.
+ */
+export function forkAdapter(
+  options: ForkAdapterOptions,
+  acceptLink: (child: ChildProcess) => void,
+): Supervisor<ChildProcess> {
+  const log = options.log ?? ((line: string) => logger.info(line));
+  return supervise({
+    start: () =>
+      fork(options.entry.pathname, [], {
+        stdio: ["ignore", "pipe", "inherit", "ipc"],
+        env: { ...process.env, ...(options.env ?? {}) },
+      }),
+    onStart: (child) => {
+      child.stdout?.on("data", (chunk: Buffer) => {
+        for (const line of chunk.toString().split("\n")) {
+          if (line === "") continue;
+          if (line.startsWith(options.marker)) {
+            const where = line.slice(options.marker.length);
+            (options.onReady ?? ((at: string) => logger.info(`[bridge] adapter ready on ${at}`)))(where, child);
+            continue;
+          }
+          // Forwarded unchanged: the child's line already carries its own timestamp and level, so
+          // re-logging it would double both — and dropping it was the bug this exists to prevent.
+          process.stdout.write(`${line}\n`);
+        }
+      });
+      acceptLink(child);
+      options.onChild?.(child);
+    },
+    log: (message) => logger.warn(message),
+  });
+}
+
+/** Accept one adapter generation's link on the host this process serves. */
+export function acceptAdapterLink(objectHost: Host, child: ChildProcess, principal: string): void {
+  objectHost.accept(ipcLink(child as unknown as Parameters<typeof ipcLink>[0]), {
+    principal,
+    kind: "client",
+  });
+}

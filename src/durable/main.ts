@@ -17,7 +17,7 @@ import http from "node:http";
 import path from "node:path";
 
 
-import { fork } from "node:child_process";
+import { forkAdapter, acceptAdapterLink } from "../session-host/fork-adapter.js";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "../config.js";
 import { logger } from "../logger.js";
@@ -43,7 +43,7 @@ import { artifactRoots } from "./artifacts.js";
 import { initArtifactRepo } from "./artifact-vcs.js";
 import { inProcessSessionHost } from "../session-host/inprocess.js";
 import type { SessionHost } from "../session-host/api.js";
-import { supervise, type Supervisor } from "../session-host/supervisor.js";
+import type { Supervisor } from "../session-host/supervisor.js";
 import { ipcLink } from "@earendil-works/chord";
 import { SecretRegistry } from "./extensions/redact.js";
 import { secretsFromEnvironment } from "./extensions/secret-redactor.js";
@@ -176,42 +176,20 @@ async function main(): Promise<void> {
   // `serveSessionHost` opens no socket: it is a chord host, and accepts one link per adapter.
   const objectHost = serveSessionHost(hostSeam);
   let chatSupervisor: Supervisor<import("node:child_process").ChildProcess> | undefined;
-  {
-    const entry = new URL("../chat-host.js", import.meta.url).pathname;
-    chatSupervisor = supervise({
-      start: () =>
-        fork(entry, [], {
-          stdio: ["ignore", "pipe", "inherit", "ipc"],
-          env: {
-            ...process.env,
-            // It needs the store's *directory* for the ledger and the secrets file, and nothing else
-            // about the store. `BRIDGE_DB` stays set for that reason and no other.
-            BRIDGE_CHAT_PORT: String(chatPort),
-          },
-        }),
-      onStart: (child) => {
-        child.stdout?.on("data", (chunk: Buffer) => {
-          for (const line of chunk.toString().split("\n")) {
-            if (line === "") continue;
-            if (line.startsWith("CHAT_ADAPTER_LISTENING ")) {
-              logger.info(`[bridge] chat adapter ready on ${line.slice("CHAT_ADAPTER_LISTENING ".length)}`);
-              continue;
-            }
-            // Everything else the child prints is forwarded, unchanged. Its logger writes to stdout,
-            // and a piped stdout that nobody re-emits is a process whose log does not exist.
-            process.stdout.write(`${line}\n`);
-          }
-        });
-        // Each generation gets its own link: a dead child's channel is gone.
-        objectHost.accept(ipcLink(child as unknown as Parameters<typeof ipcLink>[0]), {
-          principal: "chat-adapter",
-          kind: "client",
-        });
+  chatSupervisor = forkAdapter(
+    {
+      entry: new URL("../chat-host.js", import.meta.url),
+      env: {
+        // It needs the store's *directory* for the ledger and the secrets file, and nothing else
+        // about the store. `BRIDGE_DB` stays set for that reason and no other.
+        BRIDGE_CHAT_PORT: String(chatPort),
       },
-      log: (message) => logger.warn(message),
-    });
-    logger.info(`[bridge] chat adapter forked; /notify is served on ${chatPort}`);
-  }
+      marker: "CHAT_ADAPTER_LISTENING ",
+      onReady: (where) => logger.info(`[bridge] chat adapter ready on ${where}`),
+    },
+    (child) => acceptAdapterLink(objectHost, child, "chat-adapter"),
+  );
+  logger.info(`[bridge] chat adapter forked; /notify is served on ${chatPort}`);
 
   const defaults = await defaultSettings(hostSeam);
   const [fallback] = await hostSeam.models();
@@ -417,47 +395,22 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   let webSupervisor: Supervisor<import("node:child_process").ChildProcess> | undefined;
-  // src/web-host.ts compiles next to the entrypoint, one level up from this file.
-    const entry = new URL("../web-host.js", import.meta.url).pathname;
-
-    // The one chord host this process serves, created above and shared: it accepts one link per
-    // adapter generation, and a deployment with two linked adapters still has one host.
-    webSupervisor = supervise({
-      start: () =>
-        fork(entry, [], {
-          stdio: ["ignore", "pipe", "inherit", "ipc"],
-          env: {
-            ...process.env,
-            // The adapter has no business reading the database path or the
-            // service account; it only needs where to listen and which model to
-            // default to.
-            BRIDGE_DB: "",
-            GOOGLE_SERVICE_ACCOUNT_JSON: "",
-            BRIDGE_WEB_DEFAULT_PROVIDER: defaultModel.provider,
-            BRIDGE_WEB_DEFAULT_MODEL: defaultModel.modelId,
-          },
-        }),
-      onStart: (child) => {
-        child.stdout?.on("data", (chunk: Buffer) => {
-          for (const line of chunk.toString().split("\n")) {
-            if (line === "") continue;
-            if (line.startsWith("WEB_ADAPTER_LISTENING ")) {
-              logger.info(`[bridge] web adapter ready on ${line.slice("WEB_ADAPTER_LISTENING ".length)}`);
-              continue;
-            }
-            // Forwarded for the same reason as the Chat adapter's: a piped stdout that is parsed
-            // for one marker and then dropped is a process with no log.
-            process.stdout.write(`${line}\n`);
-          }
-        });
-        // Each generation gets its own link: a dead child's channel is gone.
-        objectHost.accept(ipcLink(child as unknown as Parameters<typeof ipcLink>[0]), {
-          principal: "web-adapter",
-          kind: "client",
-        });
+  webSupervisor = forkAdapter(
+    {
+      entry: new URL("../web-host.js", import.meta.url),
+      env: {
+        // The adapter has no business reading the database path or the service account; it only
+        // needs where to listen and which model to default to.
+        BRIDGE_DB: "",
+        GOOGLE_SERVICE_ACCOUNT_JSON: "",
+        BRIDGE_WEB_DEFAULT_PROVIDER: defaultModel.provider,
+        BRIDGE_WEB_DEFAULT_MODEL: defaultModel.modelId,
       },
-      log: (message) => logger.warn(message),
-    });
+      marker: "WEB_ADAPTER_LISTENING ",
+      onReady: (where) => logger.info(`[bridge] web adapter ready on ${where}`),
+    },
+    (child) => acceptAdapterLink(objectHost, child, "web-adapter"),
+  );
   logger.info(`[bridge] web adapter forked; /web is served on ${webPort}`);
 
   const shutdown = async (): Promise<void> => {

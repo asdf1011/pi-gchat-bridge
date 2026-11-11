@@ -62,14 +62,17 @@ src/shared/      # config, logger, stream, chat-client, secret-store, markdown
 Mechanical (`git mv` + import rewrite), but it lets "src/chat imports src/host
 directly" become a lint error instead of a convention.
 
-## 4. Break up `durable/main.ts` into a route table (pending)
+## 4. Break up `durable/main.ts` into a route table (in progress)
 
-`main()` is a single ~500-line function with an inline HTTP server (`/v1`,
-`/healthz`, `/idle`, `/status`, the `/notify` tombstone, conditional `/web`)
-plus fork supervision, artifact repo setup, and shutdown logic. Extract a
-`hostRoutes.ts` with the shape `web-routes.ts`/`v1-routes.ts` already model,
-and a `forkAdapter.ts` owning the supervisor + stdout-marker + link-accept
-boilerplate duplicated verbatim for the Chat and web children.
+**Done: the fork boilerplate.** `src/session-host/fork-adapter.ts` owns it: supervise, parse the one
+readiness marker, forward the rest of stdout unchanged, accept the link per generation. It went into
+`session-host/` rather than `adapter/` because the seam guard is right — adapters may not name chord,
+and this file does.
+
+**Remaining: the route table.** `main()` still holds an inline HTTP server (`/v1`, `/healthz`,
+`/idle`, `/status`, the `/notify` tombstone) beside artifact setup and shutdown. Extract a
+`hostRoutes.ts` in the shape `web-routes.ts`/`v1-routes.ts` already model, which is also what §8 needs
+to share the request skeleton.
 
 ## 5. Audit the `SessionHost` seam for single-consumer methods (pending)
 
