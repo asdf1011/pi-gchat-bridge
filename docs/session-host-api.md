@@ -1,7 +1,9 @@
 # The session-host seam: `SessionHostApi`
 
-Status: proposal, not started. Builds on [migration-to-durable.md](migration-to-durable.md); changes
-none of its decisions. Partly validated by the artifact origin, which shipped first — see below.
+Status: **built.** The seam is `src/session-host/` (`api.ts` is the contract, `inprocess.ts` the host
+side, `link.ts` + `link-contract.ts` the same interface over a chord link). What follows is the
+proposal as it was written; where the implementation differs, `docs/architecture.md` and the module
+comments are the present tense.
 
 ## Why
 
