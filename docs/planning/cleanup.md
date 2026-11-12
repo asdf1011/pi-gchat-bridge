@@ -151,7 +151,7 @@ URL parse, `identify()`/trusted-proxy warning, try/catch with a JSON 500 and a
 headers-sent guard. Extract `serveRoutes(routes, { auth, onError })` in
 `src/shared/`. ~60 lines per process, and future CORS/auth fixes land once.
 
-## 9. Multi-process testing (partly done)
+## 9. Multi-process testing (done, with one case declined)
 
 **Done: the supervision wiring, with a real child.** `test/adapter-supervision.test.ts` forks the
 fixture adapter through `forkAdapter`, reads the host's state *through the link*, `SIGKILL`s the child,
@@ -161,10 +161,12 @@ case showing one chord host serves two generations. It runs the code `main.ts` r
 involved. The fork adapter gained `execArgv` for it: production forks compiled JavaScript, a test forks
 TypeScript.
 
-**Still open: the mid-turn cases.** "Kill the adapter while a turn is running and the turn completes"
-needs a turn, which needs a model — so it belongs in an e2e that can run one, not here. Same for "host
-restart with an open web client: re-link, view replication resumes". Both are worth writing; neither
-can be faked cheaply, and a fake would prove the wrong thing.
+**Declined, by the owner (12 Nov): the mid-turn cases.** "Kill the adapter while a turn is running and
+the turn completes" and "host restart with an open web client: re-link, view replication resumes".
+They are writable — the local llama.cpp router on `:8090` makes a real turn free and offline, so the
+old blocker no longer applies — but the verdict was that the supervision test plus the deployment's own
+behaviour cover enough. Recorded rather than left open, because an item that is never going to be done
+should not look like one that is waiting.
 
 ## 10. Documentation shape (**done**)
 
