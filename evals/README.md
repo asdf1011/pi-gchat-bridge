@@ -48,10 +48,15 @@ failing every second request with `socket hang up`.
 | `prompt.txt` | the system prompt this case was recorded against |
 | `image.jpg` | the first attached image, when the thread had one |
 
-Cases are **mined, not invented**: `extract-topic-cases.mjs` reads
-`../sessions/*.jsonl`, takes the first visible user text, the first visible
-assistant text and the first image (skipping thinking blocks and tool output,
-which the user never saw), and writes the case. Re-running it refreshes
+Cases are **mined, not invented**: `extract-topic-cases.mjs` reads a directory of
+JSONL sessions (`--sessions <dir>`, default `../sessions`), takes the first visible user
+text, the first visible assistant text and the first image (skipping thinking blocks and
+tool output, which the user never saw), and writes the case.
+
+Those JSONL files were the pre-durable transcript store and have been deleted —
+everything with content in them was imported into `bridge.sqlite`, and the cases are
+committed here with their `transcript.txt`. Re-extracting needs `--sessions` pointed at
+a copy, if one still exists. Re-running it refreshes
 transcripts but **never overwrites the human labels** — those say what the
 conversation is actually about, and for photo cases were read from the image.
 

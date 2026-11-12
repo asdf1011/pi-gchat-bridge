@@ -309,7 +309,6 @@ decision for a bridge with shell access.
 | `BRIDGE_WEB_TOKEN` | — | Bearer token for web writes; empty = no check (rely on the proxy) |
 | `BRIDGE_WEB_PORT` | — (required) | Where the web adapter (`dist/web-host.js`) listens. The tunnel's ingress points here, not at `PORT` |
 | `BRIDGE_CHAT_PORT` | — (required) | Where the Chat adapter (`dist/chat-host.js`) listens — **and where `/notify` is served**. `cron/.env` points there. A request to `PORT`/notify answers with this address |
-| `BRIDGE_SESSIONS_DIR` | `./sessions` | Legacy JSONL sessions — read by the importer and the old engine only |
 | `BRIDGE_STATE_FILE` | `./state.json` | Legacy dedupe state — superseded by the store's submission ids |
 | `PORT` | `8080` | Health endpoint (0 disables) |
 | `ALLOWED_SPACES` | — | Comma-separated spaces (name or ID) the bridge responds in; empty = all |

@@ -32,7 +32,6 @@ export interface Config {
    * leaves the mtime walk as the only witness.
    */
   artifactsDir: string;
-  sessionsDir: string;
   stateFile: string;
   /** Steer: how long to wait for an in-flight tool call before aborting to redirect (ms). */
   steerWaitMs: number;
@@ -123,9 +122,8 @@ export function loadConfig(): Config {
     throw new Error(`PI_CWD does not exist: ${cwd}`);
   }
 
-  const sessionsDir = path.resolve(process.env.BRIDGE_SESSIONS_DIR ?? "./sessions");
+
   const stateFile = path.resolve(process.env.BRIDGE_STATE_FILE ?? "./state.json");
-  fs.mkdirSync(sessionsDir, { recursive: true });
 
   // Empty by default: enabling this creates a repository per conversation, which
   // is a deployment's choice to make, not something a fresh checkout should do
@@ -140,7 +138,6 @@ export function loadConfig(): Config {
     trustedProxy: process.env.BRIDGE_TRUSTED_PROXY ?? "",
     cwd,
     artifactsDir: artifactsDir === "" ? "" : path.resolve(artifactsDir),
-    sessionsDir,
     stateFile,
     steerWaitMs: Number(process.env.BRIDGE_STEER_WAIT_MS ?? 10_000),
     allowedSpaces: listEnv("ALLOWED_SPACES"),
