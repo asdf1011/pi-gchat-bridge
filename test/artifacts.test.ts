@@ -9,6 +9,8 @@ import {
   canonicalPath,
   deriveArtifacts,
   isInsideRoot,
+  mergeArtifacts,
+  presentArtifacts,
   readArtifact,
   type ArtifactEntryLike,
 } from "../src/durable/artifacts.js";
@@ -142,6 +144,64 @@ test("a deleted file keeps its key, so the list does not lose entries", () => {
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("a file that was written and then deleted is not offered", () => {
+  // `deriveArtifacts` deliberately keeps a deleted file's key — the transcript is a
+  // record of what happened, and losing an entry because a file moved would be
+  // rewriting history. The *view* must not offer it, though: the list is the
+  // allow-list, and an entry in it has to be readable. That is the bug behind
+  // "unreadable: conversation/40010/01-desktop-staged.png" — a screenshot renamed
+  // after the turn that wrote it, still listed, and a 404 when opened.
+  const root = tempDir();
+  try {
+    const kept = path.join(root, "still-here.md");
+    const gone = path.join(root, "renamed-away.md");
+    fs.writeFileSync(kept, "hi\n");
+    const derived = deriveArtifacts(
+      [
+        entry(1, "write", { path: kept, content: "hi" }),
+        entry(2, "write", { path: gone, content: "x" }),
+      ],
+      [canonicalPath(root)],
+    );
+    // The transcript still names both...
+    assert.equal(derived.length, 2);
+
+    // ...but only the one that exists is offered.
+    const offered = presentArtifacts(derived);
+    assert.deepEqual(offered.map((a) => a.key), ["still-here.md"]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a filesystem-observed file that has since gone is not offered either", () => {
+  const root = tempDir();
+  try {
+    const keyed = path.join(root, "seen.txt");
+    fs.writeFileSync(keyed, "x");
+    const observed = [{ path: keyed, at: Date.now() }];
+    const merged = mergeArtifacts([], observed as never, [canonicalPath(root)]);
+    assert.deepEqual(presentArtifacts(merged).map((a) => a.key), ["seen.txt"]);
+
+    fs.rmSync(keyed);
+    assert.deepEqual(presentArtifacts(merged), []);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("mergeArtifacts itself stays a pure join, so fixtures need no files on disk", () => {
+  // The existence check lives in `presentArtifacts`, not here: a join of two ledgers
+  // should be testable with literals, and a `stat` per file is not something every
+  // caller wants to pay for.
+  const merged = mergeArtifacts(
+    [{ key: "a.md", root: "/nope", path: "/nope/a.md", wrote: 1, edited: 0 }],
+    [{ path: "/nope/b.md", at: 1 }],
+    ["/nope"],
+  );
+  assert.deepEqual(merged.map((a) => a.key), ["a.md", "b.md"]);
 });
 
 test("reading truncates at the cap and says so", () => {

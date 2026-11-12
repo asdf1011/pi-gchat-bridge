@@ -354,6 +354,12 @@ export function markdownDocument(title: string, body: string): string {
       Inter, Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
     --mono: ui-monospace, SFMono-Regular, "SF Mono", "Cascadia Code",
       "JetBrains Mono", Menlo, Consolas, monospace; }
+  /* Vertical pans stay the browser's — scrolling a long file is the point — but a
+     the X axis is this document's. Without it a sideways drag is claimed by the
+     platform (on iOS, as a back-navigation gesture) and the swipe script never sees
+     an end to judge. pan-y keeps scrolling; taking x away from the browser is what
+     makes a swipe mean something. */
+  html { touch-action: pan-y pinch-zoom; }
   body { margin: 0 auto; padding: 2rem 1.25rem 4rem; max-width: 46rem;
          font: 16px/1.6 var(--sans); -webkit-font-smoothing: antialiased; }
   h1, h2, h3, h4 { line-height: 1.25; margin: 2rem 0 .75rem; }

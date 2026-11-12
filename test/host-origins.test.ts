@@ -19,6 +19,12 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 import { BridgeHost } from "../src/durable/host.js";
+import { LegacyOriginsDoc, MAX_ORIGINS_PER_CONVERSATION } from "../src/durable/origins-doc.js";
+
+/** The harness a `memoryHost()` built, for tests that must write a document directly. */
+function hostTestHarness(host: BridgeHost): Harness {
+  return (host as unknown as { harness: Harness }).harness;
+}
 
 async function memoryHost(): Promise<BridgeHost> {
   const harness = await Harness.open(
@@ -149,4 +155,91 @@ test("an answer with no recorded prompt surface is stamped, as unknown provenanc
       ["assistant", "unknown"],
     ],
   );
+});
+
+test("one conversation's stamps are its own, so another cannot evict them", async () => {
+  // The reason the document is conversation-scoped: a session-wide map with one cap
+  // meant a busy thread could spend another thread's retention. Here a conversation
+  // is stamped, a second conversation is filled past the per-conversation cap, and the
+  // first one's stamp is still there afterwards.
+  const host = await memoryHost();
+  const quiet = await withPrompt(host, "quiet thread");
+  assert.equal(await host.recordOrigin(quiet, 71, "webui"), true);
+
+  const busy = await withPrompt(host, "busy thread");
+  const before = (await host.history(quiet, 10, 0))?.find((message) => message.role === "user")?.entryId;
+  assert.ok(before !== undefined);
+  assert.equal((await host.history(quiet, 10, 0))?.[0]?.origin, "webui");
+
+  // Past MAX_ORIGINS_PER_CONVERSATION in *the other* conversation — the point at
+  // which the old session-wide cap would have started evicting the quiet thread's
+  // stamp, having already spent its budget on the busy one.
+  // The point is *locality*, not the number: the old session-wide cap could spend a
+  // quiet thread's retention on a busy one, and 60 stamps here is enough writes to have
+  // done that. (Stamping the cap's worth instead costs ~5 ms each in commits and proves
+  // the same thing.) The cap itself is per conversation, so it cannot be spent across.
+  const over = 60;
+  for (let index = 0; index < over; index += 1) {
+    await host.writeEntry(busy, {
+      kind: "app.notice",
+      data: {},
+      model: [{ role: "user", content: `prompt ${index}` }],
+    });
+    await host.recordOrigin(busy, 1_000 + index, "gchat");
+  }
+
+  const after = await host.history(quiet, 10, 0);
+  assert.equal(after?.[0]?.entryId, before);
+  assert.equal(after?.[0]?.origin, "webui", "the quiet conversation keeps its stamp");
+});
+
+test("stamps written before the split are copied into each conversation", async () => {
+  // Version 1 was one session-scoped map keyed `"<conversationId>:<entryId>"`. The new
+  // document is conversation-scoped, so `migrate()` cannot reach the old value at all —
+  // no document of this kind exists at the new scope to load. `backfillOrigins` is the
+  // step that does it, and this drives it against a real harness.
+  const host = await memoryHost();
+  const first = await withPrompt(host, "first thread");
+  const second = await withPrompt(host, "second thread");
+  const firstEntry = (await host.history(first, 10, 0))?.[0]?.entryId;
+  const secondEntry = (await host.history(second, 10, 0))?.[0]?.entryId;
+  assert.ok(firstEntry !== undefined && secondEntry !== undefined);
+
+  // Write the old shape directly: this is what the store holds today.
+  await hostTestHarness(host).commit(async (tx) => {
+    const doc = await tx.doc(LegacyOriginsDoc);
+    doc.byEntry = {
+      [`${first}:${firstEntry}`]: { origin: "gchat", submission: 101, at: 1 },
+      [`${second}:${secondEntry}`]: { origin: "webui", submission: 102, at: 2 },
+    };
+  }, BACKGROUND_CONTEXT);
+
+  assert.deepEqual(await host.backfillOrigins(), { conversations: 2, stamps: 2 });
+
+  assert.equal((await host.history(first, 10, 0))?.[0]?.origin, "gchat");
+  assert.equal((await host.history(second, 10, 0))?.[0]?.origin, "webui");
+
+  // Idempotent: a second run finds conversations that already have stamps and writes
+  // nothing, so a restart cannot duplicate or reorder anything.
+  assert.deepEqual(await host.backfillOrigins(), { conversations: 0, stamps: 0 });
+  assert.equal((await host.history(first, 10, 0))?.[0]?.origin, "gchat");
+});
+
+test("a conversation already stamped under the new scope is left alone", async () => {
+  // The stamp recorded by a live turn is fresher than anything the old map remembers,
+  // so a backfill must never overwrite it — otherwise restarting the bridge would
+  // silently rewrite recent provenance with week-old records.
+  const host = await memoryHost();
+  const conversationId = await withPrompt(host);
+  const entryId = (await host.history(conversationId, 10, 0))?.[0]?.entryId;
+  assert.ok(entryId !== undefined);
+
+  assert.equal(await host.recordOrigin(conversationId, 201, "webui"), true);
+  await hostTestHarness(host).commit(async (tx) => {
+    const doc = await tx.doc(LegacyOriginsDoc);
+    doc.byEntry = { [`${conversationId}:${entryId}`]: { origin: "gchat", submission: 201, at: 1 } };
+  }, BACKGROUND_CONTEXT);
+
+  assert.deepEqual(await host.backfillOrigins(), { conversations: 0, stamps: 0 });
+  assert.equal((await host.history(conversationId, 10, 0))?.[0]?.origin, "webui");
 });

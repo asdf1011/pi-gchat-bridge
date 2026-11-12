@@ -22,8 +22,8 @@
 import { randomBytes } from "node:crypto";
 import http from "node:http";
 
-import { isMarkdown, readArtifact, type ArtifactFile } from "../durable/artifacts.js";
-import { repoRelativePath, showFile } from "../durable/artifact-vcs.js";
+import { imageTypeOf, isMarkdown, readArtifact, readArtifactBytes, type ArtifactFile } from "../durable/artifacts.js";
+import { repoRelativePath, showFile, showFileBytes } from "../durable/artifact-vcs.js";
 import { logger } from "../logger.js";
 import type { SessionHost } from "../session-host/api.js";
 import { escapeHtml, markdownDocument, renderMarkdown } from "./markdown.js";
@@ -93,6 +93,22 @@ function frameAncestorsFor(webOrigin: string | undefined): string {
   return origin === "" ? "'self'" : `'self' ${origin}`;
 }
 
+/**
+ * The CSP for the image wrapper document.
+ *
+ * `img-src 'self'` is the one allowance and it is deliberately the narrowest that
+ * works: the wrapper shows a picture that this same origin holds and nothing else.
+ * `default-src 'none'` still covers fetch, frames and script, and the document has
+ * no script at all — so a picture is a picture, and cannot become a page.
+ */
+function imageDocumentCsp(frameAncestors: string, nonce: string): string {
+  return (
+    `sandbox allow-scripts; default-src 'none'; style-src 'unsafe-inline'; ` +
+    `img-src 'self' data:; script-src 'nonce-${nonce}'; ` +
+    `form-action 'none'; base-uri 'none'; frame-ancestors ${frameAncestors}`
+  );
+}
+
 /** Raw text is inert by content type; the CSP is a second belt in case of sniffing. */
 const TEXT_CSP = "sandbox; default-src 'none'; style-src 'unsafe-inline'";
 
@@ -121,11 +137,39 @@ function send(
   status: number,
   contentType: string,
   csp: string,
-  body: string,
+  body: string | Buffer,
   extra: Record<string, string> = {},
 ): void {
   res.writeHead(status, { ...BASE_HEADERS, "Content-Type": contentType, "Content-Security-Policy": csp, ...extra });
   res.end(body);
+}
+
+/**
+ * The CSP for an image served from this origin.
+ *
+ * An image is *not* a document: it is never parsed as HTML, it cannot carry script,
+ * and the only thing it can do is be drawn. So this is `default-src 'none'` and
+ * nothing else — no `sandbox`, which applies to documents and would be noise here.
+ * A sandbox would also stop the image being framed, and one of the two things that
+ * happens to these bytes is exactly that.
+ */
+const IMAGE_CSP = "default-src 'none'";
+
+/**
+ * An image at a pinned revision, read out of jj rather than off the disk.
+ *
+ * The same rule as the text path: the allow-list has already decided *which* paths
+ * may be read, so a revision cannot widen what is reachable. The only difference is
+ * that the bytes are not decoded on the way through.
+ */
+async function readImageAtRevision(
+  repo: string | undefined,
+  revision: string,
+  file: ArtifactFile,
+): Promise<{ bytes: Buffer; size: number }> {
+  if (!repo) throw new Error("artifacts are not version controlled here");
+  const bytes = await showFileBytes(repo, revision, repoRelativePath(repo, file.key));
+  return { bytes, size: bytes.length };
 }
 
 /** Each path segment encoded, slashes kept: a key is a path, not an opaque string. */
@@ -187,6 +231,151 @@ ${body}
  * into code points before counting. A comment anchored to a column of emoji must
  * point where the cursor was, not where the bytes landed.
  */
+/**
+ * The swipe gesture, shared by both documents.
+ *
+ * One copy interpolated into each script rather than two hand-kept ones: a rendered
+ * document and a source document are two builds of the same behaviour, and a fix
+ * applied to one is a fix the reader does not get in the other. Exported so the e2e
+ * test can serve a document that really carries it, instead of a stub with no
+ * gesture handling that would pass for the wrong reason.
+ *
+ * The document lives in a sandboxed cross-origin frame, so its pointer events never
+ * reach the page that frames it: the gesture is recognised in here and posted out,
+ * the same way a selection is. The parent decides what "next" means; this reports
+ * which way the finger went.
+ */
+export const SWIPE_SCRIPT = `
+  // --- Swiping between artifacts --------------------------------------------
+  //
+  // Two gestures share this surface, and getting the test wrong is what makes a
+  // document feel broken: a horizontal swipe must page, and a vertical drag must
+  // still scroll. So nothing is decided until the gesture is over, and then only if
+  // the movement was dominantly horizontal and long enough to be deliberate.
+  //
+  // "Over" is touchend OR touchcancel, and that distinction is the whole reason
+  // this is not a dozen lines. On iOS a touch the system claims — which includes a
+  // horizontal drag that turns into a back-navigation swipe, and any gesture the
+  // scroll view decides it owns — is ended with touchcancel, and touchend never
+  // arrives. A handler that only listens for touchend therefore works on desktop
+  // Chromium and does nothing on the phone, which is exactly the bug this rewrite
+  // fixes: the position is tracked on every touchmove, so a cancelled gesture can
+  // still be judged from where it had got to.
+  (function () {
+    var DISTANCE = 60;       // how far a swipe has to travel to count (a tap is ~0)
+    var DRAG_START = 8;      // where the document starts following the finger
+    var RATIO = 1.5;         // horizontal must beat vertical by this much
+    var SLOW = 800;          // longer than this is a drag, not a flick
+    var start = null;
+    var last = null;
+
+    function pointOf(event) {
+      // changedTouches is where a touch really is; clientX is 0 on some browsers
+      // for a touchend, which would read every swipe as a huge one.
+      var touch = event.changedTouches && event.changedTouches[0];
+      if (touch) return { x: touch.clientX, y: touch.clientY };
+      var live = event.touches && event.touches[0];
+      if (live) return { x: live.clientX, y: live.clientY };
+      if (typeof event.clientX === "number") return { x: event.clientX, y: event.clientY };
+      return null;
+    }
+
+    /** Judge the gesture that just ended, from wherever it had reached. */
+    function settle(event) {
+      if (!start) return;
+      var from = start;
+      var to = last || pointOf(event);
+      start = null;
+      last = null;
+      if (!to) return;
+      var dx = to.x - from.x;
+      var dy = to.y - from.y;
+      var absX = Math.abs(dx);
+      var absY = Math.abs(dy);
+      // Anything that does not qualify leaves the pane wherever the drag put it,
+      // so it has to be released before each of these early returns.
+      function abort() {
+        parent.postMessage({ t: "pi-artifact-drag-end", commit: false }, "*");
+      }
+      if (absX < DISTANCE) return abort();
+      if (absX < absY * RATIO) return abort();   // mostly vertical: a scroll
+      if (Date.now() - from.at > SLOW) return abort();
+      // A selection the reader is making is not a page turn either.
+      var selection = window.getSelection && window.getSelection();
+      if (selection && !selection.isCollapsed) {
+        // Not a page turn, so the pane must go back where it was.
+        parent.postMessage({ t: "pi-artifact-drag-end", commit: false }, "*");
+        return;
+      }
+      // commit says the drawer may keep the movement and finish the slide; the
+      // direction tells it which way to bring the next document in.
+      parent.postMessage(
+        { t: "pi-artifact-swipe", direction: dx < 0 ? "left" : "right", commit: true },
+        "*",
+      );
+    }
+
+    document.addEventListener("touchstart", function (event) {
+      // Two fingers is a pinch or a system gesture, not a page turn.
+      if (event.touches && event.touches.length > 1) { start = null; last = null; return; }
+      var point = pointOf(event);
+      start = point ? { x: point.x, y: point.y, at: Date.now() } : null;
+      last = point;
+    }, { passive: true });
+
+    // Tracking on move does two things: it keeps a cancelled gesture judgeable, and
+    // it is what lets the drawer follow the finger. Every move reports the offset
+    // once the gesture has committed to being horizontal — before that, the reader
+    // may still be scrolling, and moving the page then would fight them.
+    document.addEventListener("touchmove", function (event) {
+      if (!start) return;
+      var point = pointOf(event);
+      if (!point) return;
+      last = point;
+      var dx = point.x - start.x;
+      var dy = point.y - start.y;
+      var absX = Math.abs(dx);
+      var absY = Math.abs(dy);
+      // Past the slop, and clearly more horizontal than vertical. Both conditions
+      // have to hold before anything moves: a diagonal drag that keeps scrolling
+      // must not drag the document sideways while it does.
+      if (absX < DRAG_START || absX < absY * RATIO) return;
+      parent.postMessage({ t: "pi-artifact-drag", dx: dx }, "*");
+    }, { passive: true });
+
+    document.addEventListener("touchend", settle, { passive: true });
+    // iOS ends an interrupted gesture here; judge it on the way out rather than
+    // throwing the whole swipe away.
+    document.addEventListener("touchcancel", settle, { passive: true });
+
+    // A trackpad's two-finger swipe arrives as a wheel event with a horizontal
+    // delta, and it is the same gesture to the person making it. Events stream, so
+    // this accumulates until the momentum dies down and fires once.
+    var travel = 0;
+    // NOT named "settle": that is the touch handler's name, and var hoists — a
+    // second "var settle" in this same scope overwrote the function with null
+    // before addEventListener("touchend", settle) ran, so every swipe bound null
+    // and no gesture was ever judged. This is the bug that made swiping do nothing
+    // on a real device while the code read correctly.
+    var wheelTimer = null;
+    document.addEventListener("wheel", function (event) {
+      if (Math.abs(event.deltaX) <= Math.abs(event.deltaY)) { travel = 0; return; }
+      if (event.ctrlKey) return;              // ctrl+wheel is zoom
+      var selection = window.getSelection && window.getSelection();
+      if (selection && !selection.isCollapsed) return;
+      travel += event.deltaX;
+      if (wheelTimer) clearTimeout(wheelTimer);
+      wheelTimer = setTimeout(function () {
+        var moved = travel;
+        travel = 0;
+        wheelTimer = null;
+        if (Math.abs(moved) < 60) return;
+        parent.postMessage({ t: "pi-artifact-swipe", direction: moved > 0 ? "left" : "right" }, "*");
+      }, 120);
+    }, { passive: true });
+  })();
+`;
+
 const COMMENT_SCRIPT = `
 (function () {
   var FRAME = { file: document.body.getAttribute("data-file") || "" };
@@ -386,6 +575,9 @@ const COMMENT_SCRIPT = `
   });
 
   // Tell the parent the document is ready for highlights it wants to change.
+  // Tell the parent the document is ready for highlights it wants to change.
+  ${SWIPE_SCRIPT}
+
   parent.postMessage({ t: "pi-artifact-ready", file: FRAME.file }, "*");
 })();
 `;
@@ -714,9 +906,101 @@ export const RENDER_SCRIPT = `
     for (var i = 0; i < data.length; i += 1) mark(data[i]);
   } catch (e) {}
 
+  ${SWIPE_SCRIPT}
+
   parent.postMessage({ t: "pi-artifact-ready", file: FRAME.file }, "*");
 })();
 `;
+
+/**
+ * Why a file could not be shown, as a page rather than a line of text.
+ *
+ * The drawer frames whatever this origin answers with, so a plain-text error became
+ * a bare line in a blank panel with no clue what to do about it — which is exactly
+ * how `unreadable: conversation/40010/01-desktop-staged.png` arrived after a file
+ * was renamed. The status is still 404 (this is a failure, not a document), but the
+ * body explains it in the place the reader is already looking.
+ */
+function unreadableDocument(key: string): string {
+  return markdownDocument(
+    `unreadable · ${key}`,
+    `<h1>This file can no longer be read</h1>
+<p class="meta">${escapeHtml(key)}</p>
+<p>It was written during this conversation, but it is not on disk any more — it was
+renamed or deleted afterwards. The transcript records what happened to a file, not
+what is still there.</p>
+<p>Use the arrow at the top of this panel to go back to the list.</p>`,
+  );
+}
+
+/**
+ * An image, centred on the theme's own background.
+ *
+ * Served as HTML around an `<img>` rather than as the bare bytes, for a reason that
+ * only shows up on screen: a browser paints an image *document's* backdrop white,
+ * whatever the theme, and no header changes that inside a frame — so a transparent
+ * PNG arrived in a dark drawer as a white slab. A document with a stylesheet is the
+ * only place the backdrop can be made to follow the theme.
+ *
+ * The safety rules are unchanged. Every byte of the file name that reaches the markup
+ * is escaped; the `<img>` points at this same origin (the `?raw` form of the same
+ * URL), never at a remote host; and the CSP allows `img-src 'self'` and nothing else,
+ * so the document cannot load, fetch or run anything but the picture.
+ */
+function imageDocument(input: {
+  key: string;
+  size: number;
+  truncated: boolean;
+  /** Per-response, for the swipe script — the same rule as every other scripted document. */
+  nonce: string;
+}): string {
+  // Relative to this document, not to the conversation root: the document is served
+  // at `<root>/c/<id>/<key>`, so the image is its *sibling* `<key>?raw` — the full
+  // key again would resolve to `<root>/c/<id>/<key>/<key>` and quietly 404. Only the
+  // last segment is needed, and that is also what makes the URL work behind any
+  // mount prefix without this file having to know what the prefix is.
+  const href = `${encodeURIComponent(input.key.split("/").at(-1) ?? input.key)}?raw`;
+  const note = input.truncated
+    ? `<p class="note">Showing the first ${Math.round(input.size / 1024)} KiB of ${input.size} bytes.</p>`
+    : "";
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(input.key)}</title>
+<style>
+  /* Same light/dark contract as every other document here, so the picture sits on
+     the drawer's colour rather than on a white field. */
+  :root { color-scheme: light dark; }
+  /* Vertical pans stay the browser's — scrolling a long file is the point — but a
+     the X axis is this document's. Without it a sideways drag is claimed by the
+     platform (on iOS, as a back-navigation gesture) and the swipe script never sees
+     an end to judge. pan-y keeps scrolling; taking x away from the browser is what
+     makes a swipe mean something. */
+  html { touch-action: pan-y pinch-zoom; }
+  /* border-box because a padded height of 100% overflows its own viewport: the
+     padding is added outside the 100%, which pushes the picture's content box past
+     the bottom of the frame and makes it sit visibly too high. */
+  html, body { height: 100%; box-sizing: border-box; }
+  body { margin: 0; display: flex; align-items: center; justify-content: center;
+         padding: 1rem; background: Canvas; color: CanvasText;
+         font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  /* Fitted, not stretched: a screenshot wider than the drawer is the ordinary case,
+     and scaling it down to fit is what makes it readable at a glance. The height is
+     capped too, so a tall one does not need a scroll to see what it is. */
+  img { max-width: 100%; max-height: 100%; object-fit: contain;
+        image-rendering: auto; background: #8881; border-radius: .4rem; }
+  .note { position: absolute; bottom: .5rem; left: .5rem; margin: 0; opacity: .7; }
+</style>
+</head>
+<body>
+<img src="${escapeHtml(href)}" alt="${escapeHtml(input.key)}">
+${note}
+<script nonce="${input.nonce}">${SWIPE_SCRIPT}</script>
+</body>
+</html>`;
+}
 
 /**
  * The source view: numbered lines, comment marks, and the selection script.
@@ -745,6 +1029,12 @@ function sourceDocument(input: {
 <style>
   :root { color-scheme: light dark;
     --mono: ui-monospace, SFMono-Regular, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace; }
+  /* Vertical pans stay the browser's — scrolling a long file is the point — but a
+     the X axis is this document's. Without it a sideways drag is claimed by the
+     platform (on iOS, as a back-navigation gesture) and the swipe script never sees
+     an end to judge. pan-y keeps scrolling; taking x away from the browser is what
+     makes a swipe mean something. */
+  html { touch-action: pan-y pinch-zoom; }
   body { margin: 0; padding: 0 0 4rem; font: 13px/1.55 var(--mono); }
   .meta { padding: .5rem .75rem; opacity: .7; border-bottom: 1px solid #8883; margin: 0; }
   .ln { display: flex; gap: .75rem; padding: 0 .75rem; white-space: pre-wrap; word-break: break-word; }
@@ -870,6 +1160,64 @@ async function handle(
   const revision = (url.searchParams.get("rev") ?? "").trim();
   const repo = options.repoFor?.(conversationId);
 
+  // An image is answered from its bytes, before anything tries to decode it as
+  // text. Doing it here rather than after `readArtifact` is not an optimisation:
+  // that function reports a PNG as "binary" and returns no content, so a check
+  // below it would never see a picture at all.
+  //
+  // Two URLs, because a picture needs both:
+  //
+  //   `?raw`   — the bytes, with their real content type. What the document below
+  //              embeds, and what ↗ in the drawer's header opens.
+  //   plain    — an HTML document around those bytes, because a browser paints an
+  //              image *document's* backdrop white whatever the theme. That white
+  //              slab in a dark drawer is the bug this document exists to fix, and
+  //              no response header reaches it.
+  //
+  // `?download` asks for the bytes as an attachment rather than inline.
+  const imageType = imageTypeOf(key);
+  if (imageType !== undefined) {
+    let image;
+    try {
+      image = revision !== "" && revision !== "latest"
+        ? await readImageAtRevision(repo, revision, file)
+        : readArtifactBytes(file);
+    } catch (error) {
+      logger.error(`[artifacts] ${key}: ${(error as Error).message}`);
+      send(res, 404, "text/html; charset=utf-8", documentCsp, unreadableDocument(key));
+      return;
+    }
+    // No redaction, and there cannot be: `redact` is a text transform, and running
+    // it over a PNG would corrupt it. That is a real gap and it is stated here
+    // rather than hidden — an image this agent produced can contain whatever it
+    // drew, and the reviewer of an image is a person looking at it.
+    if (!url.searchParams.has("raw")) {
+      // A nonce, because this document now carries the swipe script. The permission
+      // is the narrowest that works: one script, ours, for this response only — the
+      // picture's own bytes are still never parsed as anything.
+      const nonce = randomBytes(16).toString("base64");
+      send(
+        res,
+        200,
+        "text/html; charset=utf-8",
+        imageDocumentCsp(frameAncestorsFor(options.webOrigin), nonce),
+        imageDocument({ key, size: image.size, truncated: image.size > image.bytes.length, nonce }),
+      );
+      return;
+    }
+    const filename = encodeURIComponent(key.split("/").at(-1) ?? key);
+    send(res, 200, imageType, IMAGE_CSP, image.bytes, {
+      "Content-Disposition": `${url.searchParams.has("download") ? "attachment" : "inline"}; filename="${filename}"`,
+      // Only meaningful when this URL is opened *directly* — the ↗ tab, a saved
+      // link — where the browser draws its own image viewer around it. Inside the
+      // drawer the wrapper document's stylesheet is what themes the backdrop; a
+      // response header does not reach an image document in a frame, which is the
+      // whole reason the wrapper exists.
+      "Color-Scheme": "light dark",
+    });
+    return;
+  }
+
   let read;
   try {
     if (revision !== "" && revision !== "latest") {
@@ -894,7 +1242,7 @@ async function handle(
     }
   } catch (error) {
     logger.error(`[artifacts] ${key}: ${(error as Error).message}`);
-    send(res, 404, "text/plain; charset=utf-8", TEXT_CSP, `unreadable: ${key}`);
+    send(res, 404, "text/html; charset=utf-8", documentCsp, unreadableDocument(key));
     return;
   }
 

@@ -380,7 +380,14 @@
      container. A definite height is what gives `flex: 1` something to divide. */
   #picker { position: fixed; z-index: 30; display: flex; flex-direction: column;
     min-width: 16rem; max-width: min(28rem, calc(100vw - 1.5rem));
-    max-height: min(70vh, 34rem); background: Canvas; color: CanvasText;
+    /* The cap is a viewport measurement, not a fixed size: `placePicker` puts the
+       popup directly above the caret, so the space it can use is "everything above
+       the composer" — 34rem was a guess that fit four models and then made the
+       thinking list scroll to show its last row. `--picker-room` is set from the
+       caret's rect (see placePicker); the vh value is the fallback for the frame
+       before it is set, and for a phone where the sheet is anchored to the bottom. */
+    max-height: min(var(--picker-room, 70vh), calc(100vh - 2rem));
+    background: Canvas; color: CanvasText;
     border: 1px solid #8884; border-radius: .75rem; overflow: hidden;
     /* Two shadows, not one: a tight edge to sit the popup on the page and a wide
        soft one to lift it. A single mid-blur shadow reads as a grey halo. */
@@ -396,17 +403,31 @@
      searched. The thinking list sizes to its handful of rows, so it never eats the
      space the models need — two `flex: 1` lists fight for height and neither ends
      up scrolling, which showed as a cl:ipped model row and a popup off-screen. */
-  /* Every non-scrolling child is `flex: none`, so the container's max-height is
-     spent on the list rather than shared out among headers — without this the
-     headings shrank and the list overflowed the popup instead of scrolling. */
+  /* The headings and the footer never shrink: the popup's height budget is theirs
+     first, and the two lists divide what is left. They must not be allowed to give
+     up space — a shrunken heading is an unreadable label, and the footer holds the
+     only button that commits anything. */
   #picker > * { flex: none; }
   #picker ul { list-style: none; margin: 0; padding: .25rem; }
-  /* The scroll window. Capped in vh so a deployment with forty models still shows a
-     popup that fits on screen, and the text search is the way through the rest. */
-  #picker #picker-list { overflow: auto; flex: 1 1 auto; min-height: 0; }
-  /* A level list is never long; cap it anyway so a model with many levels cannot
-     push the popup past the viewport. */
-  #picker #picker-levels { overflow: auto; max-height: 12rem; flex: none; }
+  /* The two lists are the only things allowed to give up height, and they do it in
+     a deliberate order.
+     `flex-basis: auto` with `flex-shrink`, not `flex: 1`: the popup's height is its
+     content's, capped by `max-height` (there is no definite height to divide), so
+     the lists keep their natural size until the cap bites — and then shrink, which
+     is when they scroll. `flex: 1 1 0` was tried and collapsed both lists to nothing
+     on an uncapped popup, because a zero basis in an auto-height container has no
+     space to grow into.
+     The model list keeps shrinking last (shrink 1) and the level list gives up its
+     space first (shrink 5): the model list is the long one and the one being
+     searched, while four levels that scroll are still readable — which is what the
+     clipped "high" row below the fold in the screenshot was not. */
+  #picker #picker-list { overflow: auto; flex: 0 1 auto; flex-shrink: 1; min-height: 2.5rem; }
+  /* A level list is four rows on the models that have the most, so it never
+     scrolls and never needs to shrink: it keeps its natural height and the model
+     list above it takes the whole budget. Giving it `flex-shrink` too made both
+     lists scroll a little rather than one scroll a lot, which reads as two clipped
+     lists instead of one long list you can see the end of. */
+  #picker #picker-levels { overflow: visible; flex: none; }
   #picker .item { display: flex; flex-direction: column; align-items: flex-start; gap: .1rem;
     width: 100%; text-align: left; padding: .55rem .65rem; border: 1px solid transparent;
     border-radius: .5rem; background: none; color: inherit; cursor: pointer; font: inherit; }
@@ -420,12 +441,43 @@
      colour alone is not a signal somebody can read on a phone in sunlight. */
   #picker .item.current { background: color-mix(in srgb, var(--accent) 7%, transparent);
     border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
+  /* A staged row — chosen, not yet applied. Same treatment as the current one on
+     purpose, visually: both answer "is this what I picked?", and a third colour
+     would be a third thing to learn. The tick is what tells them apart, and the
+     staged one is marked with a dot so it does not claim to be in use. */
+  #picker .item.staged { background: color-mix(in srgb, var(--accent) 11%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+  /* While something is staged the rows stop being "press to apply" and become
+     "press to choose", so the current model's tint steps back: two rows wearing
+     the same border would read as two selections. */
+  #picker .item.current.staging { background: none;
+    border-color: color-mix(in srgb, var(--accent) 20%, transparent); }
   #picker .item .name { display: flex; align-items: center; gap: .4rem; width: 100%; }
   #picker .item .name span:first-child { flex: 1; min-width: 0; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; }
   #picker .item .tick { flex: none; color: var(--accent); font-weight: 700; }
   #picker .item .detail { font-size: .78em; opacity: .65; }
   #picker .empty { padding: .6rem; font-size: .9em; opacity: .7; }
+  /* The footer: what is staged, and the one button that sends it. Pinned below the
+     lists (`flex: none`, from the rule above) so Apply is never scrolled away from
+     a forty-model list. */
+  #picker .actions { display: flex; align-items: center; gap: .5rem;
+    padding: .5rem .6rem; border-top: 1px solid #8883;
+    background: color-mix(in srgb, CanvasText 2%, Canvas); }
+  #picker .actions .staged { flex: 1; min-width: 0; font-size: .8em; opacity: .75;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #picker .apply { flex: none; font: inherit; font-size: .9em; font-weight: 600;
+    padding: .4rem 1rem; border-radius: .5rem; border: 1px solid transparent;
+    background: var(--accent); color: var(--accent-ink); cursor: pointer; }
+  #picker .apply:hover:not(:disabled) { background: var(--accent-hover); }
+  /* Disabled when nothing is staged: an Apply that would send nothing is a button
+     that lies about having work to do. */
+  #picker .apply:disabled { opacity: .45; cursor: default; }
+  /* A sheet that eats the composer it belongs to is worse than a short list, and
+     the footer made the content taller than 70vh on a phone — `max-height` only
+     ever bit on desktop. Cap by vh everywhere: the popup fits either way, and the
+     model list scrolls inside it. */
+  @media (max-width: 40rem) { #picker { max-height: 78vh; } }
   /* Tapping outside closes, which is what a popup teaches people to expect. It
      covers the page but not the picker, so the picker stays interactive. */
   #picker-scrim { position: fixed; inset: 0; z-index: 29; background: transparent; }
@@ -491,10 +543,55 @@
   #artifact-list .dir { display: block; font-size: .78em; opacity: .55; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; }
   #artifact-list .counts { flex: none; font-size: .78em; opacity: .55; }
-  #artifact-doc { position: absolute; inset: 0; display: flex;
-    transform: translateX(100%); transition: transform 180ms ease; background: Canvas; }
-  #artifacts.showing-doc #artifact-doc { transform: translateX(0); }
-  #artifact-frame { flex: 1; border: 0; width: 100%; background: #fff0; }
+  /* The document pane. `--doc-shift` is where it sits when it is *off* the drawer,
+     so one rule covers every entrance: the first document slides in from the right,
+     and a swipe to the next one re-enters from whichever side the gesture came from.
+     Without it, "next" and "previous" would both arrive from the right and the
+     direction of the swipe would be lost. */
+  /* A *strip*, not a single pane: two frames side by side, one pane wide each, in a
+     track three wide. The middle is the document you are reading; the neighbours are
+     the artifacts on either side of it in the list, so a drag reveals the real next
+     file sliding in rather than empty drawer. Which neighbour is loaded is decided
+     at the start of each gesture (see prepareNeighbour) — the other side is blank,
+     and a drag that way is damped instead, because there is nothing there yet. */
+  /* Two elements for one movement: this one is the *window* (never moves, clips), its
+     child is the wide strip that translates. They cannot be the same element — an
+     `overflow: hidden` box that translates clips its own contents to itself, so the
+     neighbouring pane was always cut off before it could be seen. */
+  /* Hidden until a document is chosen: it covers the list, and while it is over
+     nothing it must not swallow the taps meant for the rows underneath. */
+  #artifact-doc { position: absolute; inset: 0; overflow: hidden; background: Canvas;
+    visibility: hidden; }
+  #artifacts.showing-doc #artifact-doc { visibility: visible; }
+  /* The track is the width of the drawer and each pane is one track wide, so
+     translateX(-100%) moves exactly one document along. Every pane is `flex: none`
+     at 100%: a flex-grown pane would be sized by the *track*, and the two would
+     share it instead of lining up. */
+  #artifact-track { display: flex; align-items: stretch; height: 100%;
+    --doc-shift: 100%;
+    transform: translateX(var(--doc-shift)); transition: transform 180ms ease;
+    will-change: transform; }
+  #artifact-track > .artifact-frame { flex: none; width: 100%; border: 0; background: #fff0; }
+  #artifacts.showing-doc #artifact-track { transform: translateX(0); }
+  /* Mid-swipe the new document replaces the old one with no animation: the gesture
+     already carries the motion, and animating a second slide on top of a finger
+     that is still moving reads as a stutter. */
+  #artifact-track.no-animate { transition: none; }
+  @media (prefers-reduced-motion: reduce) {
+    #artifact-track { transition: none; }
+  }
+  /* A frame that is not part of the current three is taken out of the strip
+     entirely, so it can keep its loaded document off-screen without occupying a slot. */
+  #artifact-track > .artifact-frame[hidden] { display: none; }
+  /* An image is framed as itself, and an image document is transparent where the
+     picture is — so what shows around it is this element's background. The default is
+     white, which is a white slab inside a dark drawer. `Canvas` is the theme's own
+     colour and follows `prefers-color-scheme` with the rest of the page.
+     `color-scheme` is required, not decoration: `Canvas` resolves against the
+     element's own scheme, and without one it resolves to *light* — rgb(255,255,255) —
+     whatever the page around it is doing. Declaring the scheme here is what makes
+     `Canvas` mean "this theme's canvas" rather than "white". */
+  #artifact-frame.image { background: Canvas; color-scheme: light dark; }
   #artifact-hint { padding: .5rem .75rem; font-size: .85em; opacity: .7; margin: 0; }
   /* Review comments. The bar sits at the foot of the drawer rather than floating
      over the selection: it is one place for all comment chrome, it cannot cover
@@ -546,7 +643,7 @@
   .comment-turn.answer .said { background: #8881; border-radius: .5rem; padding: .4rem .55rem; }
   .comment-turn.note .said { border-left: 3px solid #8886; padding-left: .5rem; opacity: .9; }
   .comment-open { display: flex; align-items: center; gap: .5rem; font-size: .8em; opacity: .8; }
-  @media (prefers-reduced-motion: reduce) { #artifact-doc { transition: none; } }
+  @media (prefers-reduced-motion: reduce) { #artifact-track { transition: none; } }
   /* Phones: the index is the whole width, the pane keeps its padding, and the
      drawer takes the screen rather than a strip of it. */
   @media (max-width: 40rem) {
@@ -577,6 +674,12 @@
     /* Roomier rows: a 2.5rem target is comfortable, a 1.8rem one is a coin toss. */
     #picker .item { padding: .7rem .75rem; }
     #picker ul { padding-bottom: max(.4rem, env(safe-area-inset-bottom)); }
+    /* The footer is the last thing on the sheet, so it is the thing the iOS home
+       indicator sits on: give it the inset, or Apply is a button you drag up from
+       to press. No bottom padding on the lists any more — the footer owns that edge
+       now, and padding both would leave a gap between the levels and the button. */
+    #picker .actions { padding-bottom: max(.5rem, env(safe-area-inset-bottom)); }
+    #picker ul { padding-bottom: .25rem; }
     /* A split button is one control, so it still fits beside the box on a phone
        without a second line: the caret is the only extra width it costs. The box
        takes the remaining space and the send group keeps its natural size. */
@@ -663,6 +766,15 @@
   <ul id="picker-list" role="listbox" aria-labelledby="picker-model-heading"></ul>
   <p class="section" id="picker-thinking-heading" hidden>Thinking</p>
   <ul id="picker-levels" role="listbox" aria-labelledby="picker-thinking-heading" hidden></ul>
+  <!-- Apply, because the popup holds two answers to one question. Tapping a model
+       used to apply and close, which made "a model *and* its thinking level"
+       unchoosable: the list was gone before the second half could be picked. A
+       choice is staged here and sent once, still through `/model`, so nothing a
+       surface could do to the conversation changed — only when. -->
+  <div class="actions" id="picker-actions">
+    <span id="picker-staged" role="status" aria-live="polite"></span>
+    <button id="picker-apply" type="button" class="apply" disabled>Apply</button>
+  </div>
 </div>
 <button id="new-chat" title="Start a new conversation" aria-label="New chat">＋</button>
 <aside id="artifacts" hidden>
@@ -679,7 +791,14 @@
       <ul id="artifact-list"></ul>
     </div>
     <div id="artifact-doc">
-      <iframe id="artifact-frame" sandbox="allow-scripts allow-popups" referrerpolicy="no-referrer"></iframe>
+      <!-- The sliding strip. `#artifact-doc` is the fixed window that clips it, this
+           is the wide track that moves: panes sit side by side on it, so dragging
+           carries the current document out and the neighbour in behind it. -->
+      <!-- The sliding strip. Frames are *created* here, one per document, and never
+           reloaded: moving to another artifact is a matter of which frame sits in the
+           middle, not of changing what a visible frame loads. -->
+      <div id="artifact-track"></div>
+
       <!-- Composing a comment on a selection, from inside the framed document.
            The document can only *report* a selection; this is where it becomes
            a message, because this origin is the one allowed to send. -->
@@ -879,6 +998,8 @@ let reconnectAttempts = 0;
 let lastFrameAt = 0;
 /** Watches for silence on a stream that never errored. */
 let livenessTimer;
+/** A queued reconnect for a stream that opened and then went stale or silent. */
+let catchUpTimer;
 const log = document.getElementById('log');
 const tool = document.getElementById('tool');
 const textBox = document.getElementById('text');
@@ -895,6 +1016,14 @@ let turnHtml = '';
 let liveHtml = '';
 let busy = false;
 let statusLine = '';
+/**
+ * The stream the live block belongs to.
+ *
+ * Bumped on every `connectStream`, and captured by the catch-up it asks for. Without
+ * it, a stream that is replaced while an older stream's catch-up is in flight applies an answer
+ * about a connection nobody holds any more.
+ */
+let streamGeneration = 0;
 // The page version this document was rendered from; compared on every (re)connect.
 let pageVersion = '';
 // One reload per page life: if the version somehow keeps changing, reloading in a
@@ -1267,6 +1396,22 @@ function paint() {
 }
 
 /**
+ * After a repaint, put a reader who was following the conversation back at its end.
+ *
+ * `paint()` restores the old offset, which is right for a reader scrolled up the transcript and wrong
+ * for one who was at the bottom: `innerHTML = ''` collapses the log, the browser clamps `scrollTop` to
+ * zero, and the message that just arrived lands below the fold. That is the other half of "it does not
+ * catch up" — the answer was there, off-screen, under a pane that looked finished.
+ *
+ * Asked after the paint rather than before it because whether the reader was at the end is about the
+ * content, and the content just changed.
+ */
+function followEnd() {
+  if (!atBottom) return;
+  log.scrollTop = log.scrollHeight;
+}
+
+/**
  * The first page: the newest messages, painted at the bottom.
  *
  * `offset` restarts at zero on every open, because a new conversation means a new
@@ -1278,28 +1423,45 @@ async function loadHistory() {
   beforeAnchor = 0;
   historyComplete = false;
   loadingEarlier = false;
-  painted = false;
+  // `painted` is deliberately left alone: `paint()` re-establishes it, and clearing it here meant a
+  // repaint from a catch-up had no position to restore. `open` is where a fresh page starts.
   const id = current;
   try {
     // No anchor: the newest page. Every page after this one is anchored on the oldest id held, so a
     // turn that appends while somebody is scrolling cannot shift it.
-    const page = await (await apiFetch(rel('api/c/' + id + '/history?limit=' + HISTORY_PAGE + '&before=0'))).json();
+    const response = await apiFetch(rel('api/c/' + id + '/history?limit=' + HISTORY_PAGE + '&before=0'));
+    // A signed-out session answers with the banner, not a page. Replacing the transcript with the
+    // empty body of that answer would wipe a conversation that is still perfectly readable.
+    if (!response.ok) return;
+    const page = await response.json();
     if (id !== current) return;
     transcript = Array.isArray(page?.messages) ? page.messages : [];
     beforeAnchor = page?.before ?? 0;
     historyComplete = page?.atStart === true || transcript.length === 0;
   } catch {
-    if (id !== current) return;
-    transcript = [];
+    // A failed read leaves the transcript as it was. Emptying it here is how a dropped request turned
+    // a readable conversation into a blank pane, and the repaint below then cleared the live block
+    // too — so a catch-up on a flaky connection ate the answer it was fetching.
+    return;
   }
   paint();
+  followEnd();
 }
 
 function open(id) {
   if (source) source.close();
+  if (catchUpTimer) {
+    clearTimeout(catchUpTimer);
+    catchUpTimer = undefined;
+  }
   current = id;
+  // A fresh conversation opens at its end; only a repaint of the same one has a position to keep.
+  atBottom = true;
+  painted = false;
   transcript = [];
   liveText = '';
+  turnText = '';
+  turnHtml = '';
   liveHtml = '';
   busy = false;
   statusLine = '';
@@ -1321,6 +1483,11 @@ function open(id) {
  *
  * The pane therefore owns the lifecycle: a closed stream is replaced on a short backoff, and
  * returning to the tab forces an attempt rather than waiting for a timer to come round.
+ *
+ * Replacing the stream is only half of it. A replacement knows the *live* state and nothing about
+ * the transcript, so every path that reconnects also re-reads history — see `catchUp`. Without that,
+ * an answer that arrived while the page was away was invisible until somebody reloaded, which is the
+ * whole of "it doesn't reliably catch up".
  */
 function connectStream(id) {
   if (source) {
@@ -1335,6 +1502,14 @@ function connectStream(id) {
     clearInterval(livenessTimer);
     livenessTimer = undefined;
   }
+  // Any reconnect queued for the old stream is stale by definition; left alone it would open a
+  // second stream and half the frames would go to the conversation nobody is reading.
+  if (catchUpTimer) {
+    clearTimeout(catchUpTimer);
+    catchUpTimer = undefined;
+  }
+
+  const generation = ++streamGeneration;
 
   source = new EventSource(rel('api/c/' + id + '/events'));
   // Any frame proves the stream is alive. The server writes a `: keepalive` comment
@@ -1345,14 +1520,9 @@ function connectStream(id) {
     lastFrameAt = Date.now();
     const d = JSON.parse(e.data);
     const wasBusy = liveText !== '';
-    liveText = d.text;
     // The frame carries the turn so far as well as the message in flight; both are
     // needed to show a long answer while it is being assembled.
-    turnText = typeof d.turn === 'string' ? d.turn : '';
-    turnHtml = typeof d.turnHtml === 'string' ? d.turnHtml : '';
-    liveHtml = d.html || '';
-    busy = Boolean(d.busy);
-    if (busy) statusLine = '';
+    applyView(d);
     paint();
     // A turn that just finished has become transcript: refetch so the answer is
     // shown as a completed message and the live block goes away.
@@ -1364,6 +1534,7 @@ function connectStream(id) {
           turnHtml = '';
           liveHtml = '';
           paint();
+          followEnd();
         });
         // The turn may have edited an artifact and replied in a thread; both are
         // this pane's business, and neither is in the transcript frames.
@@ -1388,6 +1559,14 @@ function connectStream(id) {
     reconnectAttempts = 0;
     lastFrameAt = Date.now();
     startLivenessWatch(id);
+    // Catch up before anything is drawn from this stream.
+    //
+    // The first frame is the whole *live* state, and for an idle conversation that state is empty —
+    // so a stream that opens after a phone was off repaints nothing, and the answer that arrived
+    // while the page was away is simply missing until somebody reloads. Frames are not the
+    // transcript, and the transcript is what has to be caught up; this is the one place that knows a
+    // stream actually came back.
+    void catchUp(id, generation);
     if (!pageVersion || reloadedForVersion) return;
     try {
       const environment = await (await apiFetch(rel('api/environment'))).json();
@@ -1435,6 +1614,59 @@ function connectStream(id) {
     if (!gone || reconnectTimer) return;
     scheduleReconnect(id);
   });
+}
+
+/**
+ * Re-read the transcript, then put the live block on top of it.
+ *
+ * Two things can be stale after a stream comes back, and different requests fix them:
+ *
+ *   - **the transcript**, which only `loadHistory` knows about. This is the bug: a turn that ended
+ *     while the phone was off leaves the live block empty and the transcript a page behind, so the
+ *     pane looks caught up and is not.
+ *   - **the live turn**, which the stream's first frame normally carries — except that a frame is
+ *     only sent when it *differs* from the last one, so a stream opened mid-turn can sit there
+ *     drawing nothing until the model happens to say something new.
+ *
+ * Order matters: history first, then the live snapshot applied on top. The reverse loses the turn,
+ * because `loadHistory` clears the live block when it paints the answer it now holds.
+ */
+async function catchUp(id, generation) {
+  await loadHistory();
+  // The conversation changed, or the stream was replaced, while this was in flight: the answer
+  // describes a connection nobody is looking at.
+  if (id !== current || generation !== streamGeneration) return;
+  try {
+    const response = await apiFetch(rel('api/c/' + id + '/events/state'));
+    if (!response.ok) return;
+    const resumed = await response.json();
+    if (id !== current || generation !== streamGeneration) return;
+    applyView(resumed);
+    // Painted unconditionally: an idle conversation is the case this exists for, and there the
+    // snapshot is empty, which is exactly what the stale live block has to be replaced with.
+    paint();
+    followEnd();
+  } catch {
+    // The catch-up failed. The stream is still up and the next frame or reconnect tries again; a
+    // transient failure must not blank a pane that history has already made correct.
+  }
+}
+
+/**
+ * Take a view snapshot — the shape `attach` seeds a stream with — and make it the live state.
+ *
+ * One function for two callers: the `text` frames during a turn, and the snapshot asked for on
+ * reconnect. The frames used to be read field by field at their call site, which is how the same
+ * facts came to be assigned in two places and drift.
+ */
+function applyView(view) {
+  const d = view && typeof view === 'object' ? view : {};
+  liveText = typeof d.text === 'string' ? d.text : '';
+  turnText = typeof d.turn === 'string' ? d.turn : '';
+  turnHtml = typeof d.turnHtml === 'string' ? d.turnHtml : '';
+  liveHtml = typeof d.html === 'string' ? d.html : '';
+  busy = Boolean(d.busy);
+  if (busy) statusLine = '';
 }
 
 /**
@@ -2058,6 +2290,9 @@ const pickerSearch = document.getElementById('picker-search');
 const pickerSearchRow = pickerSearch.parentElement;
 const pickerScrim = document.getElementById('picker-scrim');
 const sendMenuButton = document.getElementById('send-menu');
+/** The footer: what is staged, and the button that sends it. */
+const pickerStaged = document.getElementById('picker-staged');
+const pickerApply = document.getElementById('picker-apply');
 
 /** The conversation's format, as last reported by the server. */
 let formatState = null;
@@ -2065,6 +2300,18 @@ let formatState = null;
 let pickerOpen = false;
 /** Every model, with its levels, fetched once and filtered locally. */
 let modelChoices = null;
+/**
+ * What the reader has chosen but not yet applied.
+ *
+ * The popup answers one question in two parts — which model, and how hard it thinks
+ * — and it used to answer it by closing on the first part. Tapping a model applied
+ * it and shut the menu, so the thinking level was unreachable: gone before it could
+ * be picked, and picking a model was the only way to see a new model's levels. So a
+ * tap stages instead. `null` when nothing is staged, and `staged.levels` is the list
+ * *that model* offers, which is why it travels with the model rather than being read
+ * back off `formatState` (that still describes the model in use, not the one chosen).
+ */
+let staged = null;
 
 /** Take the format from a conversation payload, when it carries one. */
 function adoptFormat(conversation) {
@@ -2094,6 +2341,25 @@ function modelLabelOf(key) {
   return chosen ? chosen.label : shortModelName(key);
 }
 
+/** The level a staged choice would actually apply, given the levels it offers. */
+function stagedLevelOf(choice) {
+  if (!choice) return undefined;
+  // Keep the level in use when the new model has it — switching between reasoning
+  // models should not silently reset how hard they think — and otherwise take the
+  // model's first level. A model with no levels takes none: sending a level to a
+  // model that does not think is a refusal, not a preference.
+  const keep = choice.thinking;
+  if (keep !== undefined && choice.levels.includes(keep)) return keep;
+  return choice.levels[0];
+}
+
+/** Whether the staged choice is already what is in use. */
+function stagedIsCurrent() {
+  if (!formatState || !staged) return false;
+  return staged.model === formatState.model
+    && stagedLevelOf(staged) === formatState.thinking;
+}
+
 /** Load the model list, once. Filtering then costs nothing. */
 async function loadModels() {
   if (modelChoices) return modelChoices;
@@ -2115,6 +2381,10 @@ function closePicker() {
   pickerSearchRow.hidden = true;
   pickerList.innerHTML = '';
   pickerLevels.innerHTML = '';
+  // A choice that was never applied does not outlive the popup. Closing is how a
+  // reader says "never mind", and reopening with somebody else's earlier pick still
+  // selected would be the popup talking to itself rather than to them.
+  staged = null;
   sendMenuButton.setAttribute('aria-expanded', 'false');
   // Focus goes back to the caret, so Escape is not a dead end for a keyboard.
   if (document.activeElement && picker.contains(document.activeElement)) sendMenuButton.focus();
@@ -2146,13 +2416,26 @@ function placePicker(searchable) {
   // desktop the popup is small and scrollable, and a search field inside it is
   // mostly chrome. Same input either way, so there is one filter.
   pickerSearchRow.hidden = !(sheet && searchable);
+  const rect = sendMenuButton.getBoundingClientRect();
+  // How tall the popup may be: the space between the top of the window and six
+  // pixels above the caret, less a margin. Measured rather than guessed, because
+  // the guess (`34rem`) was short by a couple of rows — enough that the thinking
+  // list scrolled to show its last level, which looks like a clipped list rather
+  // than a scrollable one.
+  picker.style.setProperty(
+    '--picker-room',
+    // The sheet is pinned to the bottom, so the caret's position says nothing about
+    // how much room there is; the window does. Leave the composer visible under it:
+    // a sheet that covers the box you were typing in is a page you have to dismiss
+    // to see what you wrote.
+    (sheet ? window.innerHeight * 0.78 : Math.max(12 * 16, rect.top - 6 - 12)) + 'px',
+  );
   if (sheet) {
     picker.style.left = '';
     picker.style.top = '';
     picker.style.bottom = '';
     return;
   }
-  const rect = sendMenuButton.getBoundingClientRect();
   const width = picker.offsetWidth || 320;
   // Above the button: the composer is at the bottom, so a list below it would be
   // off-screen. Right-aligned to the caret's trailing edge, so the popup grows
@@ -2163,14 +2446,26 @@ function placePicker(searchable) {
   picker.style.bottom = (window.innerHeight - rect.top + 6) + 'px';
 }
 
-/** One row: a label, an optional subtitle, a tick when it is the current value. */
-function pickerItem(label, detail, isCurrent, apply) {
+/**
+ * One row: a label, an optional subtitle, a tick when it is the current value and a
+ * dot when it is the staged one.
+ *
+ * Two marks rather than one because there are now two questions a row answers: is
+ * this in use, and is this what I just picked. They can both be true (staging the
+ * current model at a new level) and they can both be false, so neither can stand in
+ * for the other. `staging` dulls the current-row tint while a choice is pending, so
+ * "chosen" and "in use" never wear the same border at the same time.
+ */
+function pickerItem(label, detail, isCurrent, apply, isStaged, staging) {
   const item = document.createElement('li');
   const button = document.createElement('button');
   button.type = 'button';
-  button.className = 'item' + (isCurrent ? ' current' : '');
+  button.className = 'item'
+    + (isCurrent ? ' current' : '')
+    + (isStaged ? ' staged' : '')
+    + (staging ? ' staging' : '');
   button.setAttribute('role', 'option');
-  button.setAttribute('aria-selected', isCurrent ? 'true' : 'false');
+  button.setAttribute('aria-selected', isStaged ? 'true' : 'false');
   const name = document.createElement('span');
   name.className = 'name';
   const text = document.createElement('span');
@@ -2182,6 +2477,14 @@ function pickerItem(label, detail, isCurrent, apply) {
     tick.textContent = '✓';
     tick.setAttribute('aria-hidden', 'true');
     name.append(tick);
+  }
+  if (isStaged) {
+    // A filled dot, not a second tick: a staged row is chosen, not in use yet.
+    const dot = document.createElement('span');
+    dot.className = 'tick staged-dot';
+    dot.textContent = '●';
+    dot.setAttribute('aria-hidden', 'true');
+    name.append(dot);
   }
   button.append(name);
   if (detail) {
@@ -2203,6 +2506,7 @@ async function openPicker() {
   pickerScrim.hidden = false;
   pickerSearch.value = '';
   renderPickerNow();
+  renderPickerActions();
   placePicker(true);
   drawModels('');
   // No focus on the search box. Focusing it raised the on-screen keyboard over a
@@ -2213,25 +2517,55 @@ async function openPicker() {
   if (!pickerOpen) return; // closed while loading
   renderPickerNow();
   drawModels('');
-  if (pickerSearchRow.hidden) drawLevels();
+  renderPickerActions();
+  placePicker(true);
 }
 
-/** The menu's header: the format the next message will use, in words. */
+/**
+ * The menu's header: what the *next* message will use, in words.
+ *
+ * It follows the staged choice, not the last applied one, because the first
+ * question every reader has when a popup is open is "what have I got selected?".
+ * With nothing staged it says what is in use, which is the same question answered
+ * about the conversation rather than about the popup.
+ */
 function renderPickerNow() {
-  if (!formatState) {
+  if (!staged && !formatState) {
     pickerNow.textContent = 'Choose the model and thinking level for this conversation.';
     return;
   }
+  // A staged choice is resolved to the level it *would* apply; the format already
+  // knows the level it *did*. Reading them through one variable would mean trusting
+  // a field that means something different on each side of the staging flag.
+  const key = staged ? staged.model : formatState.model;
+  const level = staged ? stagedLevelOf(staged) : formatState.thinking;
   pickerNow.innerHTML = '';
   const model = document.createElement('b');
-  model.textContent = modelLabelOf(formatState.model);
-  pickerNow.append('Next message: ', model);
-  if (formatState.thinking) pickerNow.append(' · thinking ');
-  if (formatState.thinking) {
-    const level = document.createElement('b');
-    level.textContent = formatState.thinking;
-    pickerNow.append(level);
+  model.textContent = modelLabelOf(key);
+  pickerNow.append(staged ? 'Selected: ' : 'Next message: ', model);
+  if (level) {
+    pickerNow.append(' · thinking ');
+    const b = document.createElement('b');
+    b.textContent = level;
+    pickerNow.append(b);
   }
+}
+
+/** The footer: what is staged, and whether Apply has anything to do. */
+function renderPickerActions() {
+  if (!pickerOpen) return;
+  pickerApply.disabled = staged === null || stagedIsCurrent();
+  if (!staged) {
+    // Not "nothing selected" — the useful thing to say is that what is in use
+    // stays in use until Apply, because the popup no longer changes anything by
+    // being tapped.
+    pickerStaged.textContent = formatState ? '' : 'Pick a model, then Apply.';
+    return;
+  }
+  const level = stagedLevelOf(staged);
+  const what = modelLabelOf(staged.model) + (level ? ' · ' + level : '');
+  if (stagedIsCurrent()) pickerStaged.textContent = 'That is already in use.';
+  else pickerStaged.textContent = 'Apply: ' + what;
 }
 
 function drawModels(query) {
@@ -2265,7 +2599,12 @@ function drawModels(query) {
         // not need to be on screen to be understood.
         '',
         formatState !== null && model.key === formatState.model,
-        () => void applyFormat(model.key, formatState && formatState.thinking, model.levels),
+        // A tap stages, it does not apply: the thinking list below this one is
+        // the other half of the same answer, and it has to survive the tap to be
+        // reachable at all.
+        () => stageModel(model.key, model.levels),
+        staged !== null && model.key === staged.model,
+        staged !== null,
       ));
     }
   }
@@ -2273,70 +2612,133 @@ function drawModels(query) {
 }
 
 /**
- * The thinking levels of the model in use.
+ * The thinking levels of the model that will answer.
+ *
+ * That is the staged model when there is one, so tapping a model shows *its*
+ * levels in the same popup — the whole point of staging. `formatState.levels` is
+ * the fallback, and describes the model in use.
  *
  * Hidden entirely when the model has none (a small local model does not think at a
  * level), rather than shown empty: an empty section reads as a broken page, while
  * its absence reads as "not applicable".
  */
 function drawLevels() {
-  if (!pickerOpen || !formatState) {
-    pickerThinkingHeading.hidden = true;
-    pickerLevels.hidden = true;
+  pickerThinkingHeading.hidden = true;
+  pickerLevels.hidden = true;
+  pickerLevels.innerHTML = '';
+  if (!pickerOpen) return;
+  if (modelChoices === null || pickerSearch.value.trim()) {
+    // Filtering or still loading: the section would describe a model the list is
+    // busy hiding, so it steps out of the way rather than showing stale rows.
     return;
   }
-  const levels = formatState.levels;
-  const show = levels.length > 0 && (modelChoices === null || !pickerSearch.value.trim());
-  pickerThinkingHeading.hidden = !show;
-  pickerLevels.hidden = !show;
-  pickerLevels.innerHTML = '';
-  if (!show) return;
+  const model = staged ? staged.model : formatState && formatState.model;
+  if (!model) return;
+  const levels = staged ? staged.levels : (formatState ? formatState.levels : []);
+  if (levels.length === 0) return;
+  const current = staged ? stagedLevelOf(staged) : (formatState && formatState.thinking);
+  pickerThinkingHeading.hidden = false;
+  pickerLevels.hidden = false;
   for (const level of levels) {
     pickerLevels.append(pickerItem(
       level,
       '',
-      level === formatState.thinking,
-      () => void applyFormat(formatState.model, level, levels),
+      level === current,
+      () => stageLevel(level),
+      staged !== null && level === stagedLevelOf(staged),
+      staged !== null,
     ));
   }
 }
 
 /**
- * Apply a choice, then re-read the format.
+ * Stage a model, keeping the level in use when the new model offers it.
+ *
+ * Nothing is sent. The level is resolved from the *new* model's own levels, so
+ * switching to a small local model stages "no level" rather than a level the new
+ * model would refuse — and switching back keeps what was chosen where it fits.
+ */
+function stageModel(key, levels) {
+  const kept = staged ? stagedLevelOf(staged) : (formatState && formatState.thinking);
+  staged = { model: key, thinking: kept, levels: Array.isArray(levels) ? levels : [] };
+  renderPickerNow();
+  drawModels(pickerSearch.value);
+  renderPickerActions();
+  // The rows are rebuilt by `drawModels`, so the tap's own row is gone and the
+  // browser's scroll-into-view with it: a long list left the chosen model half
+  // behind the THINKING heading, looking selected and cut off at once. Put it back
+  // in sight, and only just — `nearest` does not re-centre a list nobody scrolled.
+  const chosen = [...pickerList.querySelectorAll('.item')]
+    .find((row) => row.classList.contains('staged'));
+  // Guarded: `scrollIntoView` is absent in a DOM without layout (the jsdom tests),
+  // and a missing convenience must not be able to throw out of a click handler and
+  // take the staging with it.
+  if (chosen && typeof chosen.scrollIntoView === 'function') chosen.scrollIntoView({ block: 'nearest' });
+}
+
+/**
+ * Stage a thinking level.
+ *
+ * The model is the staged one, or — when only the level was touched — the model in
+ * use, at the levels it in fact offers. Picking a level without touching the model is
+ * the common case ("think harder about this one"), and it should not need the model
+ * tapped first to become a real choice.
+ */
+function stageLevel(level) {
+  if (!staged) {
+    if (!formatState) return;
+    staged = { model: formatState.model, thinking: level, levels: formatState.levels };
+  } else {
+    staged = { ...staged, thinking: level };
+  }
+  renderPickerNow();
+  drawModels(pickerSearch.value);
+  renderPickerActions();
+}
+
+/**
+ * Apply the staged choice, then re-read the format.
  *
  * The whole format is sent, not just the field that changed: `/model` takes a model
- * and a level together, and sending one alone would leave the other to a guess.
- * A level the new model does not have is replaced by one it does, chosen here, so
- * switching to a small local model does not mean switching twice.
+ * and a level together, and sending one alone would leave the other to a guess. The
+ * level comes from `stagedLevelOf`, so one the new model does not have is replaced
+ * by one it does *before* the request, rather than sent to be refused.
+ *
+ * This is the only thing in the popup that changes the conversation. Staging is why:
+ * the model and the thinking level are one answer in two parts, and applying each
+ * part as it was tapped shut the popup between them.
  */
-async function applyFormat(modelKey, thinking, levels) {
+async function applyFormat() {
+  if (!staged) return;
+  const wanted = stagedLevelOf(staged);
+  const body = JSON.stringify({
+    text: '/model',
+    values: { model: staged.model, ...(wanted === undefined ? {} : { thinking: wanted }) },
+  });
+  // Shut before the round trip: the choice is made, and a popup that lingers while
+  // a local model is switched would look like the tap did nothing. A refusal still
+  // reaches the reader, in the command panel.
   closePicker();
-  // Keep the level by default — switching between reasoning models should not
-  // silently reset how hard they think — but only when the new model has it. A
-  // model with no levels takes none: sending a level to a model that does not think
-  // is a refusal, not a preference.
-  const wanted = thinking !== undefined && levels.includes(thinking) ? thinking : levels[0];
+  let shape;
   try {
     const response = await apiFetch(rel('api/c/' + current + '/commands'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        text: '/model',
-        values: { model: modelKey, ...(wanted === undefined ? {} : { thinking: wanted }) },
-      }),
+      body,
     });
-    const shape = await response.json();
-    if (shape && shape.kind !== 'form') {
-      // The command refused. Say so where this page has always put an answer.
-      renderCommand(shape);
-      return;
-    }
-    commandPanel.hidden = true;
-    commandBody.innerHTML = '';
+    shape = await response.json();
   } catch {
     renderCommand({ kind: 'text', text: 'The model change did not go through. Is the bridge still running?' });
     return;
   }
+  if (shape && shape.kind !== 'form') {
+    // The command refused. Say so where this page has always put an answer, and
+    // name what was asked for: the popup is gone, so the answer has to carry it.
+    renderCommand(shape);
+    return;
+  }
+  commandPanel.hidden = true;
+  commandBody.innerHTML = '';
   await refreshFormat();
 }
 
@@ -2359,15 +2761,34 @@ sendMenuButton.onclick = () => {
   if (pickerOpen) closePicker();
   else void openPicker();
 };
+pickerApply.onclick = () => void applyFormat();
 pickerScrim.onclick = () => closePicker();
-pickerSearch.addEventListener('input', () => drawModels(pickerSearch.value));
-// Escape closes: the menu is a popup, and a popup that traps Escape is a dialog
-// nobody asked for.
-document.addEventListener('keydown', (event) => {
-  if (event.key !== 'Escape' || !pickerOpen) return;
-  event.stopPropagation();
-  closePicker();
+pickerSearch.addEventListener('input', () => {
+  drawModels(pickerSearch.value);
+  renderPickerActions();
 });
+// The popup's two keys, in one listener so Escape is never the only thing that
+// reaches the picker.
+//
+// Escape closes: the menu is a popup, and a popup that traps Escape is a dialog
+// nobody asked for. Enter applies, which is the keyboard's version of the one tap
+// a thumb makes — without it staging would have made switching models *slower* for
+// anyone who typed a name, and that is the trade this whole change is about.
+document.addEventListener('keydown', (event) => {
+  if (!pickerOpen) return;
+  if (event.key === 'Escape') {
+    event.stopPropagation();
+    closePicker();
+    return;
+  }
+  if (event.key !== 'Enter' || pickerApply.disabled) return;
+  // A press on the Apply button is its own click; letting it through twice would
+  // send the same `/model` twice.
+  if (event.target === pickerApply || event.target === sendMenuButton) return;
+  event.preventDefault();
+  event.stopPropagation();
+  pickerApply.click();
+}, true);
 /**
  * Re-place the picker when the window changes, rather than closing it.
  *
@@ -2389,279 +2810,12 @@ window.addEventListener('resize', () => {
   placePicker(true);
 });
 
-// --- Artifacts: a drawer over the conversation, hidden until asked for. ---
-//
-// The list comes from this origin (`api/c/<id>/artifacts`), so no CORS. The file
-// itself is framed from the artifact host, which is a *different* origin: it is
-// sandboxed there and cannot read this page's DOM, cookies or storage.
-
-let artifactsBase = '';
-let artifactsOpen = false;
-/** Whether this page pushed the history entry the open document lives in. */
-let artifactsEntryPushed = false;
-
-const artifactsButton = document.getElementById('artifacts-toggle');
-const artifactsPanel = document.getElementById('artifacts');
-const artifactsList = document.getElementById('artifact-list');
-const artifactsFrame = document.getElementById('artifact-frame');
-const artifactsHint = document.getElementById('artifact-hint');
-const artifactsNewTab = document.getElementById('artifacts-newtab');
-const artifactsBack = document.getElementById('artifacts-back');
-const artifactsTitle = document.getElementById('artifacts-title');
-
-/**
- * Where the framed document is fetched from.
- *
- * The drawer always asks for the *source* view, which is the one with numbered
- * lines and the selection script — a rendered Markdown page has no lines to
- * anchor a comment to, and a bare `text/plain` response cannot carry a script at
- * all. `?view=source` is still inert HTML: every byte of the file is escaped into
- * it, and the only script is the one the artifact origin writes with a per-response
- * nonce.
- */
-/**
- * Which view a file opens in.
- *
- * Markdown opens *rendered*, because that is what a person wants to read — and
- * the rendered document is commentable too: it reports the selected text and the
- * session host finds the source lines it came from, so neither side has to know
- * how the other numbered anything. Everything else opens as the source view,
- * where a line number is the obvious unit.
- */
-function artifactUrl(key, markdown) {
-  const path = key.split('/').map(encodeURIComponent).join('/');
-  return artifactsBase + '/c/' + current + '/' + path + (markdown ? '?render' : '?view=source');
-}
-
-/** The last path segment: what the file is actually called. */
-function baseName(key) {
-  const parts = key.split('/');
-  return parts[parts.length - 1] || key;
-}
-
-/** The directory part, which may be empty at the root. */
-function dirName(key) {
-  const parts = key.split('/');
-  parts.pop();
-  return parts.join('/');
-}
-
-/**
- * Frame loads we caused, and loads we have seen.
- *
- * A back gesture can be delivered to the *frame's* own transcript rather than the
- * page's, in which case no `popstate` fires here and the frame simply walks back
- * to `about:blank` — the drawer then showed a file's name over an empty page. A
- * load nobody asked for is that navigation, and the honest response is to treat it
- * as "back to the list", which is what the gesture meant.
- */
-let frameLoadsCaused = 0;
-let frameLoadsSeen = 0;
-
-function loadFrame(url) {
-  frameLoadsCaused += 1;
-  artifactsFrame.src = url;
-}
-
-artifactsFrame.addEventListener('load', () => {
-  frameLoadsSeen += 1;
-  if (frameLoadsSeen <= frameLoadsCaused) return; // one of ours
-  frameLoadsCaused = frameLoadsSeen;
-  if (artifactsOpen && artifactsPanel.classList.contains('showing-doc')) applyListState();
-});
-
-/**
- * Show one document in the drawer.
- *
- * `push` is false when this is a *restore* — the page just loaded with the fragment already naming
- * this file, so the entry exists and pushing another would make one back gesture do nothing.
- */
-function showArtifact(key, markdown, push = true) {
-  for (const li of artifactsList.children) li.classList.toggle('on', li.dataset.key === key);
-  // The document slides over the list and takes the drawer's full width, so a
-  // name-heavy list stops competing with the thing being read.
-  artifactsPanel.classList.add('showing-doc');
-  artifactsTitle.textContent = baseName(key);
-  artifactsTitle.title = key;
-  artifactsBack.hidden = false;
-  artifactsNewTab.hidden = false;
-  // A transcript entry per document, so the browser's own back gesture means what it
-  // looks like it means: close the document, show the list.
-  try {
-    const state = { artifact: key };
-    const address = '#' + encodeURIComponent(key);
-    if (push) history.pushState(state, '', address);
-    else history.replaceState(state, '', address);
-  } catch {
-    // A sandboxed or file: context can refuse either call; the drawer still works.
-  }
-  // Whether this page added the entry. After a reload it did not — the entry was restored from the
-  // address — and one back gesture must not then leave the page entirely.
-  artifactsEntryPushed = push;
-  // Which document the frame holds, for the refresh that must not drop it.
-  artifactsFrame.dataset.key = key;
-  // Markdown is rendered by the artifact host inside its sandboxed document;
-  // everything else is shown as plain text, never as HTML.
-  loadFrame(artifactUrl(key, markdown));
-  closeCommentBar();
-  closeThread();
-  artifactsNewTab.dataset.key = key;
-  artifactsNewTab.dataset.markdown = markdown ? '1' : '';
-}
-
-/** The list state, without touching transcript. */
-function applyListState() {
-  artifactsPanel.classList.remove('showing-doc');
-  artifactsTitle.textContent = 'Artifacts';
-  artifactsTitle.removeAttribute('title');
-  artifactsBack.hidden = true;
-  artifactsNewTab.hidden = true;
-  delete artifactsFrame.dataset.key;
-  artifactsEntryPushed = false;
-  if (artifactsFrame.getAttribute('src') !== 'about:blank') loadFrame('about:blank');
-}
-
-/**
- * Back to the list.
- *
- * Goes through transcript when we own an entry, so the drawer's ← and the browser's
- * back gesture end in the same place.
- */
-function showArtifactList() {
-  // A back gesture only means "close the document" when this page made the entry it would undo.
-  // Otherwise — a reload, a pasted link — going back would leave the conversation.
-  if (artifactsEntryPushed && history.state && history.state.artifact) {
-    history.back();
-    return;
-  }
-  applyListState();
-  try {
-    history.replaceState({}, '', location.pathname);
-  } catch {
-    // Refused in a sandboxed context; the drawer is already showing the list.
-  }
-}
-
-// A back gesture after opening a document lands here.
-window.addEventListener('popstate', () => {
-  if (artifactsOpen) applyListState();
-});
-
-// The fragment is the address of a document, so a change to it is a request to show that document —
-// whether it came from a pasted link, an edited address, or forward/back between two files.
-window.addEventListener('hashchange', () => {
-  const key = artifactKeyFromHash();
-  if (!key) {
-    if (artifactsOpen && artifactsPanel.classList.contains('showing-doc')) applyListState();
-    return;
-  }
-  if (!artifactsOpen || artifactsFrame.dataset.key !== key) void restoreArtifact(key);
-});
-
-/**
- * The artifact the URL fragment names.
- *
- * The fragment is the artifact key — that is what opening a document writes there — so a reload or a
- * pasted link can put the reader back on the file they were reading. Keys contain slashes, so the
- * encode/decode pair is not decoration: `#conversation/1/notes.md` and `#conversation%2F1%2Fnotes.md`
- * are the same file, and only the encoded one survives being copied out of an address bar intact.
- */
-function artifactKeyFromHash() {
-  const raw = location.hash.replace(/^#/, '');
-  if (!raw) return '';
-  try {
-    return decodeURIComponent(raw);
-  } catch {
-    return raw; // not percent-encoded, but still names something
-  }
-}
-
-/**
- * Open the document the URL names.
- *
- * Waits for the environment (the artifact host's address is fetched) and for the list, because a
- * document opens *from* the list: its row is what says whether it renders. A key that is no longer
- * one of this conversation's files leaves the list showing and drops the fragment, so the address bar
- * never claims something the page is not showing.
- */
-async function restoreArtifact(key) {
-  if (!key) return;
-  await artifactsReady;
-  if (artifactsBase === '' || !current) return;
-  await setArtifactsOpen(true);
-  const row = [...artifactsList.children].find((li) => li.dataset.key === key);
-  if (!row) {
-    try {
-      history.replaceState({}, '', location.pathname);
-    } catch {
-      // Same as everywhere else: a refusal costs the address, not the drawer.
-    }
-    return;
-  }
-  showArtifact(key, row.dataset.markdown === '1', false);
-}
-
-/**
- * Rebuild the list.
- *
- * `preserve` is for a refresh the reader did not ask for: it keeps the document
- * they are reading open and restores the highlight, instead of dropping them back
- * to the list every time a turn ends.
- */
-async function loadArtifacts(preserve) {
-  const framed = preserve ? artifactsFrame.dataset.key || '' : '';
-  artifactsList.innerHTML = '';
-  if (!current) return;
-  let rows;
-  try {
-    rows = await (await apiFetch(rel('api/c/' + current + '/artifacts'))).json();
-  } catch {
-    rows = [];
-  }
-  if (!Array.isArray(rows) || rows.length === 0) {
-    artifactsHint.hidden = false;
-    artifactsHint.textContent = 'No files were written or edited in this conversation.';
-    return;
-  }
-  artifactsHint.hidden = rows.length > 0;
-  for (const row of rows) {
-    const li = document.createElement('li');
-    li.dataset.key = row.key;
-    li.dataset.markdown = row.markdown ? '1' : '';
-    li.innerHTML = '<span class="col"><span class="name"></span><span class="dir"></span></span><span class="counts"></span>';
-    // The name first and the directory underneath: a list of full paths is mostly
-    // directory, and the drawer only needs enough to tell two files apart.
-    li.querySelector('.name').textContent = baseName(row.key);
-    li.querySelector('.dir').textContent = dirName(row.key);
-    const counts = [];
-    if (row.wrote) counts.push(row.wrote + (row.wrote === 1 ? ' write' : ' writes'));
-    if (row.edited) counts.push(row.edited + (row.edited === 1 ? ' edit' : ' edits'));
-    li.querySelector('.counts').textContent = counts.join(', ');
-    li.title = row.key;
-    li.onclick = () => showArtifact(row.key, Boolean(row.markdown));
-    artifactsList.append(li);
-  }
-  if (preserve && framed !== '') {
-    // Same document, same place: only the rows are new.
-    for (const li of artifactsList.children) li.classList.toggle('on', li.dataset.key === framed);
-    return;
-  }
-  // Open on the list: choosing is the first act, and the document takes the screen
-  // once chosen.
-  showArtifactList();
-}
-
-async function setArtifactsOpen(open) {
-  artifactsOpen = open;
-  artifactsPanel.hidden = !open;
-  if (open) {
-    void loadComments();
-    await loadArtifacts();
-  } else {
-    applyListState();
-    if (history.state && history.state.artifact) history.replaceState({}, '', location.pathname);
-  }
-}
+// The artifact drawer lives in its own file (`artifacts.js`) and is inlined here
+// when the page is read, so the browser still gets one document. It is kept apart
+// because it is the largest single feature on this page and the one with the most
+// behaviour of its own: a pool of frames, a drag gesture, and the comment layer
+// riding on top of it.
+/* @@include:artifacts.js@@ */
 
 // --- Review comments ---------------------------------------------------------
 //
@@ -2879,8 +3033,12 @@ async function sendComment() {
 
 /** Re-fetch a document so its highlights match the comments that exist now. */
 function reloadFrame() {
-  const src = artifactsFrame.getAttribute('src');
-  if (src && src !== 'about:blank') loadFrame(src);
+  // The one place a *visible* frame is reloaded, and it is deliberate: the document's
+  // highlights must match the comments that exist now, and the only way to re-run the
+  // document's own script is to load it again. It is not on a gesture path, so the
+  // blink it costs is the comment being acknowledged.
+  const src = currentFrame ? currentFrame.getAttribute('src') : '';
+  if (src && src !== 'about:blank') loadFrameIn(currentFrame, src);
 }
 
 async function loadComments() {
@@ -2998,7 +3156,7 @@ async function refreshReview() {
 window.addEventListener('message', (event) => {
   // Identity, not origin: the frame is sandboxed without `allow-same-origin`, so
   // its origin is "null" and an origin check would have to accept everything.
-  if (!artifactsFrame.contentWindow || event.source !== artifactsFrame.contentWindow) return;
+  if (!currentFrame || !currentFrame.contentWindow || event.source !== currentFrame.contentWindow) return;
   const data = event.data;
   if (!data || typeof data !== 'object') return;
   if (data.t === 'pi-artifact-select' && typeof data.file === 'string') {
@@ -3007,6 +3165,21 @@ window.addEventListener('message', (event) => {
     // A touch device: the document drew nothing and sent the selection here instead.
     const picked = data.message && typeof data.message.file === 'string' ? data.message : null;
     showSelectionBar(picked);
+  } else if (data.t === 'pi-artifact-drag') {
+    // The finger is still down: move the pane with it.
+    dragArtifactPane(typeof data.dx === 'number' ? data.dx : 0);
+  } else if (data.t === 'pi-artifact-drag-end') {
+    // It came up somewhere that is not a page turn. Let the pane go home.
+    releaseArtifactPane();
+  } else if (data.t === 'pi-artifact-swipe') {
+    // A horizontal swipe across the document: `direction` is which way the finger
+    // travelled, so "left" means the next artifact arrives from the right. The pane
+    // is already part-way there from the drag, so the step continues from that
+    // offset rather than starting the slide from rest.
+    stepFromFrame(
+      data.direction === 'left' ? 'next' : data.direction === 'right' ? 'previous' : '',
+      data.commit === true,
+    );
   } else if (data.t === 'pi-artifact-open' && typeof data.id === 'string') {
     void openThread(data.id);
   } else if (data.t === 'pi-artifact-clear') {
@@ -3039,7 +3212,18 @@ document.addEventListener('visibilitychange', () => {
     // hidden, which is what a slept laptop leaves behind. Both are worth replacing,
     // and the reconnect is free because the next frame is the whole current state.
     const stale = Date.now() - lastFrameAt > 40_000;
-    if (!source || source.readyState !== 1 || stale) connectStream(current);
+    if (!source || source.readyState !== 1 || stale) {
+      // The replacement catches up on its own `open` — doing it here as well would read history
+      // twice for one return to the tab.
+      connectStream(current);
+      return;
+    }
+    // The stream is open and healthy, and still says nothing about the transcript. A turn that
+    // finished while the tab was hidden leaves it a page behind with an empty live block: the pane
+    // looks current and is not. So coming back to the tab always re-reads history, whether or not
+    // the stream needed replacing — and it is the same `catchUp` a reconnect uses, so there is one
+    // definition of "caught up" rather than two that can drift.
+    void catchUp(current, streamGeneration);
   }
   if (!document.hidden) void refreshReview();
 });
@@ -3071,80 +3255,6 @@ document.getElementById('comment-sheet-close').onclick = () => closeThread();
 document.getElementById('comment-reply-send').onclick = () => void replyInThread();
 document.getElementById('comment-resolve').onclick = () => void resolveComment();
 
-/* How wide the drawer is: a choice, remembered, in pixels. `min(38rem, 45%)` is
-   the starting point until you drag it — a percentage so a narrow window gets a
-   proportional slice rather than a panel wider than the conversation. */
-const ARTIFACTS_WIDTH_KEY = 'pi-artifacts-width';
-const ARTIFACTS_MIN_W = 16 * 16;
-const CONVERSATION_MIN_W = 15 * 16;
-const artifactsResize = document.getElementById('artifacts-resize');
-const workspace = document.getElementById('workspace');
-
-try {
-  const saved = Number(localStorage.getItem(ARTIFACTS_WIDTH_KEY));
-  if (saved > 0) artifactsPanel.style.width = saved + 'px';
-} catch {
-  // Private mode: the default width is fine.
-}
-
-artifactsResize.addEventListener('pointerdown', (event) => {
-  if (event.button !== 0) return;
-  event.preventDefault();
-  artifactsResize.setPointerCapture(event.pointerId);
-  artifactsPanel.classList.add('resizing');
-  document.body.classList.add('resizing');
-  const startX = event.clientX;
-  const startWidth = artifactsPanel.getBoundingClientRect().width;
-  // Leave the conversation something to live in: on a small window a panel that
-  // can eat the whole width is the overlay problem again, by hand.
-  const widest = Math.max(ARTIFACTS_MIN_W, workspace.clientWidth - CONVERSATION_MIN_W);
-  const move = (moveEvent) => {
-    const width = Math.min(widest, Math.max(ARTIFACTS_MIN_W, startWidth - (moveEvent.clientX - startX)));
-    artifactsPanel.style.width = width + 'px';
-  };
-  const end = () => {
-    artifactsPanel.classList.remove('resizing');
-    document.body.classList.remove('resizing');
-    artifactsResize.removeEventListener('pointermove', move);
-    artifactsResize.removeEventListener('pointerup', end);
-    artifactsResize.removeEventListener('pointercancel', end);
-    try {
-      localStorage.setItem(ARTIFACTS_WIDTH_KEY, String(Math.round(artifactsPanel.getBoundingClientRect().width)));
-    } catch {
-      // The width is a convenience; not worth failing over.
-    }
-  };
-  artifactsResize.addEventListener('pointermove', move);
-  artifactsResize.addEventListener('pointerup', end);
-  artifactsResize.addEventListener('pointercancel', end);
-});
-
-artifactsButton.onclick = () => setArtifactsOpen(!artifactsOpen);
-document.getElementById('artifacts-close').onclick = () => setArtifactsOpen(false);
-artifactsBack.onclick = () => showArtifactList();
-artifactsNewTab.onclick = () => {
-  const key = artifactsNewTab.dataset.key;
-  if (key) window.open(artifactUrl(key, artifactsNewTab.dataset.markdown === '1'), '_blank', 'noopener');
-};
-document.addEventListener('keydown', (event) => {
-  if (event.key !== 'Escape' || !artifactsOpen) return;
-  // Escape steps back one screen: document → list → closed.
-  if (artifactsPanel.classList.contains('showing-doc')) showArtifactList();
-  else setArtifactsOpen(false);
-});
-
-// The panel is pointless without an artifact host to point at, so it stays
-// hidden unless the deployment says where that is.
-const artifactsReady = (async () => {
-  try {
-    const environment = await (await apiFetch(rel('api/environment'))).json();
-    artifactsBase = String(environment.artifactsBaseUrl || '').replace(/\/$/, '');
-    artifactsButton.hidden = artifactsBase === '';
-    pageVersion = String(environment.pageVersion || '');
-  } catch {
-    artifactsButton.hidden = true;
-  }
-})();
 
 // --- The index: recent conversations, paged, plus a new chat. ---
 

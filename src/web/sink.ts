@@ -286,8 +286,25 @@ function readAsset(name: string): string {
   throw new Error(`web asset ${name} not found — tried ${failures.join(", ")}`);
 }
 
+/**
+ * The page, with its included parts inlined.
+ *
+ * The page is one document — one script, one cache version, no second request — but
+ * its largest feature does not have to live in one file. A `/* @@include:name@@ *\/`
+ * line in the HTML is replaced by that asset's contents, so `artifacts.js` is edited
+ * and read separately while the browser still receives a single document.
+ *
+ * Inlined at *load*, not at build: this deployment serves `dist/` (JavaScript only)
+ * and the assets from `src/`, so a build step that copied files would be a second
+ * place for them to live and the first one to drift. The cost is one file read per
+ * include per process start, which is nothing next to what the bridge does.
+ */
 function readPage(): string {
-  return readAsset("page.html");
+  const source = readAsset("page.html");
+  // Every include must resolve. A missing one would otherwise leave an inert comment
+  // in the middle of the script — a page that loads and then does nothing, which is
+  // exactly the failure that costs an hour.
+  return source.replace(/\/\* @@include:([\w./-]+)@@ \*\//g, (_match, name: string) => readAsset(name));
 }
 
 /** The page as of process start. */

@@ -21,7 +21,13 @@
 import type { Context } from "@earendil-works/chord";
 import type { AgentChange, ConversationId, UserInput } from "@earendil-works/pi-durable";
 
-import { deriveArtifacts, mergeArtifacts, type ArtifactEntryLike, type ArtifactFile } from "../durable/artifacts.js";
+import {
+  deriveArtifacts,
+  mergeArtifacts,
+  presentArtifacts,
+  type ArtifactEntryLike,
+  type ArtifactFile,
+} from "../durable/artifacts.js";
 import {
   annotate,
   artifactKeyForPath,
@@ -372,7 +378,11 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
         const derived = deriveArtifacts(entries as readonly ArtifactEntryLike[], options.roots);
         // Plus whatever the filesystem saw change during this conversation's
         // turns: `bash` edits leave no path in the transcript to derive from.
-        return mergeArtifacts(derived, await host.observedFiles(conversationId), options.roots);
+        // `presentArtifacts`: a file the transcript names may since have been renamed
+        // or deleted, and offering it is offering a 404.
+        return presentArtifacts(
+          mergeArtifacts(derived, await host.observedFiles(conversationId), options.roots),
+        );
       } finally {
         opened.dispose();
       }

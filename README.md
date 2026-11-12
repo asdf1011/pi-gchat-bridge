@@ -86,7 +86,12 @@ the same conversations are visible at `/web`.
   the `gchat.posted-answers` document, so a queued message can never make the
   same reply appear twice.
 - **pi extensions & skills work** — the session loads your `~/.pi/agent`
-  extensions, so `/commands` and skills behave like in the TUI.
+  extensions, so `/commands` behave like in the TUI. Skills are advertised the
+  same way: the `skills` extension (`durable/extensions/skills.ts`) runs
+  `pi-coding-agent`'s own loader over `~/.pi/agent/skills`, `.pi/skills` and
+  `~/.agents/skills`, then puts each skill's name, description and path in the
+  system prompt. The model reads a `SKILL.md` with the `read` tool it already
+  has — bodies are not in the prompt, so an unused skill costs one line.
 - **Images & text** — pasted (or uploaded) images are downloaded and passed to
   pi as multimodal input, so a vision model can describe what you send. Images
   can arrive with text or on their own (an image-only message is a valid
@@ -117,6 +122,58 @@ the transcript never travels — is in [docs/architecture.md](docs/architecture.
   history if a re-import is ever needed. What remains is `src/durable/smoke.ts`: one real prompt
   through one real model against a scratch database, the only end-to-end check that needs no Chat
   app, no Pub/Sub and no credentials.
+
+### Searching past conversations
+
+```bash
+npm run transcript -- search quantiz                  # words; all of them required
+npm run transcript -- search '"google chat"'          # a phrase
+npm run transcript -- search quantiz --conversation 27202
+npm run transcript -- search sqlite --kind pi.user    # one kind
+npm run transcript -- search quantiz --by-conv        # which conversations are about this
+npm run transcript -- read --conversation 37792       # read a conversation
+npm run transcript -- reindex                         # drop the index and rebuild
+```
+
+`read` takes a conversation id and returns entries from the store — prose only, with
+`--with-tools` and `--with-thinking` to widen it, and `--from <entryId>` to start mid-thread.
+`search` returns matches from the index. The verb is explicit, and `read` requires
+`--conversation`: a bare number would be a guess about what it means.
+
+Hits are one line each: conversation id, timestamp, kind, and a snippet with the match in brackets.
+
+**`--by-conv` answers a different question.** A ranked snippet list says *what was said*; it cannot
+say *where this was discussed*, because one long thread can fill the top ten with its code while the
+conversation actually about the subject sits at eleven. `--by-conv` counts matching entries per
+conversation and sorts by that, which is the query for "which thread was this":
+`21006  381 matches  (114 of them tool output)`. It counts tool results rather than hiding them — a
+conversation whose every match is command output is still where the thing happened, and reporting it
+as a miss would be the opposite of the truth.
+
+**The index is a separate file** — `data/bridge-search.sqlite`, beside the store, never inside it.
+`bridge.sqlite` is owned by exactly one process and rotated with its WAL; a second writer is what
+the lock exists to prevent, so search attaches the store **read-only** and keeps its own derived
+FTS5 table. That makes the index disposable: delete it and the next search rebuilds it.
+
+Catching up is a tail on `entries.id`, so it is incremental and never stale — a search run while
+the bridge is mid-turn sees the snapshot up to the last commit. Roughly 20k entries index in ~4s
+from cold and a query is single-digit milliseconds after that.
+
+**Taking the write lock is conditional, not a flag.** Every search first reads the source's newest
+entry id (~1 ms, read-only). If the index already has it, **no lock is taken at any setting** — that
+is the common case for a repeated search. If something *is* missing, `--max-stale <seconds>` decides
+whether to import now or answer from what is there; `0` (the default) always imports. `--stats` tells
+you which happened, and warns when the answer is stale so "why isn't my new message in the results"
+has a printed answer.
+
+> A staleness promise rather than a mode flag, because a caller should not have to know whether an
+> import is due. And **not** a time range: id order is not time order — adjacent entries do go
+> backwards in time when turns overlap — so "have I ingested up to timestamp T" would silently strand
+> those entries. `entries.id` is monotonic and is the watermark already stored.
+
+It indexes what a person would call the conversation: prompts, replies, thinking, tool call names
+and arguments, and tool output. Tool results are ~39% of all entries and the noisiest part, so they
+are indexed but filtered out unless you ask for them.
 
 ### Model and thinking level
 
@@ -304,13 +361,13 @@ decision for a bridge with shell access.
 | `PUBSUB_SUBSCRIPTION` | — (required) | `projects/.../subscriptions/...` |
 | `PI_CWD` | bridge dir | Working dir for pi tools |
 | `BRIDGE_DB` | `./bridge.sqlite` | The durable store. One process owns it |
+| `TRANSCRIPT_INDEX` | `<store>-search.sqlite` | `transcript` index. Derived data; safe to delete |
 | `BRIDGE_BIND` | `127.0.0.1` | Address the HTTP server binds. Loopback by default; a tunnel or proxy goes in front |
 | `BRIDGE_TRUSTED_PROXY` | — | Address identity headers are trusted from. Empty = trust none, even on loopback |
 | `BRIDGE_WEB_TOKEN` | — | Bearer token for web writes; empty = no check (rely on the proxy) |
 | `BRIDGE_WEB_PORT` | — (required) | Where the web adapter (`dist/web-host.js`) listens. The tunnel's ingress points here, not at `PORT` |
 | `BRIDGE_CHAT_PORT` | — (required) | Where the Chat adapter (`dist/chat-host.js`) listens — **and where `/notify` is served**. `cron/.env` points there. A request to `PORT`/notify answers with this address |
-| `BRIDGE_STATE_FILE` | `./state.json` | Legacy dedupe state — superseded by the store's submission ids |
-| `PORT` | `8080` | Health endpoint (0 disables) |
+| `BRIDGE_STATE_FILE` | `./state.json` | Legacy dedupe state — superseded by the store's submission ids || `PORT` | `8080` | Health endpoint (0 disables) |
 | `ALLOWED_SPACES` | — | Comma-separated spaces (name or ID) the bridge responds in; empty = all |
 | `ALLOWED_USERS` | — | Comma-separated users (name or ID) allowed to trigger pi, including card clicks; empty = anyone |
 | `SECRET_USERS` | — | Comma-separated users allowed to use `/secret`; empty = same as `ALLOWED_USERS` |

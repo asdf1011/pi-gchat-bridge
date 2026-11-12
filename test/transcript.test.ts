@@ -1,0 +1,551 @@
+/**
+ * The search CLI.
+ *
+ * Two properties carry the weight, and both are about not being a liability next to a store that
+ * exactly one process owns: the index is derived data in its own file (so deleting it is always
+ * safe), and catching it up is a tail on `entries.id` (so "stale" is not a state that exists).
+ *
+ * The rest is the query grammar, which is where a person and FTS5 disagree: a hyphen is `NOT` to
+ * FTS5 and a hyphen to the person, and an unbalanced quote is a hard error rather than a search.
+ */
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import { DatabaseSync } from "node:sqlite";
+
+import {
+  catchUp,
+  countByConversation,
+  defaultIndexPath,
+  flattenRecord,
+  runCli,
+  search,
+  toFtsQuery,
+} from "../src/scripts/transcript.js";
+
+const STORE_SCHEMA = `
+  CREATE TABLE entries (
+    id INTEGER PRIMARY KEY,
+    conversation_id INTEGER NOT NULL,
+    head INTEGER,
+    commit_seq INTEGER NOT NULL,
+    record TEXT NOT NULL
+  );
+`;
+
+/** One entry record, in the shape the store actually writes. */
+function record(kind: string, content: unknown, timestamp = 1_700_000_000_000): string {
+  return JSON.stringify({ kind, model: [{ role: "assistant", content, timestamp }] });
+}
+
+function textRecord(kind: string, text: string, timestamp?: number): string {
+  return record(kind, [{ type: "text", text }], timestamp);
+}
+
+/**
+ * A store with a handful of entries, and a counter so a test can append more and watch the tail.
+ * Built as a real SQLite file rather than a mock: the thing under test *is* SQL, and a mock would
+ * only prove that the mock works.
+ */
+function makeStore(entries: [kind: string, content: unknown][]): {
+  dir: string;
+  storePath: string;
+  append(kind: string, content: unknown): number;
+} {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "transcript-search-"));
+  const storePath = path.join(dir, "store.sqlite");
+  const db = new DatabaseSync(storePath);
+  db.exec(STORE_SCHEMA);
+  const insert = db.prepare(
+    "INSERT INTO entries (conversation_id, commit_seq, record) VALUES (?, ?, ?)",
+  );
+  for (const [kind, content] of entries) {
+    const info = insert.run(1, 1, record(kind, content));
+    void info;
+  }
+  const nextId = () => (db.prepare("SELECT max(id) AS id FROM entries").get() as { id: number | null }).id ?? 0;
+  return {
+    dir,
+    storePath,
+    append(kind, content) {
+      insert.run(1, 1, record(kind, content));
+      return nextId();
+    },
+  };
+}
+
+function lines(): { out: string[]; err: string[]; deps: { out(l: string): void; err(l: string): void } } {
+  const out: string[] = [];
+  const err: string[] = [];
+  return {
+    out,
+    err,
+    deps: {
+      out: (line: string) => out.push(line),
+      err: (line: string) => err.push(line),
+    },
+  };
+}
+
+// --- flattening -------------------------------------------------------------------------------
+
+test("flattenRecord keeps what was said and drops the envelope", () => {
+  const text = flattenRecord(
+    JSON.stringify({
+      kind: "pi.assistant",
+      model: [
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "consider the FTS index" },
+            { type: "text", text: "the answer is 42" },
+            { type: "toolCall", name: "bash", arguments: { command: "ls -la" } },
+          ],
+        },
+      ],
+    }),
+  );
+  assert.match(text, /consider the FTS index/);
+  assert.match(text, /the answer is 42/);
+  assert.match(text, /bash/);
+  assert.match(text, /ls -la/);
+  assert.ok(!text.includes("pi.assistant"), "the kind is a column, not text");
+});
+
+test("flattenRecord accepts a string content and an empty one", () => {
+  assert.equal(flattenRecord(record("pi.user", "just words")), "just words");
+  assert.equal(flattenRecord(record("pi.user", "")), "");
+  assert.equal(flattenRecord(record("pi.system", [])), "");
+});
+
+test("flattenRecord returns nothing for a record it cannot parse, rather than throwing", () => {
+  // A store that contains one bad row should not make search unusable.
+  assert.equal(flattenRecord("{not json"), "");
+  assert.equal(flattenRecord(JSON.stringify({ kind: "pi.user" })), "");
+  assert.equal(flattenRecord(JSON.stringify({ kind: "pi.user", model: "no" })), "");
+});
+
+// --- query grammar ----------------------------------------------------------------------------
+
+test("a hyphen is a word, not a NOT operator", () => {
+  // Raw FTS5 reads `pi-durable` as `pi NOT durable` and quietly returns the wrong rows.
+  assert.equal(toFtsQuery("pi-durable"), '"pi-durable"');
+});
+
+test("terms are all required, and a phrase stays a phrase", () => {
+  assert.equal(toFtsQuery("alpha beta"), '"alpha" AND "beta"');
+  assert.equal(toFtsQuery('"google chat"'), '"google chat"');
+  assert.equal(toFtsQuery('"google chat" sqlite'), '"google chat" AND "sqlite"');
+});
+
+test("a trailing star is a prefix search, outside the quotes", () => {
+  assert.equal(toFtsQuery("quantiz*"), '"quantiz"*');
+});
+
+test("FTS operators and stray quotes cannot reach the grammar as syntax", () => {
+  assert.equal(toFtsQuery("AND"), '"AND"');
+  assert.equal(toFtsQuery("NEAR(a b)"), '"NEAR(a" AND "b)"');
+  assert.equal(toFtsQuery('say "hi'), '"say" AND """hi"', 'a stray quote is escaped, not left to break the grammar');
+  assert.equal(toFtsQuery("   "), "");
+  assert.equal(toFtsQuery("*"), "");
+});
+
+// --- indexing ---------------------------------------------------------------------------------
+
+test("catchUp indexes only what is new, and advances the watermark even over unsearchable rows", () => {
+  const store = makeStore([
+    ["pi.user", "first question"],
+    ["pi.system", ""], // nothing to search, but it still has an id
+  ]);
+  const db = new DatabaseSync(store.storePath, { readOnly: true });
+  // A fresh index, not one `search` has already caught up.
+  const index = new DatabaseSync(defaultIndexPath(store.storePath));
+  index.exec(`
+    CREATE TABLE meta (key TEXT PRIMARY KEY, value ANY) STRICT;
+    CREATE VIRTUAL TABLE transcript USING fts5(
+      text, entry_id UNINDEXED, conversation_id UNINDEXED, kind UNINDEXED, at UNINDEXED,
+      tokenize = 'unicode61'
+    );
+  `);
+
+  const first = catchUp(db, index);
+  assert.deepEqual([first.indexed, first.examined], [1, 2], "the empty entry is examined once");
+  assert.equal(first.highWaterMark, 2);
+
+  const again = catchUp(db, index);
+  assert.deepEqual([again.indexed, again.examined], [0, 0], "nothing re-reads");
+  assert.equal(again.highWaterMark, 2);
+
+  const id = store.append("pi.assistant", [{ type: "text", text: "an answer about quantisation" }]);
+  const third = catchUp(db, index);
+  assert.deepEqual([third.indexed, third.examined], [1, 1], "only the new entry");
+  assert.equal(third.highWaterMark, id);
+
+  index.close();
+  db.close();
+});
+
+test("delete the index and the next search rebuilds it — nothing depends on it existing", () => {
+  const store = makeStore([["pi.user", "the durable store is sqlite"]]);
+  const first = search({ storePath: store.storePath }, { query: "durable" });
+  assert.equal(first.hits.length, 1);
+
+  const indexPath = defaultIndexPath(store.storePath);
+  fs.rmSync(indexPath, { force: true });
+  fs.rmSync(`${indexPath}-wal`, { force: true });
+  fs.rmSync(`${indexPath}-shm`, { force: true });
+
+  const rebuilt = search({ storePath: store.storePath }, { query: "durable" });
+  assert.equal(rebuilt.hits.length, 1);
+  assert.equal(rebuilt.stats.indexed, 1, "rebuilt from scratch, not from a remembered watermark");
+});
+
+test("the index lives beside the store, not inside it", () => {
+  // The store is owned by exactly one process; a search writing to it would be the bug the lock
+  // exists to prevent. The index is a sibling file for that reason.
+  const store = makeStore([["pi.user", "hello"]]);
+  const before = fs.statSync(store.storePath).size;
+  search({ storePath: store.storePath }, { query: "hello" });
+  assert.equal(fs.statSync(store.storePath).size, before, "the store is unchanged");
+  assert.ok(fs.existsSync(defaultIndexPath(store.storePath)));
+});
+
+// --- searching --------------------------------------------------------------------------------
+
+test("tool results are indexed but kept out of an unfiltered search", () => {
+  const store = makeStore([
+    ["pi.assistant", [{ type: "text", text: "the answer mentions quantisation" }]],
+    ["pi.tool-result", [{ type: "text", text: "quantisation output from a command" }]],
+  ]);
+
+  const defaultHits = search({ storePath: store.storePath }, { query: "quantisation" });
+  assert.deepEqual(defaultHits.hits.map((hit) => hit.kind), ["pi.assistant"]);
+
+  const all = search({ storePath: store.storePath }, { query: "quantisation", kinds: ["pi.tool-result", "pi.assistant"] });
+  assert.equal(all.hits.length, 2, "--all / --kind reaches them when asked for");
+
+  const only = search({ storePath: store.storePath }, { query: "quantisation", kinds: ["pi.tool-result"] });
+  assert.deepEqual(only.hits.map((hit) => hit.kind), ["pi.tool-result"]);
+});
+
+test("a single common term is still a search, not a fallback to nothing", () => {
+  // Regression: `MATCH x` and `MATCH (x)` are the same query, and with one term the shorter plan
+  // is what SQLite needs to be allowed to pick.
+  const store = makeStore([
+    ["pi.user", "sqlite is everywhere"],
+    ["pi.user", "another sqlite mention"],
+  ]);
+  const { hits } = search({ storePath: store.storePath }, { query: "sqlite" });
+  assert.equal(hits.length, 2);
+});
+
+test("hits carry a snippet with the match marked, newest first on a tie", () => {
+  const store = makeStore([
+    ["pi.user", "a question about the ledger"],
+    ["pi.user", "an answer about the ledger"],
+  ]);
+  const { hits } = search({ storePath: store.storePath }, { query: "ledger" });
+  assert.equal(hits.length, 2);
+  assert.match(hits[0]!.snippet, /\[ledger\]/, "the match is bracketed for the terminal");
+  assert.equal(hits[0]!.entryId > hits[1]!.entryId, true, "ties break toward the newest");
+});
+
+test("search finds text appended since the index was built", () => {
+  const store = makeStore([["pi.user", "before"]]);
+  assert.equal(search({ storePath: store.storePath }, { query: "after" }).hits.length, 0);
+  store.append("pi.user", [{ type: "text", text: "the word after" }]);
+  assert.equal(search({ storePath: store.storePath }, { query: "after" }).hits.length, 1);
+});
+
+test("a missing store is an error with a name, not a crash", () => {
+  assert.throws(
+    () => search({ storePath: "/nonexistent/store.sqlite" }, { query: "anything" }),
+    /no store at/,
+  );
+});
+
+// --- the command line -------------------------------------------------------------------------
+
+test("cli prints hits and exits 0, and says so when there are none", () => {
+  const store = makeStore([["pi.user", "a memorable phrase"]]);
+
+  const found = lines();
+  assert.equal(runCli(["search", "memorable"], { storePath: store.storePath, ...found.deps }), 0);
+  assert.equal(found.out.length, 1);
+  assert.match(found.out[0]!, /memorable/);
+
+  const none = lines();
+  assert.equal(runCli(["search", "absent"], { storePath: store.storePath, ...none.deps }), 0);
+  assert.match(none.out[0]!, /no matches/);
+});
+
+test("cli rejects a bad option rather than searching for it", () => {
+  const store = makeStore([["pi.user", "x"]]);
+  const { out, err, deps } = lines();
+  assert.equal(runCli(["search", "--nope", "x"], { storePath: store.storePath, ...deps }), 2);
+  assert.match(err.join("\n"), /unknown option/);
+  assert.ok(out.length > 0, "usage, so the person sees the options");
+});
+
+test("cli with no query prints usage and exits 2", () => {
+  const store = makeStore([]);
+  const { out, deps } = lines();
+  assert.equal(runCli([], { storePath: store.storePath, ...deps }), 2);
+  assert.match(out.join("\n"), /usage: transcript /);
+});
+
+test("cli --conversation and --kind narrow the same way the API does", () => {
+  const store = makeStore([
+    ["pi.user", "ledger one"],
+    ["pi.tool-result", "ledger two"],
+  ]);
+  const scoped = lines();
+  runCli(["search", "ledger", "--kind", "pi.user"], { storePath: store.storePath, ...scoped.deps });
+  assert.equal(scoped.out.length, 1, "tool results stay out unless asked for");
+  assert.match(scoped.out[0]!, /^ +1 /, "conversation id leads the line");
+});
+
+test("cli --reindex rebuilds and reports what it did", () => {
+  const store = makeStore([["pi.user", "one"], ["pi.user", "two"]]);
+  search({ storePath: store.storePath }, { query: "one" }); // creates the index
+  const { out, deps } = lines();
+  assert.equal(runCli(["reindex"], { storePath: store.storePath, ...deps }), 0);
+  assert.match(out.join("\n"), /reindexed 2 entries/);
+});
+
+// --- counting per conversation -----------------------------------------------------------------
+
+test("countByConversation ranks by how much a thread is about the query", () => {
+  // The reason the mode exists: a ranked snippet list says "what was said", not "where". One
+  // conversation with a lot of matches should lead, and `--by-conv` says so directly.
+  const store = makeStore([["pi.user", "ledger once"]]);
+  // A second conversation that discusses it across several turns. The count is of matching
+  // *entries*, not word occurrences — the unit a thread is actually about something in.
+  const db = new DatabaseSync(store.storePath);
+  const insert = db.prepare(
+    "INSERT INTO entries (conversation_id, commit_seq, record) VALUES (?, ?, ?)",
+  );
+  for (const text of ["ledger opening", "ledger again", "ledger settled"]) {
+    insert.run(7, 1, record("pi.user", text));
+  }
+  db.close();
+
+  const { conversations } = countByConversation({ storePath: store.storePath }, { query: "ledger" });
+  assert.equal(conversations.length, 2);
+  assert.equal(conversations[0]!.conversationId, 7, "the thread mostly about ledgers leads");
+  assert.equal(conversations[0]!.matches, 3, "matching entries, not word occurrences");
+  assert.equal(conversations[1]!.conversationId, 1);
+  assert.equal(conversations[1]!.matches, 1);
+});
+
+test("countByConversation counts tool results instead of hiding the thread", () => {
+  // A conversation whose only matches are command output is still the conversation where the
+  // thing happened. Filtering it out would answer "never discussed" — the opposite of the truth.
+  const store = makeStore([
+    ["pi.tool-result", "ledger output from a command"],
+    ["pi.tool-result", "more ledger output"],
+  ]);
+  const { conversations } = countByConversation({ storePath: store.storePath }, { query: "ledger" });
+  assert.equal(conversations.length, 1);
+  assert.equal(conversations[0]!.matches, 2);
+  assert.equal(conversations[0]!.toolResults, 2, "the caller can say how much is hidden");
+
+  const plain = search({ storePath: store.storePath }, { query: "ledger" });
+  assert.equal(plain.hits.length, 0, "and a plain search still shows none of it");
+});
+
+test("countByConversation on a common single term is a count, not a miss", () => {
+  // Same plan hazard as `search`: one term, many rows.
+  const store = makeStore([
+    ["pi.user", "sqlite here"],
+    ["pi.user", "sqlite there"],
+  ]);
+  const { conversations } = countByConversation({ storePath: store.storePath }, { query: "sqlite" });
+  assert.equal(conversations.length, 1);
+  assert.equal(conversations[0]!.matches, 2);
+});
+
+test("cli --by-conv prints one line per conversation, newest first on a tie", () => {
+  const store = makeStore([
+    ["pi.user", "ledger in the durable store"],
+    ["pi.user", "a second ledger mention"],
+  ]);
+  const { out, deps } = lines();
+  assert.equal(runCli(["search", "ledger", "--by-conv"], { storePath: store.storePath, ...deps }), 0);
+  assert.equal(out.length, 1);
+  assert.match(out[0]!, /^ +1 /, "conversation id leads");
+  assert.match(out[0]!, /2 matches/);
+});
+
+test("cli --by-conv says when a thread's matches are all tool output", () => {
+  const store = makeStore([["pi.tool-result", "ledger output"]]);
+  const { out, deps } = lines();
+  runCli(["search", "ledger", "--by-conv"], { storePath: store.storePath, ...deps });
+  assert.match(out[0]!, /all tool output/, "so a hit is not mistaken for a thread with no matches");
+});
+
+test("cli --by-conv with nothing matching says so and exits 0", () => {
+  const store = makeStore([["pi.user", "unrelated words"]]);
+  const { out, deps } = lines();
+  assert.equal(runCli(["search", "absent", "--by-conv"], { storePath: store.storePath, ...deps }), 0);
+  assert.match(out[0]!, /no matches/);
+});
+
+// --- freshness ----------------------------------------------------------------------------------
+
+test("an index already at the source's newest entry takes no writer lock, at any staleness", () => {
+  // The common case for a repeated search: nothing to import, so nothing to write. This is the
+  // probe that makes a write lock unnecessary rather than merely optional.
+  const store = makeStore([["pi.user", "the ledger entry"]]);
+  search({ storePath: store.storePath }, { query: "ledger" }); // builds and catches up
+
+  for (const maxStalenessSeconds of [0, 5, 3600]) {
+    const stats = search({ storePath: store.storePath }, { query: "ledger", maxStalenessSeconds }).stats;
+    assert.equal(stats.indexed, 0, `nothing imported at maxStalenessSeconds=${maxStalenessSeconds}`);
+    assert.equal(stats.examined, 0);
+    assert.equal(stats.stale, false);
+  }
+});
+
+test("maxStalenessSeconds defers a required import, and says the answer is stale", () => {
+  const store = makeStore([["pi.user", "first ledger mention"]]);
+  search({ storePath: store.storePath }, { query: "ledger" });
+  store.append("pi.user", [{ type: "text", text: "second ledger mention" }]);
+
+  const stale = search({ storePath: store.storePath }, { query: "ledger", maxStalenessSeconds: 300 });
+  assert.equal(stale.hits.length, 1, "the new entry is deferred, not imported");
+  assert.equal(stale.stats.indexed, 0);
+  assert.equal(stale.stats.stale, true, "and the caller is told, rather than guessing");
+});
+
+test("maxStalenessSeconds 0 imports immediately, even though the index was just written", () => {
+  // The default must never silently return an old answer: a person at a terminal just wrote
+  // something and expects to find it.
+  const store = makeStore([["pi.user", "first ledger mention"]]);
+  search({ storePath: store.storePath }, { query: "ledger" });
+  store.append("pi.user", [{ type: "text", text: "second ledger mention" }]);
+
+  const fresh = search({ storePath: store.storePath }, { query: "ledger", maxStalenessSeconds: 0 });
+  assert.equal(fresh.hits.length, 2);
+  assert.equal(fresh.stats.stale, false);
+});
+
+test("staleness is measured from the last import, not from the last search", () => {
+  const store = makeStore([["pi.user", "a ledger mention"]]);
+  search({ storePath: store.storePath }, { query: "ledger" }); // sets imported_at
+  const first = search({ storePath: store.storePath }, { query: "ledger" }).stats;
+  assert.ok((first.ageMs ?? 0) >= 0, "an import just happened, so the age exists and is small");
+  assert.ok((first.ageMs ?? 0) < 60_000);
+});
+
+test("two concurrent reads both succeed instead of one failing with SQLITE_BUSY", () => {
+  // The bug this fixes: `PRAGMA busy_timeout` defaults to zero, so the loser of a race got
+  // `database is locked` — which reads as "no results" to anything only looking at stdout.
+  const store = makeStore([["pi.user", "a race between readers"]]);
+  search({ storePath: store.storePath }, { query: "race" }); // create the index first
+  const results = Array.from({ length: 4 }, () =>
+    search({ storePath: store.storePath }, { query: "race" }),
+  );
+  for (const result of results) assert.equal(result.hits.length, 1);
+});
+
+test("cli --stats reports freshness, and warns when the answer is stale", () => {
+  const store = makeStore([["pi.user", "ledger"]]);
+  search({ storePath: store.storePath }, { query: "ledger" });
+  store.append("pi.user", [{ type: "text", text: "a later ledger" }]);
+
+  const stale = lines();
+  runCli(["search", "ledger", "--max-stale", "300", "--stats"], { storePath: store.storePath, ...stale.deps });
+  assert.match(stale.err.join("\n"), /STALE/);
+  assert.match(stale.err.join("\n"), /--max-stale 0/, "and tells the reader how to fix it");
+
+  const fresh = lines();
+  runCli(["search", "ledger", "--stats"], { storePath: store.storePath, ...fresh.deps });
+  assert.doesNotMatch(fresh.err.join("\n"), /STALE/);
+  assert.match(fresh.err.join("\n"), /good up to entry/);
+});
+
+test("cli rejects a --max-stale that is not a number of seconds", () => {
+  const store = makeStore([["pi.user", "x"]]);
+  const { err, deps } = lines();
+  assert.equal(runCli(["search", "x", "--max-stale", "soon"], { storePath: store.storePath, ...deps }), 2);
+  assert.match(err.join("\n"), /--max-stale needs a number/);
+  assert.equal(runCli(["search", "x", "--max-stale", "-5"], { storePath: store.storePath, ...deps }), 2);
+});
+
+// --- the command surface ------------------------------------------------------------------------
+
+test("read requires --conversation, because a bare number does not say what it is", () => {
+  const store = makeStore([["pi.user", "hello"]]);
+  const { out, err, deps } = lines();
+  assert.equal(runCli(["read"], { storePath: store.storePath, ...deps }), 2);
+  assert.match(err.join("\n"), /read needs --conversation/);
+  assert.match(out.join("\n"), /usage: transcript/);
+});
+
+test("read defaults to prose: no tool results, no thinking", () => {
+  const store = makeStore([
+    ["pi.user", "the question"],
+    ["pi.assistant", [{ type: "thinking", thinking: "a private consideration" }, { type: "text", text: "the answer" }]],
+    ["pi.tool-result", [{ type: "text", text: "command output" }]],
+  ]);
+  const { out, deps } = lines();
+  const printed = runCli(["read", "--conversation", "1"], { storePath: store.storePath, ...deps });
+  const text = out.join("\n");
+  assert.equal(printed, 0);
+  assert.match(text, /the question/);
+  assert.match(text, /the answer/);
+  assert.doesNotMatch(text, /command output/, "tool results are not conversation by default");
+  assert.doesNotMatch(text, /private consideration/, "thinking is not shown by default");
+});
+
+test("read --with-tools and --with-thinking widen it, one at a time", () => {
+  const store = makeStore([
+    ["pi.assistant", [{ type: "thinking", thinking: "a private consideration" }, { type: "text", text: "the answer" }]],
+    ["pi.tool-result", [{ type: "text", text: "command output" }]],
+  ]);
+
+  const tools = lines();
+  runCli(["read", "--conversation", "1", "--with-tools"], { storePath: store.storePath, ...tools.deps });
+  assert.match(tools.out.join("\n"), /command output/);
+  assert.doesNotMatch(tools.out.join("\n"), /private consideration/);
+
+  const thinking = lines();
+  runCli(["read", "--conversation", "1", "--with-thinking"], { storePath: store.storePath, ...thinking.deps });
+  assert.match(thinking.out.join("\n"), /private consideration/);
+  assert.doesNotMatch(thinking.out.join("\n"), /command output/);
+});
+
+test("read --from starts at an entry, and read reports an empty conversation", () => {
+  const store = makeStore([
+    ["pi.user", "first"],
+    ["pi.user", "second"],
+    ["pi.user", "third"],
+  ]);
+  const { out, deps } = lines();
+  runCli(["read", "--conversation", "1", "--from", "2"], { storePath: store.storePath, ...deps });
+  const text = out.join("\n");
+  assert.doesNotMatch(text, /first/);
+  assert.match(text, /second/);
+  assert.match(text, /third/);
+
+  const empty = lines();
+  assert.equal(runCli(["read", "--conversation", "999"], { storePath: store.storePath, ...empty.deps }), 0);
+  assert.match(empty.out.join("\n"), /no entries in conversation 999/);
+});
+
+test("an unknown command is refused rather than treated as a query", () => {
+  const store = makeStore([["pi.user", "x"]]);
+  const { err, deps } = lines();
+  assert.equal(runCli(["serch", "ledger"], { storePath: store.storePath, ...deps }), 2);
+  assert.match(err.join("\n"), /unknown command/);
+});
+
+test("read rejects the search-only flags rather than ignoring them", () => {
+  const store = makeStore([["pi.user", "x"]]);
+  const { err, deps } = lines();
+  assert.equal(runCli(["read", "--conversation", "1", "--max-stale", "5"], { storePath: store.storePath, ...deps }), 2);
+  assert.match(err.join("\n"), /unknown option --max-stale/);
+});

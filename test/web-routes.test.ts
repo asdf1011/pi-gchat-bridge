@@ -63,7 +63,7 @@ function fakeSeam(options: FakeSeamOptions = {}): SessionHost {
       return { snapshot: view, detach() {} };
     },
     artifacts: async (id: number) => (id === 1 ? (options.artifacts ?? []) : undefined),
-    submit: async (id: number, request: { content: unknown }) => {
+    submit: async (id: number, request: { content: unknown; origin?: string }) => {
       submitted.push(request.content);
       return id === 1 ? { submissionId: 7 } : { error: `no such conversation: ${id}` };
     },
@@ -128,6 +128,29 @@ test("the root and a conversation URL both serve the page", async () => {
     // answer at "/api/..." and at "/web/api/..." depending on where it is mounted.
     assert.equal(apiPath("/api/conversations"), "/api/conversations");
     assert.equal(apiPath("/pi/web/api/c/7/history"), "/api/c/7/history");
+  } finally {
+    await served.close();
+  }
+});
+
+test("the page is served with its included parts inlined, not as a comment", async () => {
+  // The drawer lives in `src/web/artifacts.js` and is substituted into `page.html` at
+  // load, so the browser still gets one document. A missing include would leave an
+  // inert comment where the drawer's script used to be — a page that loads, renders
+  // and then silently does nothing, which is the worst kind of failure to diagnose.
+  const served = await serve(fakeSeam());
+  try {
+    const html = await (await fetch(`${served.base}/web/`)).text();
+
+    // No marker survives into the response.
+    assert.doesNotMatch(html, /@@include/, "an include was not substituted");
+
+    // And the drawer's code really is in there, not merely absent from a comment.
+    assert.match(html, /function commitArtifactStep/, "the drawer's stepping is inlined");
+    assert.match(html, /const FRAME_POOL_LIMIT/, "the frame pool is inlined");
+    // The parts that stayed in the page are still there too, either side of the join.
+    assert.match(html, /function frameFor/, "the part before the include survived");
+    assert.match(html, /const PAGE_SIZE = 30/, "the part after the include survived");
   } finally {
     await served.close();
   }
@@ -269,6 +292,47 @@ test("history arrives rendered, and the rendering cannot carry a script", async 
     // this into innerHTML, and this origin can submit messages.
     assert.ok(!rows[1].html.includes("<img"), rows[1].html);
     assert.match(rows[1].html, /&lt;img/);
+  } finally {
+    await served.close();
+  }
+});
+
+test("the live state is available as one answer, for a page that reconnects", async () => {
+  // A stream's frames are deltas, so a page that has just reconnected can be holding an empty live
+  // block while a turn is running — nothing changed since the last frame it saw, so no frame comes.
+  // This is the question it asks instead, and it has to answer in the shape a `text` frame carries,
+  // rendered the same way, or the page would need a second renderer.
+  const busyView: ProjectedView = {
+    liveText: "Checking the lock — `hold` is **stale**. <script>alert(1)</script>",
+    turnText: "First I read the config.",
+    busy: true,
+    lastAssistantText: "",
+    tools: [],
+  };
+  const seam = { ...fakeSeam(), snapshot: async (id: number) => (id === 1 ? busyView : undefined) } as unknown as SessionHost;
+  const served = await serve(seam);
+  try {
+    const body = (await (await fetch(`${served.base}/web/api/c/1/events/state`)).json()) as {
+      text: string;
+      turn?: string;
+      turnHtml?: string;
+      html: string;
+      busy: boolean;
+    };
+    assert.equal(body.text, busyView.liveText);
+    assert.equal(body.turn, "First I read the config.");
+    assert.equal(body.busy, true);
+    // Both halves rendered server-side, and neither can carry a script.
+    assert.match(body.html, /<strong>stale<\/strong>/);
+    assert.ok(!body.html.includes("<script"), body.html);
+    assert.match(body.turnHtml ?? "", /<p>First I read the config.<\/p>/);
+
+    // An idle conversation answers with an empty view rather than nothing: the page applies this to
+    // *clear* a stale live block, which is the case the whole route exists for.
+    const idle = (await (await fetch(`${served.base}/web/api/c/1/events/state`)).json()) as { text: string };
+    assert.equal(typeof idle.text, "string");
+
+    assert.equal((await fetch(`${served.base}/web/api/c/999/events/state`)).status, 404);
   } finally {
     await served.close();
   }

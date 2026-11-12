@@ -19,7 +19,13 @@ import { createRequire } from "node:module";
 
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
-import { artifactRoots, deriveArtifacts, mergeArtifacts, type ArtifactEntryLike } from "../durable/artifacts.js";
+import {
+  artifactRoots,
+  deriveArtifacts,
+  mergeArtifacts,
+  presentArtifacts,
+  type ArtifactEntryLike,
+} from "../durable/artifacts.js";
 import type { ObservedFile } from "../durable/observed-files.js";
 
 interface Prepared {
@@ -100,7 +106,9 @@ try {
   const observed = observedByConversation();
   const results = ids.map((id) => ({
     conversationId: id,
-    artifacts: mergeArtifacts(deriveArtifacts(entriesOf(id), roots), observed.get(id), roots),
+    artifacts: presentArtifacts(
+      mergeArtifacts(deriveArtifacts(entriesOf(id), roots), observed.get(id), roots),
+    ),
   }));
 
   if (asJson) {

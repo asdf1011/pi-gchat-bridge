@@ -188,6 +188,22 @@ export interface ResolvedComment extends ArtifactComment {
 
 /** Run jj in `dir`, resolving to stdout. Rejects on non-zero exit or timeout. */
 function jj(dir: string, args: readonly string[]): Promise<string> {
+  return jjRaw(dir, args, "utf8") as Promise<string>;
+}
+
+/**
+ * Run jj and resolve to its stdout as bytes.
+ *
+ * Only `file show` needs this, and only for images: stdout is decoded as UTF-8
+ * everywhere else, which is right for source and lossy for a PNG. `maxBuffer` is
+ * the same in both modes, so the cap on what one revision may return does not
+ * depend on which reader asked.
+ */
+function jjBytes(dir: string, args: readonly string[]): Promise<Buffer> {
+  return jjRaw(dir, args, "buffer") as Promise<Buffer>;
+}
+
+function jjRaw(dir: string, args: readonly string[], encoding: "utf8" | "buffer"): Promise<string | Buffer> {
   return new Promise((resolve, reject) => {
     execFile(
       "jj",
@@ -196,6 +212,7 @@ function jj(dir: string, args: readonly string[]): Promise<string> {
         cwd: dir,
         timeout: JJ_TIMEOUT_MS,
         maxBuffer: 8 * 1024 * 1024,
+        encoding,
         // jj opens an editor for anything that wants a description; there is no
         // terminal here to answer it. `-m` covers describe/new, this covers the
         // rest.
@@ -203,7 +220,7 @@ function jj(dir: string, args: readonly string[]): Promise<string> {
       },
       (error, stdout, stderr) => {
         if (error) {
-          reject(new Error(`jj ${args.join(" ")}: ${stderr.trim() || error.message}`));
+          reject(new Error(`jj ${args.join(" ")}: ${String(stderr).trim() || error.message}`));
           return;
         }
         resolve(stdout);
@@ -487,6 +504,17 @@ export async function revisionDiff(
  */
 export async function showFile(dir: string, revision: string, file: string): Promise<string> {
   return jj(dir, ["file", "show", "--ignore-working-copy", "-r", revision, file]);
+}
+
+/**
+ * One file at a revision, as bytes.
+ *
+ * The companion to `showFile` for content that is not text. A picture read as a
+ * string and written back is not the picture: every byte that is not valid UTF-8
+ * comes back as U+FFFD, and the browser draws a broken image.
+ */
+export async function showFileBytes(dir: string, revision: string, file: string): Promise<Buffer> {
+  return jjBytes(dir, ["file", "show", "--ignore-working-copy", "-r", revision, file]);
 }
 
 /**

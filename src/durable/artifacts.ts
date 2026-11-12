@@ -23,7 +23,7 @@
  * becomes two artifacts and the viewer opens whichever spelling it happened to
  * index last.
  */
-import fs from "node:fs";
+import fs, { existsSync } from "node:fs";
 import path from "node:path";
 
 import type { ObservedFile } from "./observed-files.js";
@@ -235,6 +235,23 @@ export function mergeArtifacts(
   return [...merged.values()].sort((a, b) => a.key.localeCompare(b.key));
 }
 
+/**
+ * Only the artifacts that are still on disk.
+ *
+ * The transcript records what *happened* to a file, so one that was written and then
+ * renamed or deleted stays listed for ever. Everything upstream is a record and is
+ * right to keep it; the *view* is not, because the list is the allow-list and an entry
+ * in it has to be readable. Left in, a renamed screenshot was offered, opened, and
+ * answered `unreadable: …` — a link to a 404.
+ *
+ * Kept apart from `mergeArtifacts` so that function stays pure: it is a join of two
+ * ledgers, and a filesystem probe inside it made it untestable with fixtures and made
+ * every caller pay for a `stat` it might not want.
+ */
+export function presentArtifacts(files: readonly ArtifactFile[]): ArtifactFile[] {
+  return files.filter((file) => existsSync(file.path));
+}
+
 export interface ReadArtifactOptions {
   /** Bytes to read at most. Defaults to `DEFAULT_MAX_ARTIFACT_BYTES`. */
   maxBytes?: number;
@@ -264,7 +281,47 @@ export interface ArtifactContent {
  * read fails, which is the whole reason this is not just `readFileSync`.
  */
 export function readArtifact(file: ArtifactFile, options: ReadArtifactOptions = {}): ArtifactContent {
+  const { bytes, size } = readBytes(file, options.maxBytes ?? DEFAULT_MAX_ARTIFACT_BYTES);
+
+  // A NUL in the first block is the classic cheap binary test and the one that
+  // matters here: the viewer renders text, so anything else is reported rather
+  // than served as mojibake.
+  const binary = bytes.subarray(0, 8192).includes(0);
+  if (binary) {
+    return { content: "", size, truncated: false, binary: true, resolved: canonicalPath(file.path) };
+  }
+
+  const text = bytes.toString("utf8");
+  return {
+    content: options.redact ? options.redact(text) : text,
+    size,
+    truncated: size > bytes.length,
+    binary: false,
+    resolved: canonicalPath(file.path),
+  };
+}
+
+/**
+ * The raw bytes of one artifact, refusing anything that escaped its root.
+ *
+ * Split out of `readArtifact` because an image is not text: decoding a PNG as UTF-8
+ * and re-encoding it gives mojibake, and the viewer's job with a picture is to hand
+ * the browser the bytes unchanged. Both paths share this containment check, which is
+ * the part that must not be duplicated and kept in step by hand.
+ *
+ * `size` is the file's size on disk, so a caller can say what it did not read when
+ * the cap bit; `bytes.length` is what came back.
+ */
+export function readArtifactBytes(
+  file: ArtifactFile,
+  options: { maxBytes?: number } = {},
+): { bytes: Buffer; size: number; resolved: string } {
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_ARTIFACT_BYTES;
+  return { ...readBytes(file, maxBytes), resolved: canonicalPath(file.path) };
+}
+
+/** The read itself: containment, then a capped `read` loop. Shared by both readers. */
+function readBytes(file: ArtifactFile, maxBytes: number): { bytes: Buffer; size: number } {
   const resolved = canonicalPath(file.path);
   if (!isInsideRoot(file.root, resolved)) {
     throw new Error(`${file.key} resolves outside its root (${file.root})`);
@@ -285,24 +342,7 @@ export function readArtifact(file: ArtifactFile, options: ReadArtifactOptions = 
   } finally {
     fs.closeSync(handle);
   }
-  const bytes = buffer.subarray(0, read);
-
-  // A NUL in the first block is the classic cheap binary test and the one that
-  // matters here: the viewer renders text, so anything else is reported rather
-  // than served as mojibake.
-  const binary = bytes.subarray(0, 8192).includes(0);
-  if (binary) {
-    return { content: "", size: stat.size, truncated: false, binary: true, resolved };
-  }
-
-  const text = bytes.toString("utf8");
-  return {
-    content: options.redact ? options.redact(text) : text,
-    size: stat.size,
-    truncated: stat.size > read,
-    binary: false,
-    resolved,
-  };
+  return { bytes: buffer.subarray(0, read), size: stat.size };
 }
 
 /**
@@ -315,4 +355,40 @@ export function readArtifact(file: ArtifactFile, options: ReadArtifactOptions = 
 export function isMarkdown(key: string): boolean {
   const extension = path.extname(key).toLowerCase();
   return extension === ".md" || extension === ".markdown";
+}
+
+/**
+ * The image types this viewer will draw, with the content type to serve them as.
+ *
+ * An allow-list of **extensions**, for the same reason as `isMarkdown`: the answer
+ * decides a `Content-Type`, and a content type decides whether a browser parses the
+ * bytes as a document. SVG is deliberately absent — an SVG is a document, it can
+ * carry `<script>` and `<foreignObject>`, and serving one inline from this origin
+ * would be the HTML problem wearing a picture's clothes. Downloading it still works;
+ * drawing it does not.
+ *
+ * The type is derived from the name, not sniffed from the bytes, so a PNG called
+ * `logo.svg` is served as `image/svg+xml` and refused — the extension is what a
+ * person reads, and the viewer should not be more credulous than they are.
+ */
+const IMAGE_TYPES: Readonly<Record<string, string>> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".avif": "image/avif",
+  ".bmp": "image/bmp",
+  ".ico": "image/x-icon",
+};
+
+/**
+ * The content type to serve an image artifact as, or `undefined` for anything that
+ * is not a drawable image.
+ *
+ * Extension-based on purpose. `undefined` means "not an image", which is not the
+ * same as "not a file": the caller still serves it, just as text or a download.
+ */
+export function imageTypeOf(key: string): string | undefined {
+  return IMAGE_TYPES[path.extname(key).toLowerCase()];
 }

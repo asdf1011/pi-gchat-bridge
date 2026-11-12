@@ -46,6 +46,7 @@ import {
 import { manifestVersion, mountRootOf, webManifest } from "./manifest.js";
 import { renderMarkdown } from "./markdown.js";
 import { runCommand } from "../commands/command-surface.js";
+import { imageTypeOf, isMarkdown } from "../durable/artifacts.js";
 import { currentAddress, MAX_COMMENT_CHARS, modelText } from "../durable/comments.js";
 import { entriesBefore } from "../durable/entries.js";
 import type { SessionHost } from "../session-host/api.js";
@@ -338,7 +339,11 @@ export async function handleWebRequest(
           key: artifact.key,
           wrote: artifact.wrote,
           edited: artifact.edited,
-          markdown: /\.(md|markdown)$/i.test(artifact.key),
+          markdown: isMarkdown(artifact.key),
+          // So the drawer knows to frame the file *itself* rather than the source
+          // view: a picture has no lines to number and no text to show, and asking
+          // for `?view=source` would answer with its bytes under a text content type.
+          image: imageTypeOf(artifact.key) !== undefined,
         })),
       ),
     );
@@ -499,6 +504,34 @@ export async function handleWebRequest(
       clearInterval(keepalive);
       handle.close();
     });
+    return true;
+  }
+
+  // The live state, as one answer, for a page that has just reconnected.
+  //
+  // A stream's frames are *deltas* — a frame is only sent when the live text changed — so a stream that
+  // opens on a turn which said nothing since the last viewer left draws nothing at all. The first frame
+  // is the snapshot, but it reaches the page only if the page is still holding the stream that sent it;
+  // a reconnect that races the old stream's last frame is the case this route exists for. It is the same
+  // shape a `text` frame carries, rendered the same way, so the page applies it with the same function.
+  const state = /^\/api\/c\/(\d+)\/events\/state$/.exec(api);
+  if (req.method === "GET" && state) {
+    const conversationId = Number(state[1]);
+    const view = await seam.snapshot(conversationId);
+    if (view === undefined) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: `no such conversation: ${state[1]}` }));
+      return true;
+    }
+    res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+    res.end(
+      JSON.stringify({
+        text: view.liveText,
+        ...(view.turnText ? { turn: view.turnText, turnHtml: renderMarkdown(view.turnText, WEB_RENDER_OPTIONS) } : {}),
+        html: renderMarkdown(view.liveText, WEB_RENDER_OPTIONS),
+        busy: view.busy,
+      }),
+    );
     return true;
   }
 

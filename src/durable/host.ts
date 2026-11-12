@@ -36,7 +36,7 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Context } from "@earendil-works/chord";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai/models";
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 import { logger } from "../logger.js";
 import type {
@@ -50,7 +50,15 @@ import type {
 import { BindingsDoc, type BindingsValue, type ConversationBinding } from "./bindings-doc.js";
 import { mergeObserved, type ObservedFile } from "./observed-files.js";
 import { mergeRevisions, type ArtifactRevision } from "./artifact-revisions.js";
-import { originForSubmission, OriginsDoc, withOrigin, type EntryOrigin } from "./origins-doc.js";
+import {
+  LegacyOriginsDoc,
+  originForSubmission,
+  originKey,
+  OriginsDoc,
+  withOrigin,
+  type EntryOrigin,
+  type OriginsValue,
+} from "./origins-doc.js";
 import {
   ModelFailuresDoc,
   withoutProviderFailure,
@@ -71,6 +79,7 @@ import {
 } from "./comments-doc.js";
 import { defineDoc } from "@earendil-works/pi-durable";
 import { ChatFormat } from "./extensions/chat-format.js";
+import { skillGuidance } from "./extensions/skills.js";
 import { artifactGuidance } from "./extensions/artifact-guidance.js";
 import { createCodingToolsWithDelivery } from "./extensions/coding-tools.js";
 import { createCommentTools } from "./extensions/comment-tools.js";
@@ -161,6 +170,13 @@ export class BridgeHost {
       }),
     );
     registry.install(ChatFormat);
+    // Skill directories, discovered by pi-coding-agent's own loader so the set matches what
+    // a TUI session in this container would see. Installed for every conversation: a skill
+    // is an instruction the model may choose to read, and reading its body is the `read`
+    // tool it already has.
+    registry.install(
+      skillGuidance({ cwd: options.cwd, agentDir: getAgentDir() }).extension,
+    );
     // Where to put files worth reviewing. Skipped entirely when artifacts are not
     // tracked, so the model is never told about a directory nothing commits.
     if (options.artifactsDir) registry.install(artifactGuidance(options.artifactsDir));
@@ -239,6 +255,13 @@ export class BridgeHost {
     const host = new BridgeHost(harness, modelRuntime, options.dbPath, options.cwd, context, lock);
     // Hand the tools a way back in, now that there is something to hand them.
     self.host = host;
+    // Before anything serves: `OriginsDoc` became conversation-scoped, and the stamps the
+    // store already holds are under the old session-wide document, where no reader will
+    // look. Idempotent and best-effort, so a failure here leaves provenance unknown for
+    // old turns rather than stopping the bridge.
+    await host.backfillOrigins().catch((error: unknown) => {
+      logger.warn(`[origins] backfill skipped: ${(error as Error).message}`);
+    });
     return host;
   }
 
@@ -846,12 +869,14 @@ export class BridgeHost {
       logger.warn(`[origins] conversation ${conversationId}: no user entry to stamp (submission ${submission})`);
       return false;
     }
-    const current = (await this.harness.snapshot(OriginsDoc, this.context)) ?? { byEntry: {} };
+    const current = (await this.harness.snapshot(OriginsDoc, conversationId as ConversationId, this.context)) ?? {
+      byEntry: {},
+    };
     // A retried submission (same `requestId`) is deduped upstream and arrives here again for an
     // entry that is already stamped. That is the idempotency working, not a fault, so it must be
     // quiet — the first version warned "every user entry is stamped", which reads like damage.
     if (originForSubmission(current, submission)) return true;
-    const entryId = [...ids].reverse().find((id) => current.byEntry[`${conversationId}:${id}`] === undefined);
+    const entryId = [...ids].reverse().find((id) => current.byEntry[originKey(id)] === undefined);
     if (entryId === undefined) {
       logger.warn(`[origins] conversation ${conversationId}: every user entry is stamped (submission ${submission})`);
       return false;
@@ -861,10 +886,79 @@ export class BridgeHost {
       // The draft is mutated in place, like every other document write here; the
       // pure `withOrigin` is what decides the new map (and the pruning), so the
       // rule is testable without a store.
-      const doc = await tx.doc(OriginsDoc);
-      doc.byEntry = withOrigin(doc, conversationId, entryId, stamp).byEntry;
+      const doc = await tx.doc(OriginsDoc, conversationId as ConversationId);
+      doc.byEntry = withOrigin(doc, entryId, stamp).byEntry;
     }, this.context);
     return true;
+  }
+
+  /**
+   * Move stamps out of the version-1 session-wide document, once.
+   *
+   * `OriginsDoc` used to be one session-scoped map keyed `"<conversationId>:<entryId>"`.
+   * It is now conversation-scoped, so the old document is a *different* document: the
+   * new one for any conversation does not exist, `migrate()` never runs on it (that
+   * fires when a document of the same kind is loaded at the new scope), and without
+   * this the 595 stamps the store already holds would simply never be read.
+   *
+   * A migration is the definition's own business; this is the case it cannot express —
+   * one document becoming many — so it lives here, as a step that runs before the host
+   * starts serving.
+   *
+   * Idempotent by construction: it writes only into conversations that have no stamp
+   * at all, so a second run finds nothing to do. Best-effort per conversation, because a
+   * conversation that cannot be read has no stamps to lose and must not stop the rest.
+   */
+  async backfillOrigins(): Promise<{ conversations: number; stamps: number }> {
+    const legacy = await this.harness.snapshot(LegacyOriginsDoc, this.context);
+    const rows = Object.entries(legacy?.byEntry ?? {});
+    if (rows.length === 0) return { conversations: 0, stamps: 0 };
+
+    // Group by the owner the old key names. The key was the only place it was recorded.
+    const byConversation = new Map<number, Record<string, EntryOrigin>>();
+    for (const [key, stamp] of rows) {
+      const at = key.indexOf(":");
+      if (at <= 0) continue;
+      const conversationId = Number(key.slice(0, at));
+      const entryId = key.slice(at + 1);
+      if (!Number.isInteger(conversationId) || entryId === "") continue;
+      const into = byConversation.get(conversationId) ?? {};
+      into[originKey(Number(entryId))] = stamp;
+      byConversation.set(conversationId, into);
+    }
+
+    let conversations = 0;
+    let stamps = 0;
+    for (const [conversationId, byEntry] of byConversation) {
+      try {
+        // Never overwrite: a conversation already stamped has been running under the new
+        // scope, and its live stamps are fresher than anything the old map remembers.
+        const existing = await this.harness.snapshot(
+          OriginsDoc,
+          conversationId as ConversationId,
+          this.context,
+        );
+        if (existing !== undefined && Object.keys(existing.byEntry).length > 0) continue;
+        await this.harness.commit(async (tx) => {
+          const doc = await tx.doc(OriginsDoc, conversationId as ConversationId);
+          let next: OriginsValue | undefined = doc;
+          for (const [entryId, stamp] of Object.entries(byEntry)) {
+            next = withOrigin(next, Number(entryId), stamp);
+          }
+          doc.byEntry = next.byEntry;
+        }, this.context);
+        conversations += 1;
+        stamps += Object.keys(byEntry).length;
+      } catch (error) {
+        logger.warn(
+          `[origins] backfill for conversation ${conversationId} failed: ${(error as Error).message}`,
+        );
+      }
+    }
+    if (stamps > 0) {
+      logger.info(`[origins] backfilled ${stamps} stamps into ${conversations} conversations`);
+    }
+    return { conversations, stamps };
   }
 
   /**
@@ -875,10 +969,10 @@ export class BridgeHost {
    * even when Chat is the thing that displays it.
    */
   async recordAnswerOrigin(conversationId: number, answerId: number, submission: number): Promise<boolean> {
-    const current = await this.harness.snapshot(OriginsDoc, this.context);
+    const current = await this.harness.snapshot(OriginsDoc, conversationId as ConversationId, this.context);
     const prompt = originForSubmission(current, submission);
     await this.harness.commit(async (tx) => {
-      const doc = await tx.doc(OriginsDoc);
+      const doc = await tx.doc(OriginsDoc, conversationId as ConversationId);
       // Stamped *unconditionally*, because the stamp is doing two jobs: it says which
       // surface asked, and it says that this entry **is an answer**. A turn's
       // intermediate messages carry text as well (an agent says "checking now" before
@@ -887,7 +981,7 @@ export class BridgeHost {
       // turn's running commentary into the thread. When the prompt's surface was never
       // recorded the origin is the literal `unknown`: still an answer, of unknown
       // provenance, and a reader can say both.
-      doc.byEntry = withOrigin(doc, conversationId, answerId, {
+      doc.byEntry = withOrigin(doc, answerId, {
         origin: prompt?.origin ?? "unknown",
         ...(prompt?.submission === undefined ? { submission } : { submission: prompt.submission }),
         at: Date.now(),
@@ -1030,7 +1124,8 @@ export class BridgeHost {
     const entries = (view.value as { entries?: readonly unknown[] }).entries ?? [];
     view.dispose();
 
-    const origins = (await this.harness.snapshot(OriginsDoc, this.context))?.byEntry;
+    const origins = (await this.harness.snapshot(OriginsDoc, conversationId as ConversationId, this.context))
+      ?.byEntry;
     const messages: TranscriptMessage[] = [];
     for (const raw of entries) {
       const model = (raw as { model?: readonly { role?: string; content?: unknown }[] }).model ?? [];
@@ -1047,7 +1142,7 @@ export class BridgeHost {
         // Absent for anything older than the stamp, which readers must treat as
         // unknown rather than as "mine".
         const stamped =
-          typeof entryId === "number" ? origins?.[`${conversationId}:${entryId}`]?.origin : undefined;
+          typeof entryId === "number" ? origins?.[originKey(entryId)]?.origin : undefined;
         // An assistant entry that also carries a tool call is a turn's running
         // commentary — "Looking at that…", "Now I'll do a focused pass" — said on the
         // way to a tool. It belongs to how the answer was reached, not to the

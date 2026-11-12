@@ -51,6 +51,8 @@ interface Harness {
   requests: { url: string; method: string; body?: string }[];
   /** Each history request's paging parameters, in order. */
   historyRequests: { limit: number; before: number }[];
+  /** Every `window.open` the page attempted, as its argument list. */
+  opened: unknown[][];
   /** Console errors the page produced — an empty list is the pass condition. */
   errors: string[];
   /** Resolve pending microtasks so the page's async work completes. */
@@ -78,11 +80,13 @@ async function loadPage(
     postStatus?: number;
     /** The artifact host's address, and the files this conversation is said to have written. */
     artifactsBaseUrl?: string;
-    artifacts?: { key: string; markdown?: boolean; wrote?: number; edited?: number }[];
+    artifacts?: { key: string; markdown?: boolean; image?: boolean; wrote?: number; edited?: number }[];
     /** A URL fragment, as a reload would arrive with one. */
     hash?: string;
     /** What the fake answers `POST api/c/<id>/commands` with. */
     commandResponse?: unknown;
+    /** What the fake reports as the live turn, which the state route answers with. */
+    live?: { text: string; turn?: string; busy: boolean };
     /** The format the fake reports for the open conversation (model + thinking). */
     format?: { model: string; thinking?: string; levels?: string[] };
     /** The models the fake offers a picker. */
@@ -197,6 +201,22 @@ async function loadPage(
             }),
           };
         }
+        // The live state, in the shape a `text` frame carries — which is what the page applies on
+        // reconnect. `live` is a *reference* to the object the test can mutate, so a test can make
+        // the turn progress while the page believes it is up to date.
+        if (/\/api\/c\/\d+\/events\/state$/.test(url)) {
+          const live = options.live ?? { text: "", busy: false };
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              text: live.text,
+              ...(live.turn ? { turn: live.turn, turnHtml: `<p>${live.turn}</p>` } : {}),
+              html: `<p>${live.text}</p>`,
+              busy: live.busy,
+            }),
+          };
+        }
         if (url.endsWith("api/environment")) {
           return {
             ok: true,
@@ -225,6 +245,16 @@ async function loadPage(
     },
   });
 
+  // `window.open` is a no-op in jsdom (it reports "not implemented"), so the drawer's
+  // ↗ button could not be checked at all without a stand-in. Recording the calls lets
+  // a test assert *which* URL a tab would have opened, which is the part that decides
+  // whether an image opens as a picture or as a source page.
+  const opened: unknown[][] = [];
+  dom.window.open = ((...args: unknown[]) => {
+    opened.push(args);
+    return null;
+  }) as unknown as typeof dom.window.open;
+
   // Collect uncaught errors the way a browser console would show them.
   dom.window.addEventListener("error", (event) => {
     errors.push(String((event as ErrorEvent).message ?? event));
@@ -242,6 +272,8 @@ async function loadPage(
     sources,
     requests,
     historyRequests,
+    /** Every `window.open` the page attempted, as its argument list. */
+    opened,
     errors,
     settle,
     close() {
@@ -1183,13 +1215,32 @@ test("a data: image source is left alone", async () => {
 // --- Review comments ---------------------------------------------------------
 
 /** The framed artifact document, which is the only source of selection messages. */
+/**
+ * The frame the drawer is *showing*.
+ *
+ * There is no single `#artifact-frame` any more: each document gets its own frame and
+ * the drawer changes which one is in the middle rather than reloading one. A hidden
+ * frame is one the pool is keeping warm, so the visible one is the current document.
+ */
 function artifactFrame(dom: JSDOM): HTMLIFrameElement {
-  const frame = dom.window.document.getElementById("artifact-frame");
-  assert.ok(frame instanceof dom.window.HTMLIFrameElement);
-  return frame as HTMLIFrameElement;
+  // The current document is the one in the middle slot, which is the frame carrying no
+  // `order`. A neighbour is parked to one side with `order: -1` or `1`, and mid-step
+  // both are visible — so "the visible one" is not enough to identify it.
+  const frames = [...dom.window.document.querySelectorAll("#artifact-track .artifact-frame")] as HTMLIFrameElement[];
+  const middle = frames.filter((frame) => !(frame as HTMLElement).hidden && frame.style.order === "");
+  assert.equal(middle.length, 1, "exactly one document is in the middle");
+  return middle[0]!;
 }
 
-/** Post a message as the artifact document would, and let the handlers run. */
+/**
+ * Post a message as the artifact document would, and let the handlers run.
+ *
+ * These messages are about the *channel* — a selection, a swipe — not about which
+ * document is open, so the test needs a frame the page will accept as the sender.
+ * With a document open that is the visible one; without one (the composer tests never
+ * open a file) any frame in the strip will do, which is how the page behaves too: it
+ * trusts `event.source`, and with nothing open there is no frame to trust.
+ */
 async function fromFrame(h: Harness, data: unknown): Promise<void> {
   const frame = artifactFrame(h.dom);
   h.dom.window.dispatchEvent(
@@ -1198,10 +1249,34 @@ async function fromFrame(h: Harness, data: unknown): Promise<void> {
   await h.settle();
 }
 
+/**
+ * Open the first artifact, so a frame exists for the message channel to come from.
+ *
+ * The composer tests are about what the page does with a *selection*, not about which
+ * document made it — but the page only accepts a message from the frame it knows
+ * about, and there is no such frame until something is open.
+ */
+async function openFirstArtifact(h: Harness): Promise<void> {
+  const doc = h.dom.window.document;
+  (doc.getElementById("artifacts-toggle") as HTMLButtonElement).click();
+  await h.settle();
+  const row = doc.querySelector("#artifact-list li") as HTMLElement | null;
+  assert.ok(row, "the drawer has a file to open");
+  row.click();
+  await h.settle();
+}
+
+
 test("a selection opens the composer without taking focus", async () => {
   let h: Harness | undefined;
   try {
-    h = await loadPage({ pathname: "/7/", conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    h = await loadPage({
+      pathname: "/7/",
+      artifactsBaseUrl: "http://127.0.0.1:8082",
+      artifacts: drawerFiles,
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+    });
+    await openFirstArtifact(h);
     assert.deepEqual(h.errors, []);
     const doc = h.dom.window.document;
     const bar = doc.getElementById("comment-bar")!;
@@ -1224,7 +1299,13 @@ test("a selection opens the composer without taking focus", async () => {
 test("adjusting the selection updates the address but keeps what was typed", async () => {
   let h: Harness | undefined;
   try {
-    h = await loadPage({ pathname: "/7/", conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    h = await loadPage({
+      pathname: "/7/",
+      artifactsBaseUrl: "http://127.0.0.1:8082",
+      artifacts: drawerFiles,
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+    });
+    await openFirstArtifact(h);
     const doc = h.dom.window.document;
     const field = doc.getElementById("comment-text") as HTMLTextAreaElement;
     await fromFrame(h, { t: "pi-artifact-select", file: "notes.md", quote: "crumbs" });
@@ -1243,7 +1324,13 @@ test("adjusting the selection updates the address but keeps what was typed", asy
 test("deselecting closes the composer, unless a draft is in it", async () => {
   let h: Harness | undefined;
   try {
-    h = await loadPage({ pathname: "/7/", conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    h = await loadPage({
+      pathname: "/7/",
+      artifactsBaseUrl: "http://127.0.0.1:8082",
+      artifacts: drawerFiles,
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+    });
+    await openFirstArtifact(h);
     const doc = h.dom.window.document;
     const bar = doc.getElementById("comment-bar")!;
     const field = doc.getElementById("comment-text") as HTMLTextAreaElement;
@@ -1297,7 +1384,13 @@ test("the composer takes focus only when the click asked for it", async () => {
   // the old rule, which is that the field must not steal focus mid-read.
   let h: Harness | undefined;
   try {
-    h = await loadPage({ pathname: "/7/", conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    h = await loadPage({
+      pathname: "/7/",
+      artifactsBaseUrl: "http://127.0.0.1:8082",
+      artifacts: drawerFiles,
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+    });
+    await openFirstArtifact(h);
     const doc = h.dom.window.document;
     const field = doc.getElementById("comment-text") as HTMLTextAreaElement;
     // The bar lives inside the artifacts pane, and jsdom refuses to focus an element it considers
@@ -1341,7 +1434,7 @@ test("a page that loads with a fragment opens that document", async () => {
     assert.ok(doc.getElementById("artifacts")!.classList.contains("showing-doc"), "on the document, not the list");
     assert.equal(doc.getElementById("artifacts-title")!.textContent, "notes.md");
     // Markdown opens rendered, which is what a reader wants; the source view is for everything else.
-    assert.match(doc.getElementById("artifact-frame")!.getAttribute("src") ?? "", /notes\.md\?render$/);
+    assert.match(artifactFrame(h.dom).getAttribute("src") ?? "", /notes\.md\?render$/);
     // The entry's own state, so the browser's back gesture still means "close the document". Compared
     // field by field: the object comes from the jsdom realm, so it is not reference-equal to a literal.
     assert.equal(h.dom.window.history.state.artifact, "conversation/7/notes.md");
@@ -1369,6 +1462,289 @@ test("a fragment naming a file that is gone leaves the list showing, and drops t
     assert.equal((doc.getElementById("artifacts") as HTMLElement).hidden, false, "the drawer still opens");
     assert.equal(doc.getElementById("artifacts")!.classList.contains("showing-doc"), false, "on the list");
     assert.equal(h.dom.window.location.hash, "", "and the address no longer names it");
+  } finally {
+    h?.close();
+  }
+});
+
+test("an image opens as itself, not as the source view", async () => {
+  // The drawer framed every artifact the same way: `?view=source`, which builds a
+  // numbered-lines page around the file's text. For a picture that is a page of
+  // mojibake — the file *is* the document, so it is framed without a view at all.
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      pathname: "/7/",
+      artifactsBaseUrl: "http://127.0.0.1:8082",
+      artifacts: [
+        { key: "conversation/7/shot.png", image: true, wrote: 1, edited: 0 },
+        ...drawerFiles,
+      ],
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+    });
+    await h.settle();
+    const doc = h.dom.window.document;
+    assert.deepEqual(h.errors, []);
+
+    // Open the drawer, then the picture.
+    (doc.getElementById("artifacts-toggle") as HTMLButtonElement).click();
+    await h.settle();
+    const rows = [...doc.querySelectorAll("#artifact-list li")] as HTMLElement[];
+    const picture = rows.find((row) => row.dataset.key === "conversation/7/shot.png");
+    assert.ok(picture, "the image is listed");
+    // And it says what it is, so a name does not have to be decoded.
+    assert.match(picture!.querySelector(".counts")!.textContent!, /image/);
+    assert.equal(picture!.dataset.image, "1");
+
+    picture!.click();
+    await h.settle();
+
+    const src = artifactFrame(h.dom).getAttribute("src") ?? "";
+    assert.equal(src, "http://127.0.0.1:8082/c/7/conversation/7/shot.png");
+    assert.doesNotMatch(src, /view=source/, "no source view around a picture");
+    // Marked on the frame so the drawer can draw a backdrop rather than a white slab.
+    assert.ok(artifactFrame(h.dom).classList.contains("image"));
+
+    // The header's ↗ opens the picture itself, not the document that wraps it: a
+    // new tab is where you want the image, with the browser's own viewer, its
+    // zoom, and "Save image as".
+    (doc.getElementById("artifacts-newtab") as HTMLButtonElement).click();
+    await h.settle();
+    const call = h.opened.at(-1);
+    assert.ok(call, "a tab was opened");
+    assert.equal(call![0], "http://127.0.0.1:8082/c/7/conversation/7/shot.png?raw");
+  } finally {
+    h?.close();
+  }
+});
+
+test("a text file still opens the source view, and markdown still renders", async () => {
+  // The image branch must not have swallowed the other two kinds.
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      pathname: "/7/",
+      hash: "#conversation%2F7%2Frun.sh",
+      artifactsBaseUrl: "http://127.0.0.1:8082",
+      artifacts: drawerFiles,
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+    });
+    await h.settle();
+    const doc = h.dom.window.document;
+    assert.match(artifactFrame(h.dom).getAttribute("src") ?? "", /run\.sh\?view=source$/);
+    assert.equal(artifactFrame(h.dom).classList.contains("image"), false);
+  } finally {
+    h?.close();
+  }
+});
+
+test("arrow keys walk the artifacts, and stop at the ends", async () => {
+  // The keyboard's version of the swipe: with a document open, left and right move
+  // through the list in the order it is displayed.
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      pathname: "/7/",
+      hash: "#conversation%2F7%2Fnotes.md",
+      artifactsBaseUrl: "http://127.0.0.1:8082",
+      artifacts: drawerFiles,
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+    });
+    await h.settle();
+    const doc = h.dom.window.document;
+    const title = () => doc.getElementById("artifacts-title")!.textContent;
+
+    assert.equal(title(), "notes.md");
+    // Forward: notes.md is the first row, so right moves to run.sh.
+    doc.dispatchEvent(new h.dom.window.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    await h.settle();
+    assert.equal(title(), "run.sh");
+    assert.match(artifactFrame(h.dom).getAttribute("src") ?? "", /run\.sh\?view=source/);
+
+    // Back: run.sh is the last row, so left returns to notes.md.
+    doc.dispatchEvent(new h.dom.window.KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }));
+    await h.settle();
+    assert.equal(title(), "notes.md");
+
+    // Past the first row there is nowhere to go, and nothing changes.
+    const before = artifactFrame(h.dom).getAttribute("src");
+    doc.dispatchEvent(new h.dom.window.KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }));
+    await h.settle();
+    assert.equal(title(), "notes.md");
+    assert.equal(artifactFrame(h.dom).getAttribute("src"), before);
+  } finally {
+    h?.close();
+  }
+});
+
+test("arrow keys do not page the drawer while typing", async () => {
+  // The composer is on the same page, and an arrow key in a text box belongs to the
+  // text — moving the cursor, not turning a page.
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      pathname: "/7/",
+      hash: "#conversation%2F7%2Fnotes.md",
+      artifactsBaseUrl: "http://127.0.0.1:8082",
+      artifacts: drawerFiles,
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+    });
+    await h.settle();
+    const doc = h.dom.window.document;
+    const box = doc.getElementById("text") as HTMLTextAreaElement;
+    box.dispatchEvent(new h.dom.window.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    await h.settle();
+    assert.equal(doc.getElementById("artifacts-title")!.textContent, "notes.md", "the document did not change");
+  } finally {
+    h?.close();
+  }
+});
+
+test("a swipe in the document moves to the next or previous artifact", async () => {
+  // The framed document is cross-origin, so the page never sees the finger: the
+  // script inside reports which way it went, exactly as it reports a selection.
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      pathname: "/7/",
+      hash: "#conversation%2F7%2Fnotes.md",
+      artifactsBaseUrl: "http://127.0.0.1:8082",
+      artifacts: drawerFiles,
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+    });
+    await h.settle();
+    const doc = h.dom.window.document;
+    const title = () => doc.getElementById("artifacts-title")!.textContent;
+
+    // A finger moving left asks for the next artifact. The drag comes first, because
+    // that is what loads the neighbour to be carried in; a release alone has nothing
+    // to move to.
+    await fromFrame(h, { t: "pi-artifact-drag", dx: -140 });
+    await fromFrame(h, { t: "pi-artifact-swipe", direction: "left", commit: true });
+    assert.equal(title(), "run.sh", "swipe left goes forward");
+    // And moving right asks for the previous one.
+    await fromFrame(h, { t: "pi-artifact-drag", dx: 140 });
+    await fromFrame(h, { t: "pi-artifact-swipe", direction: "right", commit: true });
+    assert.equal(title(), "notes.md", "swipe right goes back");
+
+    // An unknown direction is ignored rather than guessed at.
+    const src = artifactFrame(h.dom).getAttribute("src");
+    await fromFrame(h, { t: "pi-artifact-drag", dx: -140 });
+    await fromFrame(h, { t: "pi-artifact-swipe", direction: "sideways", commit: true });
+    assert.equal(artifactFrame(h.dom).getAttribute("src"), src);
+  } finally {
+    h?.close();
+  }
+});
+
+test("a drag moves the pane while the finger is still down", async () => {
+  // The request: the pane used to do nothing until release. Following the finger is
+  // what makes the gesture feel connected to the content.
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      pathname: "/7/",
+      hash: "#conversation%2F7%2Fnotes.md",
+      artifactsBaseUrl: "http://127.0.0.1:8082",
+      artifacts: drawerFiles,
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+    });
+    await h.settle();
+    const doc = h.dom.window.document;
+    const pane = doc.getElementById("artifact-track") as HTMLElement;
+
+    await fromFrame(h, { t: "pi-artifact-drag", dx: -120 });
+    // Moved, and with no transition: it is under the finger, not easing after it.
+    assert.match(pane.style.transform, /translateX\(-120px\)/);
+    assert.equal(pane.classList.contains("no-animate"), true);
+
+    // Releasing back where it started returns it.
+    await fromFrame(h, { t: "pi-artifact-drag-end", commit: false });
+    assert.equal(pane.style.transform, "");
+    assert.equal(pane.classList.contains("no-animate"), false);
+    assert.equal(doc.getElementById("artifacts-title")!.textContent, "notes.md", "nothing was paged");
+  } finally {
+    h?.close();
+  }
+});
+
+test("a drag past the end of the list is damped rather than following freely", async () => {
+  // A pane that slides as far as the finger when there is no next document promises
+  // something that is not there.
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      pathname: "/7/",
+      hash: "#conversation%2F7%2Frun.sh",
+      artifactsBaseUrl: "http://127.0.0.1:8082",
+      artifacts: drawerFiles,
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+    });
+    await h.settle();
+    const doc = h.dom.window.document;
+    const pane = doc.getElementById("artifact-track") as HTMLElement;
+
+    // run.sh is the *last* row, so dragging forward has nowhere to go.
+    await fromFrame(h, { t: "pi-artifact-drag", dx: -200 });
+    const damped = /translateX\((-?[\d.]+)px\)/.exec(pane.style.transform);
+    assert.ok(damped, pane.style.transform);
+    assert.ok(Math.abs(Number(damped![1])) < 200, `expected damping, got ${damped![1]}px`);
+    assert.ok(Math.abs(Number(damped![1])) > 0, "but it still moves a little, which is the feedback");
+  } finally {
+    h?.close();
+  }
+});
+
+test("a release that commits pages, and one that cancels does not", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      pathname: "/7/",
+      hash: "#conversation%2F7%2Fnotes.md",
+      artifactsBaseUrl: "http://127.0.0.1:8082",
+      artifacts: drawerFiles,
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+    });
+    await h.settle();
+    const doc = h.dom.window.document;
+    const title = () => doc.getElementById("artifacts-title")!.textContent;
+
+    // Dragged, then released short: no page turn.
+    await fromFrame(h, { t: "pi-artifact-drag", dx: -40 });
+    await fromFrame(h, { t: "pi-artifact-swipe", direction: "left", commit: false });
+    assert.equal(title(), "notes.md");
+
+    // Dragged the same way, released as a commit: pages.
+    await fromFrame(h, { t: "pi-artifact-drag", dx: -140 });
+    await fromFrame(h, { t: "pi-artifact-swipe", direction: "left", commit: true });
+    assert.equal(title(), "run.sh");
+  } finally {
+    h?.close();
+  }
+});
+
+test("a swipe does not touch the address, so Back still closes the document", async () => {
+  // Stepping is not travelling: pushing a history entry per swipe would make Back
+  // undo one swipe at a time instead of closing the drawer, which is not what the
+  // gesture looks like it means.
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      pathname: "/7/",
+      hash: "#conversation%2F7%2Fnotes.md",
+      artifactsBaseUrl: "http://127.0.0.1:8082",
+      artifacts: drawerFiles,
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+    });
+    await h.settle();
+    const doc = h.dom.window.document;
+    assert.equal(h.dom.window.location.hash, "#conversation%2F7%2Fnotes.md");
+
+    await fromFrame(h, { t: "pi-artifact-drag", dx: -140 });
+    await fromFrame(h, { t: "pi-artifact-swipe", direction: "left", commit: true });
+    assert.equal(doc.getElementById("artifacts-title")!.textContent, "run.sh");
+    // The fragment still names what was opened.
+    assert.equal(h.dom.window.location.hash, "#conversation%2F7%2Fnotes.md");
   } finally {
     h?.close();
   }
@@ -1404,7 +1780,7 @@ test("a refresh a turn triggers keeps the document open", async () => {
 
     assert.ok(panel.classList.contains("showing-doc"), "the document is still showing");
     assert.equal(doc.getElementById("artifacts-title")!.textContent, "notes.md");
-    assert.match(doc.getElementById("artifact-frame")!.getAttribute("src") ?? "", /notes\.md\?render$/);
+    assert.match(artifactFrame(h.dom).getAttribute("src") ?? "", /notes\.md\?render$/);
   } finally {
     h?.close();
   }
@@ -1429,7 +1805,7 @@ test("the fragment follows the drawer: another key opens it, closing clears it",
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     assert.equal(doc.getElementById("artifacts-title")!.textContent, "run.sh");
-    assert.match(doc.getElementById("artifact-frame")!.getAttribute("src") ?? "", /run\.sh\?view=source$/, "a script opens as source");
+    assert.match(artifactFrame(h.dom).getAttribute("src") ?? "", /run\.sh\?view=source$/, "a script opens as source");
 
     // ← after a reload closes the document instead of walking out of the conversation, and the address
     // stops claiming a file is open.
@@ -1722,9 +2098,13 @@ test("a conversation shows the format behind the send caret, without opening it"
     // What is in use, in words, once the menu is open.
     (menu as HTMLButtonElement).click();
     await h.settle();
+    // What is in use, while nothing is staged. (A staged choice takes the header
+    // over — see the staging tests — because "what have I got selected?" is the
+    // question an open popup raises.)
     const now = doc.getElementById("picker-now")!.textContent!;
-    assert.match(now, /DeepSeek V4\.1 Flash/);
+    assert.match(now, /Next message: DeepSeek V4\.1 Flash/);
     assert.match(now, /thinking high/);
+    assert.equal(doc.getElementById("picker-apply")!.hasAttribute("disabled"), true);
   } finally {
     h?.close();
   }
@@ -1773,15 +2153,33 @@ test("a model row shows the name only, not its provider/key", async () => {
     assert.equal(rows[0]!.querySelector(".detail"), null, "no key line under the name");
     assert.equal(rows[0]!.querySelector(".name span")!.textContent, "DeepSeek V4.1 Flash");
     assert.doesNotMatch(rows[0]!.textContent!, /deepseek\/deepseek-flash/);
-    // The choice is still applied by key, whatever is shown.
-    pickerRows(doc)[0]!.click();
+    // The choice is still applied by key, whatever is shown. Row 1, because row 0
+    // is the model already in use and staging it would leave Apply with nothing to do.
+    pickerRows(doc)[1]!.click();
     await h.settle();
+    applyButton(doc).click();
+    await h.settle();
+    assert.equal(modelPost(h)!.values.model, "llama-local/lfm3");
   } finally {
     h?.close();
   }
 });
 
-test("choosing a model sends /model with that model, and the pill follows", async () => {
+/** The Apply button, which is the only thing in the popup that sends anything. */
+function applyButton(doc: Document): HTMLButtonElement {
+  return doc.getElementById("picker-apply") as HTMLButtonElement;
+}
+
+/** A POST of `/model`, once one has happened. */
+function modelPost(h: Harness): { text: string; values: Record<string, string | undefined> } | undefined {
+  const post = h.requests.find((r) => r.method === "POST" && /commands$/.test(r.url));
+  return post && post.body ? JSON.parse(post.body) : undefined;
+}
+
+test("choosing a model stages it and Apply sends /model with that model", async () => {
+  // The reported bug: tapping a model applied it *and* closed the popup, so the
+  // thinking level — the other half of the same answer — was gone before it could
+  // be picked. A tap now stages, and Apply is the one thing that commits.
   let h: Harness | undefined;
   try {
     h = await loadPage({
@@ -1794,20 +2192,142 @@ test("choosing a model sends /model with that model, and the pill follows", asyn
     const doc = h.dom.window.document;
     (doc.getElementById("send-menu") as HTMLButtonElement).click();
     await h.settle();
+
+    // Nothing is staged yet, so Apply has nothing to do and says so.
+    assert.equal(applyButton(doc).disabled, true, "Apply is disabled with nothing chosen");
+
     pickerRows(doc)[1]!.click();
     await h.settle();
 
-    const post = h.requests.find((r) => r.method === "POST" && /commands$/.test(r.url));
-    assert.ok(post, "the change goes through the command, not a bespoke endpoint");
-    const body = JSON.parse(post!.body!);
-    assert.equal(body.text, "/model");
-    assert.equal(body.values.model, "llama-local/lfm3");
+    // Staged, not applied: the popup is still open, with the choice marked.
+    assert.equal(doc.getElementById("picker")!.hidden, false, "the popup survives the tap");
+    assert.equal(pickerRows(doc)[1]!.classList.contains("staged"), true);
+    assert.equal(modelPost(h), undefined, "a tap alone changes nothing");
+    assert.equal(applyButton(doc).disabled, false, "Apply has a choice to send");
+    assert.match(doc.getElementById("picker-staged")!.textContent!, /LFM3/);
+
+    applyButton(doc).click();
+    await h.settle();
+
+    const body = modelPost(h);
+    assert.ok(body, "the change goes through the command, not a bespoke endpoint");
+    assert.equal(body!.text, "/model");
+    assert.equal(body!.values.model, "llama-local/lfm3");
     // A level the new model does not have is replaced, not sent to be refused:
     // switching to a local model should not mean switching twice.
-    assert.equal(body.values.thinking, undefined);
+    assert.equal(body!.values.thinking, undefined);
 
-    // The picker shuts once a choice is made.
+    // And the popup shuts once it has been committed.
     assert.equal(doc.getElementById("picker")!.hidden, true);
+  } finally {
+    h?.close();
+  }
+});
+
+test("a model and a thinking level are chosen in one visit to the popup", async () => {
+  // The whole reason the popup no longer closes on a model: the new model's levels
+  // have to be reachable, and both halves sent together.
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      conversations: [{ conversationId: 7, chatKey: "k", model: "llama-local/lfm3" }],
+      format: { model: "llama-local/lfm3", levels: [] },
+      models: TWO_MODELS,
+      commandResponse: { kind: "form", prompt: "Model and thinking level", command: "/model", fields: [] },
+    });
+    await h.settle();
+    const doc = h.dom.window.document;
+    (doc.getElementById("send-menu") as HTMLButtonElement).click();
+    await h.settle();
+
+    // The model in use has no levels, so there is no thinking section at all.
+    assert.equal(doc.getElementById("picker-levels")!.hidden, true);
+
+    // Pick a model that does think: its levels appear without a round trip, because
+    // the list already carries them.
+    pickerRows(doc)[0]!.click();
+    await h.settle();
+    assert.equal(doc.getElementById("picker")!.hidden, false);
+    const levels = [...doc.querySelectorAll("#picker-levels .item")] as HTMLButtonElement[];
+    assert.deepEqual(levels.map((row) => row.querySelector(".name span")!.textContent), ["low", "high"]);
+
+    // Then the level, still in the same popup.
+    levels[1]!.click();
+    await h.settle();
+    assert.equal(doc.getElementById("picker")!.hidden, false, "a level tap does not apply either");
+    assert.equal(modelPost(h), undefined);
+
+    applyButton(doc).click();
+    await h.settle();
+
+    const body = modelPost(h);
+    assert.ok(body);
+    assert.deepEqual(body!.values, { model: "deepseek/deepseek-flash", thinking: "high" });
+  } finally {
+    h?.close();
+  }
+});
+
+test("Apply does nothing, and is disabled, when the choice is what is already in use", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      conversations: [{ conversationId: 7, chatKey: "k", model: "deepseek/deepseek-flash" }],
+      format: { model: "deepseek/deepseek-flash", thinking: "high", levels: ["low", "high"] },
+      models: TWO_MODELS,
+      commandResponse: { kind: "form", prompt: "Model and thinking level", command: "/model", fields: [] },
+    });
+    await h.settle();
+    const doc = h.dom.window.document;
+    (doc.getElementById("send-menu") as HTMLButtonElement).click();
+    await h.settle();
+
+    // The current model, at the current level: staging "more" would send a no-op.
+    pickerRows(doc)[0]!.click();
+    await h.settle();
+    assert.equal(applyButton(doc).disabled, true);
+    assert.match(doc.getElementById("picker-staged")!.textContent!, /already in use/);
+
+    // The current model at a *different* level is a real change, so Apply awakes.
+    const levels = [...doc.querySelectorAll("#picker-levels .item")] as HTMLButtonElement[];
+    levels[0]!.click();
+    await h.settle();
+    assert.equal(applyButton(doc).disabled, false);
+    assert.equal(modelPost(h), undefined);
+  } finally {
+    h?.close();
+  }
+});
+
+test("closing the popup drops a staged choice rather than applying it later", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      conversations: [{ conversationId: 7, chatKey: "k", model: "deepseek/deepseek-flash" }],
+      format: { model: "deepseek/deepseek-flash", thinking: "high", levels: ["low", "high"] },
+      models: TWO_MODELS,
+      commandResponse: { kind: "form", prompt: "Model and thinking level", command: "/model", fields: [] },
+    });
+    await h.settle();
+    const doc = h.dom.window.document;
+    const caret = doc.getElementById("send-menu") as HTMLButtonElement;
+    caret.click();
+    await h.settle();
+    pickerRows(doc)[1]!.click();
+    await h.settle();
+
+    // Escape is "never mind".
+    doc.dispatchEvent(new h.dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await h.settle();
+    assert.equal(doc.getElementById("picker")!.hidden, true);
+    assert.equal(modelPost(h), undefined);
+
+    // Reopening starts from what is in use, not from the abandoned pick.
+    caret.click();
+    await h.settle();
+    assert.equal(pickerRows(doc)[0]!.classList.contains("staged"), false, "no leftover stage");
+    assert.equal(applyButton(doc).disabled, true);
+    assert.match(doc.getElementById("picker-now")!.textContent!, /Next message:/);
   } finally {
     h?.close();
   }
@@ -1826,8 +2346,7 @@ test("the menu lists only the current model's thinking levels", async () => {
     (doc.getElementById("send-menu") as HTMLButtonElement).click();
     await h.settle();
 
-    const doc2 = doc;
-    const levels = [...doc2.querySelectorAll("#picker-levels .item")];
+    const levels = [...doc.querySelectorAll("#picker-levels .item")];
     assert.deepEqual(levels.map((row) => row.querySelector(".name span")!.textContent), ["low", "high"]);
     // Never a search box here: a handful of levels is a glance.
     assert.equal(doc.getElementById("picker-search")!.parentElement!.hidden, true);
@@ -2011,6 +2530,147 @@ test("coming back to the tab after a long silence reconnects even if the stream 
   }
 });
 
+// --- Catching up ------------------------------------------------------------
+//
+// The reported bug: come back to a conversation after the phone was off, and the pane is a page
+// behind until you reload. Replacing the stream was never enough on its own — a stream's frames are
+// deltas about the *live* turn, and the answer that arrived while nobody was watching is in the
+// transcript, which no frame mentions. Worse, when the stream was replaced the first frame was
+// already consumed by the stream the page had thrown away, so even a running turn drew nothing.
+
+test("a reconnected stream re-reads the transcript, so an answer that arrived while away appears", async () => {
+  let h: Harness | undefined;
+  try {
+    const arrival = { role: "assistant", text: "the backup finished", html: "<p>the backup finished</p>" };
+    const fixture = [
+      { role: "user", text: "did the backup run", html: "<p>did the backup run</p>" },
+    ];
+    h = await loadPage({
+      pathname: "/7/",
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+      history: fixture,
+    });
+    const log = h.dom.window.document.getElementById("log")!;
+    assert.ok(!(log.textContent ?? "").includes("the backup finished"));
+
+    // The phone was off; the answer landed. The stream the browser dropped is replaced.
+    fixture.push(arrival);
+    const first = h.sources[0]!;
+    first.close();
+    first.triggerError();
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    assert.equal(h.sources.length, 2, "the page reopened the stream");
+
+    // What a reconnect does the server-side: `open`, then the frames.
+    h.sources[1]!.listeners.get("open")?.forEach((fn) => fn({ data: "" }));
+    await h.settle();
+
+    assert.match(log.textContent ?? "", /the backup finished/, "the answer is on screen without a reload");
+    // And the catch-up asked for the newest page, not for a page anchored somewhere in the past.
+    assert.equal(h.historyRequests.length, 2, "history was read once on open and once on reconnect");
+    assert.equal(h.historyRequests.at(-1)!.before, 0);
+  } finally {
+    h?.close();
+  }
+});
+
+test("coming back to a live stream still catches up on the transcript", async () => {
+  // The other half. A stream can be perfectly open and still know nothing about a finished turn: the
+  // turn's frames went to a tab that was hidden, and an idle conversation then sends nothing at all.
+  // So the visibility handler must re-read history even when it leaves the stream alone.
+  let h: Harness | undefined;
+  try {
+    const fixture = [{ role: "user", text: "kick off the rebuild", html: "<p>kick off the rebuild</p>" }];
+    h = await loadPage({
+      pathname: "/7/",
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+      history: fixture,
+    });
+    const doc = h.dom.window.document;
+    const log = doc.getElementById("log")!;
+    await h.settle();
+    assert.equal(h.sources.length, 1);
+
+    fixture.push({ role: "assistant", text: "rebuild done", html: "<p>rebuild done</p>" });
+    const realNow = Date.now;
+    h.dom.window.Date.now = () => realNow() + 1_000; // a stream that just proved it is alive
+    try {
+      Object.defineProperty(doc, "visibilityState", { value: "visible", configurable: true });
+      doc.dispatchEvent(new h.dom.window.Event("visibilitychange"));
+      await h.settle();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    } finally {
+      h.dom.window.Date.now = realNow;
+    }
+
+    assert.equal(h.sources.length, 1, "a healthy stream is left alone");
+    assert.match(log.textContent ?? "", /rebuild done/, "and the pane caught up anyway");
+  } finally {
+    h?.close();
+  }
+});
+
+test("a reconnect mid-turn shows the turn, even though no frame carries it", async () => {
+  // Frames are deltas: they are only sent when the live text changes. A stream opened while the model
+  // is silent sends its first frame to the stream the page has already replaced, so the pane draws a
+  // turn that is running as though nothing were happening at all.
+  let h: Harness | undefined;
+  let liveness: unknown;
+  try {
+    liveness = { text: "", turn: "", busy: true };
+    h = await loadPage({
+      pathname: "/7/",
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+      live: liveness as { text: string; turn?: string; busy: boolean },
+    });
+    const log = h.dom.window.document.getElementById("log")!;
+
+    // The turn starts while the phone is locked: the server is busy, saying nothing yet.
+    const first = h.sources[0]!;
+    first.close();
+    first.triggerError();
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    h.sources[1]!.listeners.get("open")?.forEach((fn) => fn({ data: "" }));
+    await h.settle();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    assert.match(log.textContent ?? "", /thinking…/, "the running turn is visible after the reconnect");
+  } finally {
+    h?.close();
+  }
+});
+
+test("a failed catch-up leaves the conversation on screen", async () => {
+  // The catch-up runs on every return to the tab, so it is the request most likely to meet a flaky
+  // connection. Emptying the transcript on failure would turn a readable conversation into a blank
+  // pane — and the repaint would take the live block with it.
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      pathname: "/7/",
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+      history: [{ role: "assistant", text: "worth keeping", html: "<p>worth keeping</p>" }],
+    });
+    const doc = h.dom.window.document;
+    const log = doc.getElementById("log")!;
+    await h.settle();
+    assert.match(log.textContent ?? "", /worth keeping/);
+
+    // Every later request fails the way an offline phone's do.
+    (h.dom.window as unknown as Record<string, unknown>).fetch = async () => {
+      throw new TypeError("Failed to fetch");
+    };
+    Object.defineProperty(doc, "visibilityState", { value: "visible", configurable: true });
+    doc.dispatchEvent(new h.dom.window.Event("visibilitychange"));
+    await h.settle();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    assert.match(log.textContent ?? "", /worth keeping/, "a dropped catch-up does not wipe the pane");
+  } finally {
+    h?.close();
+  }
+});
+
 test("a turn keeps what it already said while it goes on to the next step", async () => {
   // The report: a message appears, then is immediately replaced by "thinking…". A
   // turn is several messages — say something, call a tool, say something else — and
@@ -2089,7 +2749,13 @@ test("a tool run shows alongside the words that announced it", async () => {
 test("the touch bar appears only after the selection has settled", async () => {
   let h: Harness | undefined;
   try {
-    h = await loadPage({ pathname: "/7/", conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    h = await loadPage({
+      pathname: "/7/",
+      artifactsBaseUrl: "http://127.0.0.1:8082",
+      artifacts: drawerFiles,
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+    });
+    await openFirstArtifact(h);
     const bar = h.dom.window.document.getElementById("selection-bar")!;
     assert.equal(bar.hidden, true, "nothing before a selection");
 
@@ -2115,7 +2781,13 @@ test("a selection dismissed during the wait never shows the bar", async () => {
   // for a selection that no longer exists, offering to comment on nothing.
   let h: Harness | undefined;
   try {
-    h = await loadPage({ pathname: "/7/", conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    h = await loadPage({
+      pathname: "/7/",
+      artifactsBaseUrl: "http://127.0.0.1:8082",
+      artifacts: drawerFiles,
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+    });
+    await openFirstArtifact(h);
     const bar = h.dom.window.document.getElementById("selection-bar")!;
 
     await fromFrame(h, {
@@ -2134,7 +2806,13 @@ test("a selection dismissed during the wait never shows the bar", async () => {
 test("re-selecting restarts the wait, and shows the latest text", async () => {
   let h: Harness | undefined;
   try {
-    h = await loadPage({ pathname: "/7/", conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    h = await loadPage({
+      pathname: "/7/",
+      artifactsBaseUrl: "http://127.0.0.1:8082",
+      artifacts: drawerFiles,
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+    });
+    await openFirstArtifact(h);
     const bar = h.dom.window.document.getElementById("selection-bar")!;
 
     await fromFrame(h, {
@@ -2161,7 +2839,13 @@ test("re-selecting restarts the wait, and shows the latest text", async () => {
 test("opening the composer puts the touch bar away", async () => {
   let h: Harness | undefined;
   try {
-    h = await loadPage({ pathname: "/7/", conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    h = await loadPage({
+      pathname: "/7/",
+      artifactsBaseUrl: "http://127.0.0.1:8082",
+      artifacts: drawerFiles,
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+    });
+    await openFirstArtifact(h);
     const doc = h.dom.window.document;
     await fromFrame(h, {
       t: "pi-artifact-select-touch",

@@ -40,30 +40,20 @@ export default defineConfig({
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   webServer: {
-    // The built entrypoint, not tsx: what ships is what is tested.
-    command: "node dist/durable/main.js",
-    url: "http://127.0.0.1:8099/healthz",
+    // The page itself, not the bridge: the spec stubs every `/api` call, and a
+    // conversation is not needed to know whether a popup is on screen. See
+    // `scripts/e2e-page-server.mjs` for why the durable entrypoint is the wrong
+    // process to start for this.
+    command: "node scripts/e2e-page-server.mjs",
+    url: "http://127.0.0.1:8099/web/",
     reuseExistingServer: false,
-    timeout: 60_000,
+    timeout: 30_000,
     env: {
-      // A throwaway store so the real bridge.sqlite is never touched, and a
-      // distinct port so a running bridge does not collide.
-      BRIDGE_DB: "/tmp/pi-e2e-bridge.sqlite",
-      PORT: "8099",
-      BRIDGE_BIND: "127.0.0.1",
-      // No Pub/Sub: the receiver requires a subscription and would exit.
-      RECEIVER: "none",
-      PUBSUB_SUBSCRIPTION: "",
-      PI_CWD: "/tmp",
+      E2E_PAGE_PORT: "8099",
+      // A built page, like production. `dist/web/routes.js` serves the captured
+      // copy unless BRIDGE_WEB_DEV is set, and the point is to test what ships.
+      BRIDGE_WEB_DEV: "0",
       LOG_LEVEL: "error",
-      // The artifact listener is off by default in the page tests: a live bridge
-      // already owns 8082 on this machine, and these tests never touch artifacts.
-      BRIDGE_ARTIFACTS_PORT: "0",
-      // Pinned, not inherited: a shell that has sourced `.env.durable` exports
-      // BRIDGE_WEB_ENGINE=link, and the test server would then try to fork an
-      // adapter onto the port the live bridge already owns (EADDRINUSE).
-      BRIDGE_WEB_ENGINE: "inprocess",
-      BRIDGE_ARTIFACTS_BASE_URL: "",
     },
   },
 });

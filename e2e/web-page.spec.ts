@@ -18,10 +18,22 @@
  */
 import { expect, test, type Page } from "@playwright/test";
 
+import { SWIPE_SCRIPT } from "../src/web/artifacts-server.js";
+
 const CONVERSATIONS = [
   { conversationId: 7, chatKey: "spaces/A/threads/T1", model: "deepseek/deepseek-flash", name: "deploy notes" },
   { conversationId: 9, chatKey: "spaces/A/threads/T2", model: "llama-local/lfm3" },
 ];
+
+/**
+ * The document currently in the middle slot.
+ *
+ * There is no single `#artifact-frame`: each artifact gets its own frame and the
+ * drawer changes which one is centred rather than reloading one. A neighbour is
+ * parked to one side with a CSS `order`, so the current document is the frame that
+ * carries none.
+ */
+const currentFrame = (page: Page) => page.locator('#artifact-track .artifact-frame:not([hidden]):not([style*="order"])');
 
 /** Console errors and page errors, collected for the zero-errors assertion. */
 function watchErrors(page: Page): string[] {
@@ -119,6 +131,31 @@ async function stubApi(
           levels: model.levels ?? [],
         })),
       }),
+    }),
+  );
+
+  // The catch-up snapshot, asked for once after the stream's history load.
+  //
+  // It must agree with the frames above, because that is what a real snapshot does:
+  // the server answers with the live turn, and a spec that says "nothing is running"
+  // while the stream has just painted a turn makes the page correctly erase it. The
+  // last `text` frame is the live state; no frames means idle, which is the case the
+  // page is built to handle (the empty view clears a stale live block).
+  const lastTextFrame = [...(options.frames ?? [])].reverse().find((f) => f.event === "text");
+  // The drawer loads the conversation's review comments when it opens. Nothing here
+  // tests comments, so an empty list is the honest answer — and it keeps the "no
+  // console errors" assertion about the thing under test rather than about a 503.
+  await page.route("**/api/c/*/comments", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([]) }),
+  );
+
+  await page.route("**/api/c/*/events/state", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(
+        lastTextFrame ? lastTextFrame.data : { text: "", live: false, entries: [] },
+      ),
     }),
   );
 
@@ -889,7 +926,7 @@ test("artifacts: the list shows names, and a file slides over it full width", as
   // The slide is a transition, so wait for it to land rather than sampling it
   // mid-flight — 33px short of the edge was the first reading.
   await expect
-    .poll(() => page.evaluate(() => getComputedStyle(document.getElementById("artifact-doc")!).transform))
+    .poll(() => page.evaluate(() => getComputedStyle(document.getElementById("artifact-track")!).transform))
     .toBe("matrix(1, 0, 0, 1, 0, 0)");
   const after = await page.evaluate(() => {
     const doc = document.getElementById("artifact-doc")!.getBoundingClientRect();
@@ -899,7 +936,7 @@ test("artifacts: the list shows names, and a file slides over it full width", as
       docWidth: Math.round(doc.width),
       drawerWidth: Math.round(drawer.width),
       backVisible: !document.getElementById("artifacts-back")!.hidden,
-      transform: getComputedStyle(document.getElementById("artifact-doc")!).transform,
+      transform: getComputedStyle(document.getElementById("artifact-track")!).transform,
     };
   });
   // Slid in, and the document owns the drawer rather than sharing it with a list.
@@ -910,7 +947,617 @@ test("artifacts: the list shows names, and a file slides over it full width", as
   // Back goes to the list, and the frame is dropped rather than left loaded.
   await page.locator("#artifacts-back").click();
   await expect(page.locator("#artifacts-title")).toHaveText("Artifacts");
-  expect(await page.evaluate(() => document.getElementById("artifact-frame")!.getAttribute("src"))).toBe("about:blank");
+  // The frames stay loaded — that is the point of the pool — so "nothing is open" means
+  // the drawer is back on the list, not that no document exists. The whole strip is
+  // hidden by CSS at that point.
+  await expect(page.locator("#artifacts")).not.toHaveClass(/showing-doc/);
+  await expect(page.locator("#artifact-doc")).toBeHidden();
+});
+
+test("artifacts: an image is framed as a fitted picture, and the browser paints it", async ({ page }) => {
+  // Only a real browser can say whether this works. The artifact origin answers an
+  // image URL with a *document* that centres the picture (a bare image document is
+  // painted on a white backdrop whatever the theme), and that document embeds the
+  // bytes from `?raw`. So this asserts the two responses and, crucially, that the
+  // browser actually decoded the picture rather than showing a broken image.
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAJUlEQVR42u3NMQEAAAgDoC251a3gLwSgcyfTVFVVVVVVVVVVVVX1tQFrwAPhpO4WAAAAAElFTkSuQmCC",
+    "base64",
+  );
+
+  await stubApi(page);
+  await page.route("**/api/environment", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ artifactsBaseUrl: "https://artifacts.example", pageVersion: "t" }),
+    }),
+  );
+  await page.route("**/api/c/*/artifacts", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([
+        { key: "pi/out/screenshot.png", wrote: 1, edited: 0, markdown: false, image: true },
+        { key: "pi/out/notes.md", wrote: 1, edited: 0, markdown: true, image: false },
+      ]),
+    }),
+  );
+
+  const requests: string[] = [];
+  await page.route("https://artifacts.example/**", (route) => {
+    const url = route.request().url();
+    requests.push(url);
+    if (url.includes("?raw")) {
+      return route.fulfill({ status: 200, contentType: "image/png", body: png });
+    }
+    if (url.endsWith(".png")) {
+      // The wrapper the artifact origin really serves: a document around the bytes.
+      return route.fulfill({
+        status: 200,
+        contentType: "text/html",
+        // Mirrors the real wrapper in `artifacts-server.ts`, including the
+        // `html, body { height: 100% }` the flex centring needs to have any height.
+        body: `<!doctype html><html><head><style>:root{color-scheme:light dark}
+          html,body{height:100%;box-sizing:border-box}
+          body{margin:0;display:flex;align-items:center;justify-content:center;padding:1rem;background:Canvas}
+          img{max-width:100%;max-height:100%;object-fit:contain}</style></head>
+          <body><img src="screenshot.png?raw" alt="screenshot.png"></body></html>`,
+      });
+    }
+    return route.fulfill({ status: 200, contentType: "text/html", body: "<p>rendered</p>" });
+  });
+
+  await page.goto("/7/");
+  await page.locator("#artifacts-toggle").click();
+
+  // The list says what each row is, so a picture is recognisable before opening it.
+  const image = page.locator("#artifact-list li", { hasText: "screenshot.png" });
+  await expect(image.locator(".counts")).toContainText("image");
+  await expect(page.locator("#artifact-list li", { hasText: "notes.md" }).locator(".counts"))
+    .toContainText("markdown");
+
+  await image.click();
+  await expect(page.locator("#artifacts-title")).toHaveText("screenshot.png");
+  // The document slides in, and the frame is laid out *during* that transition: a
+  // measurement taken mid-slide is of a narrower drawer than the final one, which is
+  // how the centring check ended up 32px out. Wait for it to land.
+  await expect
+    .poll(() => page.evaluate(() => getComputedStyle(document.getElementById("artifact-track")!).transform))
+    .toBe("matrix(1, 0, 0, 1, 0, 0)");
+
+  // The frame holds the wrapper document, not the bytes and not a source view.
+  const url = await currentFrame(page).getAttribute("src");
+  expect(url).toBe("https://artifacts.example/c/7/pi/out/screenshot.png");
+
+  // The picture itself was fetched, and the browser decoded it. Reaching into the
+  // frame is allowed here for the same reason the drawer may: this stub is same-origin
+  // in effect, and the assertion is about `naturalWidth`, which only a real decode sets.
+  // The frame holding the image is not necessarily the first one whose URL matches
+  // (the picture's own `?raw` response is a frame URL too, in some Chromium builds),
+  // so the one that has an `<img>` in it is the one to measure.
+  const frameOf = async (): Promise<import("@playwright/test").Frame> => {
+    for (const candidate of page.frames()) {
+      if (candidate === page.mainFrame() || !candidate.url().includes("screenshot.png")) continue;
+      try {
+        if (await candidate.evaluate(() => document.images.length > 0)) return candidate;
+      } catch {
+        // A frame mid-navigation cannot be evaluated; try the next poll.
+      }
+    }
+    throw new Error("no frame with the image yet");
+  };
+  await expect.poll(async () => {
+    try {
+      await frameOf();
+      return true;
+    } catch {
+      return false;
+    }
+  }).toBe(true);
+  const frame = await frameOf();
+  const size = await frame.evaluate(() => {
+    const img = document.querySelector("img");
+    return { w: img?.naturalWidth ?? 0, h: img?.naturalHeight ?? 0, src: img?.getAttribute("src") ?? "" };
+  });
+  expect(size.src).toBe("screenshot.png?raw");
+  expect(size.w).toBe(16);
+  expect(size.h).toBe(16);
+  // And the bytes were actually requested over the wire, not skipped.
+  expect(requests.some((u) => u.endsWith("screenshot.png?raw"))).toBe(true);
+
+  // And it is laid out, not jammed in a corner: the wrapper's flex centring has
+  // actually applied. Absolute centring is asserted in the artifact server's own
+  // tests, where the document is served for real and there is no frame sizing to
+  // reason about; what matters here is that the drawer shows the picture laid out.
+  const gaps = await frame.evaluate(() => {
+    const img = document.querySelector("img")!;
+    const r = img.getBoundingClientRect();
+    return {
+      left: r.left,
+      top: r.top,
+      right: innerWidth - r.right,
+      bottom: innerHeight - r.bottom,
+      display: getComputedStyle(document.body).display,
+    };
+  });
+  // Centred by equal slack on each axis (the drawing is small, so both slacks are
+  // large and equal; a top-left pinning gives 0 on the left and everything on the
+  // right).
+  expect(gaps.display).toBe("flex");
+  expect(Math.abs(gaps.left - gaps.right)).toBeLessThan(2);
+  expect(Math.abs(gaps.top - gaps.bottom)).toBeLessThan(2);
+});
+
+test("artifacts: a text file still opens the source view", async ({ page }) => {
+  // The image branch is a new first answer; it must not have swallowed the old ones.
+  await stubApi(page);
+  await page.route("**/api/environment", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ artifactsBaseUrl: "https://artifacts.example", pageVersion: "t" }),
+    }),
+  );
+  await page.route("**/api/c/*/artifacts", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([{ key: "pi/out/run.sh", wrote: 1, edited: 0, markdown: false, image: false }]),
+    }),
+  );
+  await page.route("https://artifacts.example/**", (route) =>
+    route.fulfill({ status: 200, contentType: "text/html", body: "<p>source</p>" }),
+  );
+
+  await page.goto("/7/");
+  await page.locator("#artifacts-toggle").click();
+  await page.locator("#artifact-list li").first().click();
+
+  const url = await currentFrame(page).getAttribute("src");
+  expect(url).toBe("https://artifacts.example/c/7/pi/out/run.sh?view=source");
+  expect(await currentFrame(page).evaluate((el) => el.classList.contains("image"))).toBe(false);
+});
+
+test("artifacts: arrow keys move through the files with a slide", async ({ page }) => {
+  // Only a real browser can say the pane actually moves. jsdom asserts which file is
+  // showing, which is a string; the *slide* is the part that makes it feel like a
+  // page turn rather than a reload.
+  await stubApi(page);
+  await page.route("**/api/environment", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ artifactsBaseUrl: "https://artifacts.example", pageVersion: "t" }),
+    }),
+  );
+  await page.route("**/api/c/*/artifacts", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([
+        { key: "pi/one.md", wrote: 1, edited: 0, markdown: true, image: false },
+        { key: "pi/two.md", wrote: 1, edited: 0, markdown: true, image: false },
+        { key: "pi/three.md", wrote: 1, edited: 0, markdown: true, image: false },
+      ]),
+    }),
+  );
+  const asked: string[] = [];
+  await page.route("https://artifacts.example/**", (route) => {
+    asked.push(route.request().url());
+    return route.fulfill({ status: 200, contentType: "text/html", body: "<p>doc</p>" });
+  });
+
+  await page.goto("/7/");
+  await page.locator("#artifacts-toggle").click();
+  await page.locator("#artifact-list li").first().click();
+  await expect(page.locator("#artifacts-title")).toHaveText("one.md");
+
+  // Right goes forward, left goes back, and the frame follows.
+  await page.keyboard.press("ArrowRight");
+  await expect(page.locator("#artifacts-title")).toHaveText("two.md");
+  await page.keyboard.press("ArrowRight");
+  await expect(page.locator("#artifacts-title")).toHaveText("three.md");
+  await page.keyboard.press("ArrowLeft");
+  await expect(page.locator("#artifacts-title")).toHaveText("two.md");
+
+  // Each step really fetched the next document.
+  expect(asked.some((u) => u.includes("two.md"))).toBe(true);
+  expect(asked.some((u) => u.includes("three.md"))).toBe(true);
+
+  // The slide really travels: sampled on animation frames while the step runs, not at a
+  // fixed moment after the key — the first frame is legitimately still at rest, which
+  // is what made an earlier version of this assertion flaky rather than wrong.
+  await page.evaluate(() => {
+    const track = document.getElementById("artifact-track")!;
+    (window as unknown as { __offsets: number[] }).__offsets = [];
+    const tick = () => {
+      const offsets = (window as unknown as { __offsets: number[] }).__offsets;
+      if (offsets.length < 30) requestAnimationFrame(tick);
+      offsets.push(new DOMMatrix(getComputedStyle(track).transform).m41);
+    };
+    requestAnimationFrame(tick);
+  });
+  await page.keyboard.press("ArrowRight");
+  await expect
+    .poll(() => page.evaluate(() => getComputedStyle(document.getElementById("artifact-track")!).transform))
+    .toBe("matrix(1, 0, 0, 1, 0, 0)");
+  // Some frame was part-way along: neither at rest (0) nor clipped by the drawer edge.
+  // Polled because the sampler starts on an animation frame and a machine under load
+  // can miss the first few — asserting a single reading made this fail in a full run
+  // while passing alone, which is a test that reports the weather rather than the code.
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const offsets = (window as unknown as { __offsets: number[] }).__offsets;
+        return offsets.some((x) => Math.abs(x) > 4 && Math.abs(x) < 300);
+      }),
+    )
+    .toBe(true);
+});
+
+test("artifacts: a swipe reported by the document pages the drawer", async ({ page }) => {
+  // The frame is cross-origin and sandboxed, so the page never sees the finger. This
+  // drives the message the frame's own script sends, which is the real contract
+  // between them — and checks the pane slides rather than jumping.
+  await stubApi(page);
+  await page.route("**/api/environment", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ artifactsBaseUrl: "https://artifacts.example", pageVersion: "t" }),
+    }),
+  );
+  await page.route("**/api/c/*/artifacts", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([
+        { key: "pi/one.md", wrote: 1, edited: 0, markdown: true, image: false },
+        { key: "pi/two.md", wrote: 1, edited: 0, markdown: true, image: false },
+      ]),
+    }),
+  );
+  await page.route("https://artifacts.example/**", (route) =>
+    route.fulfill({ status: 200, contentType: "text/html", body: "<p>doc</p>" }),
+  );
+
+  await page.goto("/7/");
+  await page.locator("#artifacts-toggle").click();
+  await page.locator("#artifact-list li").first().click();
+  await expect(page.locator("#artifacts-title")).toHaveText("one.md");
+
+  // The messages the document posts during a gesture: a drag, which is what loads the
+  // neighbour and moves the strip, then the release that commits it. A release on its
+  // own carries nothing — there is no neighbour to carry in — which is why both are
+  // sent here.
+  const swipe = (direction: string, dx: number) =>
+    page.evaluate(
+      ({ dir, offset }) => {
+        const frame = document.querySelector("#artifact-track .artifact-frame:not([hidden]):not([style*=\"order\"])") as HTMLIFrameElement;
+        const post = (data: unknown) =>
+          window.dispatchEvent(new MessageEvent("message", { data, source: frame.contentWindow }));
+        post({ t: "pi-artifact-drag", dx: offset });
+        post({ t: "pi-artifact-swipe", direction: dir, commit: true });
+      },
+      { dir: direction, offset: dx },
+    );
+
+  await swipe("left", -140);
+  await expect(page.locator("#artifacts-title")).toHaveText("two.md");
+  await swipe("right", 140);
+  await expect(page.locator("#artifacts-title")).toHaveText("one.md");
+});
+
+test.describe("on a touch device", () => {
+  // A constructed `TouchEvent` is only meaningful where the browser has touch: the
+  // desktop project has `hasTouch: false`, and Chrome refuses to build one there.
+  test.use({ hasTouch: true, isMobile: true, viewport: { width: 390, height: 844 } });
+
+test("artifacts: a real touch swipe in the document pages, and a scroll does not", async ({ page, context }) => {
+  // The gesture the reader actually makes, driven through the browser's own input
+  // pipeline (`Input.dispatchTouchEvent`) rather than by dispatching `TouchEvent`s
+  // from inside the page. That distinction is the bug this test exists for: a
+  // synthetic event skips the browser's gesture arbitration, so it passed while a
+  // real finger did nothing on a phone.
+  await stubApi(page);
+  await page.route("**/api/environment", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ artifactsBaseUrl: "https://artifacts.example", pageVersion: "t" }),
+    }),
+  );
+  await page.route("**/api/c/*/artifacts", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([
+        { key: "pi/first.md", wrote: 1, edited: 0, markdown: false, image: false },
+        { key: "pi/second.md", wrote: 1, edited: 0, markdown: false, image: false },
+        { key: "pi/third.md", wrote: 1, edited: 0, markdown: false, image: false },
+      ]),
+    }),
+  );
+  await page.route("**/api/c/*/comments", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
+  );
+  // A document tall enough to scroll, carrying the real swipe script.
+  await page.route("https://artifacts.example/**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "text/html",
+      body: `<!doctype html><html><head><meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>html{touch-action:pan-y pinch-zoom}body{margin:0;padding:2rem}</style></head>
+        <body><h1>a document</h1><p style="height:2000px">tall</p>
+        <script>${SWIPE_SCRIPT}</script></body></html>`,
+    }),
+  );
+
+  await page.goto("/7/");
+  await page.locator("#artifacts-toggle").click();
+  await page.locator("#artifact-list li").first().click();
+  await expect(page.locator("#artifacts-title")).toHaveText("first.md");
+  await expect
+    .poll(() => page.evaluate(() => getComputedStyle(document.getElementById("artifact-track")!).transform))
+    .toBe("matrix(1, 0, 0, 1, 0, 0)");
+
+  const cdp = await context.newCDPSession(page);
+  const frameBox = async () => (await currentFrame(page).boundingBox())!;
+
+  /** A finger dragged from one point to another, through the browser's input stack. */
+  const drag = async (from: { x: number; y: number }, to: { x: number; y: number }) => {
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [from] });
+    for (let i = 1; i <= 10; i += 1) {
+      await cdp.send("Input.dispatchTouchEvent", {
+        type: "touchMove",
+        touchPoints: [{ x: from.x + ((to.x - from.x) * i) / 10, y: from.y + ((to.y - from.y) * i) / 10 }],
+      });
+      await page.waitForTimeout(12);
+    }
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await page.waitForTimeout(400);
+  };
+
+  // A vertical drag is a scroll, not a page turn.
+  const box = await frameBox();
+  await drag(
+    { x: box.x + box.width / 2, y: box.y + box.height * 0.75 },
+    { x: box.x + box.width / 2, y: box.y + box.height * 0.2 },
+  );
+  await expect(page.locator("#artifacts-title")).toHaveText("first.md");
+
+  // A horizontal swipe pages forward.
+  await drag(
+    { x: box.x + box.width * 0.85, y: box.y + box.height / 2 },
+    { x: box.x + box.width * 0.15, y: box.y + box.height / 2 },
+  );
+  await expect(page.locator("#artifacts-title")).toHaveText("second.md");
+
+  // And backwards.
+  await drag(
+    { x: box.x + box.width * 0.15, y: box.y + box.height / 2 },
+    { x: box.x + box.width * 0.85, y: box.y + box.height / 2 },
+  );
+  await expect(page.locator("#artifacts-title")).toHaveText("first.md");
+});
+
+test("artifacts: swiping across an image pages too", async ({ page, context }) => {
+  // The bug the reader actually hit: the image document was the only kind without
+  // the swipe script, so swiping a picture did nothing while swiping Markdown
+  // worked. Every test used Markdown, so nothing caught it.
+  await stubApi(page);
+  await page.route("**/api/environment", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ artifactsBaseUrl: "https://artifacts.example", pageVersion: "t" }),
+    }),
+  );
+  await page.route("**/api/c/*/artifacts", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([
+        { key: "pi/one.png", wrote: 1, edited: 0, markdown: false, image: true },
+        { key: "pi/two.png", wrote: 1, edited: 0, markdown: false, image: true },
+      ]),
+    }),
+  );
+  await page.route("**/api/c/*/comments", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
+  );
+  // The image wrapper, with the script the artifact origin really serves in it.
+  await page.route("https://artifacts.example/**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "text/html",
+      body: `<!doctype html><html><head><meta charset="utf-8">
+        <style>html{touch-action:pan-y pinch-zoom}</style></head>
+        <body><img src="x.png?raw" alt="a picture" style="max-width:100%">
+        <script>${SWIPE_SCRIPT}</script></body></html>`,
+    }),
+  );
+
+  await page.goto("/7/");
+  await page.locator("#artifacts-toggle").click();
+  await page.locator("#artifact-list li").first().click();
+  await expect(page.locator("#artifacts-title")).toHaveText("one.png");
+  await expect
+    .poll(() => page.evaluate(() => getComputedStyle(document.getElementById("artifact-track")!).transform))
+    .toBe("matrix(1, 0, 0, 1, 0, 0)");
+
+  const cdp = await context.newCDPSession(page);
+  const box = (await currentFrame(page).boundingBox())!;
+  const y = box.y + box.height / 2;
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: box.x + box.width * 0.85, y }] });
+  for (let i = 1; i <= 10; i += 1) {
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [{ x: box.x + box.width * (0.85 - 0.07 * i), y }],
+    });
+    await page.waitForTimeout(12);
+  }
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+
+  await expect(page.locator("#artifacts-title")).toHaveText("two.png");
+});
+
+test("artifacts: a step does not reload anything already on screen", async ({ page, context }) => {
+  // The architecture the flicker forced: one frame per document, never reloaded, with
+  // the visible one changing as a matter of *position*. The old design reloaded the
+  // frame on screen, and an iframe whose `src` changes is blank until the new document
+  // paints — no ordering of the swap could hide that.
+  //
+  // So the property to hold is stronger than "loaded before it parks": a document
+  // fetched once is never fetched again, and going back costs nothing at all.
+  await stubApi(page);
+  await page.route("**/api/environment", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ artifactsBaseUrl: "https://artifacts.example", pageVersion: "t" }),
+    }),
+  );
+  await page.route("**/api/c/*/artifacts", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([
+        { key: "pi/one.md", wrote: 1, edited: 0, markdown: false, image: false },
+        { key: "pi/two.md", wrote: 1, edited: 0, markdown: false, image: false },
+        { key: "pi/three.md", wrote: 1, edited: 0, markdown: false, image: false },
+      ]),
+    }),
+  );
+  await page.route("**/api/c/*/comments", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
+  );
+  const fetched: string[] = [];
+  await page.route("https://artifacts.example/**", (route) => {
+    fetched.push((route.request().url().split("/").pop() ?? "").split("?")[0]!);
+    return route.fulfill({
+      status: 200,
+      contentType: "text/html",
+      body: `<!doctype html><html><head><meta charset="utf-8">
+        <style>html{touch-action:pan-y pinch-zoom}body{margin:0;height:100vh}</style></head>
+        <body><script>${SWIPE_SCRIPT}</script></body></html>`,
+    });
+  });
+
+  await page.goto("/7/");
+  await page.locator("#artifacts-toggle").click();
+  await page.locator("#artifact-list li").first().click();
+  await expect(page.locator("#artifacts-title")).toHaveText("one.md");
+  const settle = () =>
+    expect
+      .poll(() => page.evaluate(() => getComputedStyle(document.getElementById("artifact-track")!).transform))
+      .toBe("matrix(1, 0, 0, 1, 0, 0)");
+  await settle();
+  expect(fetched).toEqual(["one.md"]);
+
+  await page.keyboard.press("ArrowRight");
+  await expect(page.locator("#artifacts-title")).toHaveText("two.md");
+  await settle();
+  expect(fetched).toEqual(["one.md", "two.md"]);
+
+  await page.keyboard.press("ArrowRight");
+  await expect(page.locator("#artifacts-title")).toHaveText("three.md");
+  await settle();
+  expect(fetched).toEqual(["one.md", "two.md", "three.md"]);
+
+  // Back and forth: nothing new is fetched, because every document is still loaded.
+  await page.keyboard.press("ArrowLeft");
+  await expect(page.locator("#artifacts-title")).toHaveText("two.md");
+  await settle();
+  await page.keyboard.press("ArrowLeft");
+  await expect(page.locator("#artifacts-title")).toHaveText("one.md");
+  await settle();
+  expect(fetched).toEqual(["one.md", "two.md", "three.md"]);
+
+  // And the documents are all still in the pool, only one of them visible.
+  const pool = await page.evaluate(() =>
+    [...document.querySelectorAll("#artifact-track .artifact-frame")].map((f) => ({
+      key: (f as HTMLElement).dataset.key,
+      hidden: (f as HTMLElement).hidden,
+    })),
+  );
+  expect(pool.filter((f) => !f.hidden)).toHaveLength(1);
+  expect(pool.map((f) => f.key).sort()).toEqual(["pi/one.md", "pi/three.md", "pi/two.md"]);
+});
+
+test("artifacts: the pane follows the finger while dragging, not only on release", async ({ page, context }) => {
+  // The request behind this: dragging used to do nothing visible until the finger
+  // came up. Only a real browser can show the pane moving *during* the gesture,
+  // because that is a computed transform at a moment mid-drag.
+  await stubApi(page);
+  await page.route("**/api/environment", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ artifactsBaseUrl: "https://artifacts.example", pageVersion: "t" }),
+    }),
+  );
+  await page.route("**/api/c/*/artifacts", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([
+        { key: "pi/first.md", wrote: 1, edited: 0, markdown: false, image: false },
+        { key: "pi/second.md", wrote: 1, edited: 0, markdown: false, image: false },
+      ]),
+    }),
+  );
+  await page.route("**/api/c/*/comments", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
+  );
+  await page.route("https://artifacts.example/**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "text/html",
+      body: `<!doctype html><html><head><meta charset="utf-8">
+        <style>html{touch-action:pan-y pinch-zoom}</style></head>
+        <body><h1>a document</h1><script>${SWIPE_SCRIPT}</script></body></html>`,
+    }),
+  );
+
+  await page.goto("/7/");
+  await page.locator("#artifacts-toggle").click();
+  await page.locator("#artifact-list li").first().click();
+  await expect(page.locator("#artifacts-title")).toHaveText("first.md");
+  await expect
+    .poll(() => page.evaluate(() => getComputedStyle(document.getElementById("artifact-track")!).transform))
+    .toBe("matrix(1, 0, 0, 1, 0, 0)");
+
+  const cdp = await context.newCDPSession(page);
+  const box = (await currentFrame(page).boundingBox())!;
+  const y = box.y + box.height / 2;
+  const transformNow = () =>
+    page.evaluate(() => getComputedStyle(document.getElementById("artifact-track")!).transform);
+
+  // Finger down, dragged most of the way — and still down.
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: box.x + box.width * 0.85, y }] });
+  for (let i = 1; i <= 8; i += 1) {
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [{ x: box.x + box.width * (0.85 - 0.08 * i), y }],
+    });
+    await page.waitForTimeout(16);
+  }
+
+  // The pane has moved, while the gesture is still in progress.
+  const midDrag = await transformNow();
+  expect(midDrag).not.toBe("matrix(1, 0, 0, 1, 0, 0)");
+  const offset = Number(/matrix\(1, 0, 0, 1, (-?[\d.]+), 0\)/.exec(midDrag)?.[1] ?? "0");
+  expect(offset).toBeLessThan(-40);
+
+  // And releasing does not jump it back to the start before sliding on: the step
+  // continues from where the finger left it.
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await expect(page.locator("#artifacts-title")).toHaveText("second.md");
+  await expect.poll(transformNow).toBe("matrix(1, 0, 0, 1, 0, 0)");
+});
 });
 
 test("artifacts: the browser's back gesture returns to the list", async ({ page }) => {
@@ -1171,7 +1818,7 @@ test("on a phone the picker is a full-width sheet with a search box", async ({ p
   expect(errors).toEqual([]);
 });
 
-test("choosing a model applies it through the command, and the pill updates", async ({ page }) => {
+test("choosing a model stages it, and Apply sends it through the command", async ({ page }) => {
   const errors = watchErrors(page);
   const applied: { text?: string; values?: Record<string, string> }[] = [];
   await stubApi(page, {
@@ -1186,10 +1833,16 @@ test("choosing a model applies it through the command, and the pill updates", as
   await page.locator("#send-menu").click();
   await page.locator("#picker-list .item").nth(1).click();
 
-  // The picker shuts on a choice: one tap, not a confirm step.
+  // The reported bug: this used to close the popup, so the thinking level under the
+  // model was unreachable. A tap stages; the popup stays.
+  await expect(page.locator("#picker")).toBeVisible();
+  await expect(page.locator("#picker-list .item").nth(1)).toHaveClass(/staged/);
+  expect(applied).toHaveLength(0);
+
+  await page.locator("#picker-apply").click();
   await expect(page.locator("#picker")).toBeHidden();
 
-  expect(applied.length).toBeGreaterThan(0);
+  expect(applied).toHaveLength(1);
   expect(applied[0]!.text).toBe("/model");
   expect(applied[0]!.values?.model).toBe("llama-local/lfm3");
   // A model with no levels is sent with none, rather than with the old model's.
@@ -1197,7 +1850,9 @@ test("choosing a model applies it through the command, and the pill updates", as
   expect(errors).toEqual([]);
 });
 
-test("the thinking section lists levels, and choosing one applies it", async ({ page }) => {
+test("a model and its thinking level are chosen before anything is applied", async ({ page }) => {
+  // The point of the Apply button: the popup answers one question in two parts, and
+  // the second part used to be gone before it could be answered.
   const errors = watchErrors(page);
   const applied: { text?: string; values?: Record<string, string> }[] = [];
   await stubApi(page, {
@@ -1213,8 +1868,86 @@ test("the thinking section lists levels, and choosing one applies it", async ({ 
   await expect(rows).toHaveCount(2);
   await rows.first().click();
 
+  // Staged, and the popup is still there to commit it.
+  await expect(page.locator("#picker")).toBeVisible();
+  await expect(rows.first()).toHaveClass(/staged/);
+  expect(applied).toHaveLength(0);
+
+  await page.locator("#picker-apply").click();
   await expect(page.locator("#picker")).toBeHidden();
   expect(applied[0]!.values).toEqual({ model: "deepseek/deepseek-flash", thinking: "low" });
+  expect(errors).toEqual([]);
+});
+
+test("the Apply button sits inside the popup, with the lists scrolling above it", async ({ page }) => {
+  // A footer that scrolls away with a forty-model list is a button nobody finds.
+  const errors = watchErrors(page);
+  const long = Array.from({ length: 40 }, (_, i) => ({
+    provider: "p",
+    id: `m${i}`,
+    label: `Model ${i}`,
+    levels: ["low", "high"],
+  }));
+  await stubApi(page, { format: FORMAT, models: long });
+  await page.goto("/7/");
+
+  await page.locator("#send-menu").click();
+  const picker = page.locator("#picker");
+  const apply = page.locator("#picker-apply");
+  await expect(apply).toBeVisible();
+
+  const box = (await picker.boundingBox())!;
+  const button = (await apply.boundingBox())!;
+  const viewport = page.viewportSize()!;
+
+  // Inside the popup, not floating below it or clipped by it.
+  expect(button.y).toBeGreaterThanOrEqual(box.y);
+  expect(button.y + button.height).toBeLessThanOrEqual(box.y + box.height + 1);
+  // And the popup fits the window even with forty models to scroll.
+  expect(box.y + box.height).toBeLessThanOrEqual(viewport.height + 1);
+
+  // Scrolling the list leaves Apply where it was.
+  await page.locator("#picker-list").evaluate((list) => { list.scrollTop = 400; });
+  const after = (await apply.boundingBox())!;
+  expect(Math.abs(after.y - button.y)).toBeLessThanOrEqual(1);
+  expect(errors).toEqual([]);
+});
+
+test("every model and every level is fully visible, not scrolled to the fold", async ({ page }) => {
+  // The Apply footer and the levels list both cost height, and the popup's cap used
+  // to be a guess (34rem) sized before either existed: a five-model list with a
+  // four-level model left the last level half under the footer, which reads as a
+  // clipped list rather than a scrollable one. Only a real browser can see this.
+  const errors = watchErrors(page);
+  const five = [
+    { provider: "deepseek", id: "deepseek-flash", label: "DeepSeek V4.1 Flash", levels: ["low", "medium", "high"] },
+    { provider: "anthropic", id: "claude-sonnet-4", label: "Claude Sonnet 4", levels: ["low", "medium", "high"] },
+    { provider: "anthropic", id: "claude-opus-4", label: "Claude Opus 4", levels: ["low", "medium", "high"] },
+    { provider: "openai", id: "gpt-5", label: "GPT-5", levels: ["minimal", "low", "medium", "high"] },
+    { provider: "llama-local", id: "lfm3", label: "LFM3 (local)", levels: [] },
+  ];
+  await stubApi(page, { format: FORMAT, models: five });
+  await page.goto("/7/");
+
+  await page.locator("#send-menu").click();
+  // A model with four levels: the tallest the two lists get together.
+  await page.locator("#picker-list .item", { hasText: "GPT-5" }).click();
+
+  // Neither list is scrolled: everything it holds fits.
+  const clipped = await page.evaluate(() =>
+    ["picker-list", "picker-levels"].map((id) => {
+      const element = document.getElementById(id)!;
+      return { id, scroll: element.scrollHeight, client: element.clientHeight };
+    }),
+  );
+  for (const list of clipped) {
+    expect(list.scroll, `${list.id} holds more than it shows`).toBeLessThanOrEqual(list.client + 1);
+  }
+
+  // And the last level is above the footer rather than under it.
+  const lastLevel = (await page.locator("#picker-levels .item").last().boundingBox())!;
+  const footer = (await page.locator("#picker-actions").boundingBox())!;
+  expect(lastLevel.y + lastLevel.height).toBeLessThanOrEqual(footer.y + 1);
   expect(errors).toEqual([]);
 });
 

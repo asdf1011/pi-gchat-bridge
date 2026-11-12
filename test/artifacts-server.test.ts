@@ -167,6 +167,228 @@ test("binary artifacts are reported rather than served", async () => {
   }
 });
 
+/** A 1x1 PNG, so the bytes are a real image rather than a shape that looks like one. */
+const PNG_BYTES = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==",
+  "base64",
+);
+
+test("an image's bytes are served from ?raw, with an image type", async () => {
+  // The bug: every artifact went through a UTF-8 decode, so a PNG was reported as
+  // "binary" and refused. A picture has to come back byte for byte or it is not a
+  // picture — every invalid UTF-8 sequence becomes U+FFFD on the way through.
+  const root = tempDir();
+  const harness = await serve(root, ["shot.png"]);
+  try {
+    fs.writeFileSync(path.join(root, "shot.png"), PNG_BYTES);
+    const response = await fetch(`${harness.base}/c/1/shot.png?raw`);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "image/png");
+    assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.match(response.headers.get("content-disposition") ?? "", /^inline; filename="shot\.png"$/);
+
+    const bytes = Buffer.from(await response.arrayBuffer());
+    assert.deepEqual(bytes, PNG_BYTES, "the bytes are unchanged");
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the plain image URL is a document that centres the picture", async () => {
+  // The reason this is not simply "the bytes": a browser paints an image
+  // *document's* backdrop white whatever the theme, so a picture framed directly
+  // arrived in a dark drawer as a white slab. A document with a stylesheet is the
+  // only place the background can be made to follow the theme — and no response
+  // header reaches it, which is why `Color-Scheme` is not the fix.
+  const root = tempDir();
+  const harness = await serve(root, ["shot.png"]);
+  try {
+    fs.writeFileSync(path.join(root, "shot.png"), PNG_BYTES);
+    const response = await fetch(`${harness.base}/c/1/shot.png`);
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("content-type") ?? "", /^text\/html/);
+
+    const html = await response.text();
+    // The picture, fetched from this same origin — never a remote host, never the
+    // file's own bytes interpreted as markup.
+    assert.match(html, /<img src="shot\.png\?raw"/);
+    assert.match(html, /color-scheme: light dark/);
+    assert.match(html, /background: Canvas/);
+    assert.ok(html.includes('alt="shot.png"'), html);
+    // The swipe script, which the other two document kinds have had all along. Its
+    // absence was the bug: swiping across a *picture* did nothing, while swiping a
+    // Markdown or source file worked — so every test that used Markdown passed and
+    // the reader's phone did nothing.
+    assert.match(html, /pi-artifact-swipe/);
+    const nonce = /<script nonce="([^"]+)"/.exec(html);
+    assert.ok(nonce, "the script carries a per-response nonce");
+    assert.match(
+      response.headers.get("content-security-policy") ?? "",
+      new RegExp(`script-src 'nonce-${nonce![1].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}'`),
+    );
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the image document is sized so the picture is centred, not pushed down", async () => {
+  // `height: 100%` plus `padding` adds the padding *outside* the 100%, so the content
+  // box is taller than the frame and a centred picture sits visibly too high. Only a
+  // real layout can catch it, and the fix (`box-sizing: border-box`) is one keyword —
+  // which is exactly the kind of thing that gets removed again without a test.
+  const root = tempDir();
+  const harness = await serve(root, ["shot.png"]);
+  try {
+    fs.writeFileSync(path.join(root, "shot.png"), PNG_BYTES);
+    const html = await (await fetch(`${harness.base}/c/1/shot.png`)).text();
+    assert.match(html, /html, body \{ height: 100%; box-sizing: border-box; \}/);
+    assert.match(html, /display: flex; align-items: center; justify-content: center/);
+    // And it is *fitted*: a screenshot wider than the drawer must scale down, not
+    // scroll sideways.
+    assert.match(html, /max-width: 100%; max-height: 100%; object-fit: contain/);
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the image document may load its own picture and nothing else", async () => {
+  // `img-src 'self'` is the one allowance; everything else stays closed, so a
+  // picture cannot become a page that fetches or runs anything.
+  const root = tempDir();
+  const harness = await serve(root, ["shot.png"]);
+  try {
+    fs.writeFileSync(path.join(root, "shot.png"), PNG_BYTES);
+    const response = await fetch(`${harness.base}/c/1/shot.png`);
+    const csp = response.headers.get("content-security-policy") ?? "";
+    assert.match(csp, /default-src 'none'/);
+    assert.match(csp, /img-src 'self' data:/);
+    // Script is permitted *only* by nonce — one script, ours, for this response. The
+    // picture's own bytes are still never parsed as markup, so the document is a
+    // wrapper around an image and cannot reach anything else.
+    assert.match(csp, /script-src 'nonce-[^']+'/);
+    assert.doesNotMatch(csp, /script-src[^;]*unsafe-inline/);
+    assert.doesNotMatch(csp, /script-src[^;]*\*/);
+    // Still sandboxed and still only framable by this deployment's own UI.
+    assert.match(csp, /sandbox/);
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("svg is not an image this viewer will draw", async () => {
+  // An SVG is a document that can carry script. Serving it inline from the artifact
+  // origin would be the HTML problem wearing a picture's extension, so it falls
+  // through to the text path and is never given an image content type.
+  const root = tempDir();
+  const harness = await serve(root, ["logo.svg"]);
+  try {
+    fs.writeFileSync(path.join(root, "logo.svg"), '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>');
+    const response = await fetch(`${harness.base}/c/1/logo.svg?raw`);
+    assert.equal(response.status, 200);
+    const type = response.headers.get("content-type") ?? "";
+    assert.ok(!type.startsWith("image/"), `served as ${type}`);
+    assert.match(type, /^text\/plain/);
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a file named like an image is framed as one, whatever it holds", async () => {
+  // The content type comes from the name, which is what a person reads and what the
+  // drawer decided to frame. Naming a text file `.png` therefore gets it the image
+  // wrapper and the browser draws nothing — which is the honest outcome, and
+  // certainly better than sniffing the bytes and guessing HTML.
+  const root = tempDir();
+  const harness = await serve(root, ["notreally.png"]);
+  try {
+    fs.writeFileSync(path.join(root, "notreally.png"), "this is not a png\n");
+    const document = await fetch(`${harness.base}/c/1/notreally.png`);
+    assert.match(document.headers.get("content-type") ?? "", /^text\/html/);
+
+    // And its bytes keep the image type they were asked for by name: the browser
+    // declines to draw them, which is a refusal at the right layer.
+    const raw = await fetch(`${harness.base}/c/1/notreally.png?raw`);
+    assert.equal(raw.headers.get("content-type"), "image/png");
+    assert.equal(await raw.text(), "this is not a png\n");
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("?download marks an image as an attachment rather than a page", async () => {
+  const root = tempDir();
+  const harness = await serve(root, ["shot.png"]);
+  try {
+    fs.writeFileSync(path.join(root, "shot.png"), PNG_BYTES);
+    const response = await fetch(`${harness.base}/c/1/shot.png?raw&download`);
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("content-disposition") ?? "", /^attachment; filename="shot\.png"$/);
+    // Still an image: a download is how it is delivered, not what it is.
+    assert.equal(response.headers.get("content-type"), "image/png");
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a file that vanished after being listed explains itself, as a page", async () => {
+  // The list is derived once, then read later; between the two a file can be renamed
+  // or deleted. The answer used to be the bare line `unreadable: <key>` in a framed
+  // blank panel, which says nothing about what happened or what to do.
+  const root = tempDir();
+  const harness = await serve(root, ["gone.png", "gone.md"]);
+  try {
+    fs.writeFileSync(path.join(root, "gone.png"), PNG_BYTES);
+    fs.writeFileSync(path.join(root, "gone.md"), "text\n");
+    // Listed and readable first, so the 404 below is about deletion rather than the
+    // allow-list.
+    assert.equal((await fetch(`${harness.base}/c/1/gone.png?raw`)).status, 200);
+    assert.equal((await fetch(`${harness.base}/c/1/gone.md`)).status, 200);
+
+    fs.rmSync(path.join(root, "gone.png"));
+    fs.rmSync(path.join(root, "gone.md"));
+
+    for (const pathUnderTest of ["gone.png", "gone.md"]) {
+      const response = await fetch(`${harness.base}/c/1/${pathUnderTest}`);
+      assert.equal(response.status, 404);
+      // A document, not a line of text: the drawer frames this.
+      assert.match(response.headers.get("content-type") ?? "", /^text\/html/);
+      const html = await response.text();
+      assert.match(html, /can no longer be read/);
+      assert.ok(html.includes(pathUnderTest), "it names the file");
+      assert.match(html, /renamed or deleted/);
+      // Sandboxed like every other document here, so it cannot run anything.
+      assert.match(response.headers.get("content-security-policy") ?? "", /sandbox/);
+    }
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an image that is not on the allow-list is still a 404", async () => {
+  // The new route must not become a way around the list: being an image is not
+  // permission to be read.
+  const root = tempDir();
+  const harness = await serve(root, ["shot.png"]);
+  try {
+    fs.writeFileSync(path.join(root, "shot.png"), PNG_BYTES);
+    fs.writeFileSync(path.join(root, "secret.png"), PNG_BYTES);
+    assert.equal((await fetch(`${harness.base}/c/1/secret.png`)).status, 404);
+    assert.equal((await fetch(`${harness.base}/c/999/shot.png`)).status, 404);
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a configured chat origin may frame documents; without one, only our own", async () => {
   const root = tempDir();
   const files = ["notes.md"];
@@ -321,6 +543,59 @@ test("rendered Markdown is commentable: the layer is injected, not built into th
     assert.match(body, /data-file="notes.md"/);
   } finally {
     await harness.close();
+  }
+});
+
+test("both documents carry the same swipe handling", async () => {
+  // A rendered document and a source document are two copies of one script; a fix
+  // applied to one is a fix the reader does not get in the other. This is the same
+  // guard as the affordance test above, for the gesture code.
+  const root = tempDir();
+  const harness = await serve(root, ["notes.md"]);
+  try {
+    fs.writeFileSync(path.join(root, "notes.md"), "plain prose\n");
+    const block = (html: string, from: string, to: string): string => {
+      const start = html.indexOf(from);
+      const end = html.indexOf(to, start);
+      assert.ok(start !== -1 && end !== -1, `${from} is in the document`);
+      return html.slice(start, end);
+    };
+    const from = "// --- Swiping between artifacts";
+    const to = 'parent.postMessage({ t: "pi-artifact-ready"';
+    const source = block(await (await fetch(`${harness.base}/c/1/notes.md?view=source`)).text(), from, to);
+    const rendered = block(RENDER_SCRIPT, from, to);
+    assert.equal(source, rendered);
+    // And the gesture is real, not just a comment: both input kinds are wired.
+    assert.match(source, /touchstart/);
+    assert.match(source, /touchend/);
+    assert.match(source, /"wheel"/);
+    assert.match(source, /pi-artifact-swipe/);
+    // The iOS case: a gesture the system claims ends in `touchcancel`, not
+    // `touchend`. Listening only for touchend works on desktop Chromium and does
+    // nothing on a phone, which is exactly what happened in the field.
+    assert.match(source, /"touchcancel", settle/);
+    assert.match(source, /"touchmove"/);
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a document keeps vertical scrolling but claims horizontal panning", async () => {
+  // Without this the platform owns a sideways drag — on iOS as a back-navigation
+  // gesture — and the swipe script never sees an end to judge. `pan-y` keeps
+  // scrolling, which is what a long source file needs.
+  const root = tempDir();
+  const harness = await serve(root, ["notes.md"]);
+  try {
+    fs.writeFileSync(path.join(root, "notes.md"), "# hi\n");
+    for (const view of ["?view=source", "?render"]) {
+      const html = await (await fetch(`${harness.base}/c/1/notes.md${view}`)).text();
+      assert.match(html, /touch-action: pan-y pinch-zoom/, `${view} claims horizontal panning`);
+    }
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
