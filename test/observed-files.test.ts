@@ -57,6 +57,7 @@ test("the bridge's own files are not artifacts of every conversation", async () 
   write("own/bridge.sqlite", "", now);
   write("own/bridge.sqlite-wal", "", now);
   write("own/bridge-durable.log", "", now);
+  write("data/bridge-durable.log", "", now);
   write("own/bridge-restart.log", "", now);
   write("own/.start-bridge.pid", "", now);
   const wanted = write("own/notes.md", "", now);

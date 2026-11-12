@@ -248,7 +248,8 @@ Also changed with it: the restart scripts derive the lock from `BRIDGE_DB` inste
 `$PROJECT/bridge.sqlite.lock`, because the lock is `<dbPath>.lock` and a hardcoded one reports "no bridge
 owns the lock" while one is serving.
 
-**Not moved:** the logs (`bridge-durable.log`, `bridge-restart.log`, `bridge.log`, `cloudflared.log`).
-They are written by `start-bridge.sh` through `$LOG_FILE`, so moving them means editing PID 1's script
-and taking a container restart — worth doing whenever the next container restart happens for another
-reason, not on its own.
+**The logs move on the next container restart.** `start-bridge.sh` writes through `$LOG_FILE`, and
+bash parses PID 1's script once — so the change is in the file and inert until then. It points at
+`data/` now (`BRIDGE_DATA_DIR`), moves any existing log across on the first start after the change so a
+restart does not look like the log was wiped, and includes the tunnel's log. The two restart scripts
+followed immediately (they are started fresh each time), and so did `CLOUDFLARE.md`'s `tail -f`.

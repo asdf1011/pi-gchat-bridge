@@ -16,7 +16,7 @@
 #
 # - Runs the bridge from anywhere (resolves its own project dir).
 # - Restarts the bridge automatically if it exits (crash, OOM, etc.).
-# - Logs to bridge.log in the project dir (override with BRIDGE_LOG_FILE).
+# - Logs to data/bridge.log (override with BRIDGE_LOG_FILE, or BRIDGE_DATA_DIR for the dir).
 # - Shuts down cleanly on SIGTERM/SIGINT (Docker stop, Synology shutdown).
 #
 # Engine selection:
@@ -60,12 +60,32 @@ case "$ENTRYPOINT" in
     ;;
 esac
 
-# The durable engine logs beside its own database so the two engines' logs never
-# interleave; the SDK host keeps its historical default.
+# Logs live with the state, not with the source.
+#
+# `data/` is where the store, the cursor and the backups already are; the logs belong
+# beside them for the same reason — at the repository root they were inside the working
+# tree, where a `grep -r` reads them and a `git clean -xdf` deletes them. The directory is
+# created here because this script is PID 1 and may run before anything else has.
+#
+# The move happens on the restart that picks this file up (bash parses it once, so an edit
+# is inert until then): anything already written to the old path is moved across first, so
+# a restart does not look like the log was wiped.
+DATA_DIR="${BRIDGE_DATA_DIR:-$PROJECT_DIR/data}"
+mkdir -p "$DATA_DIR"
 if [ "$ENGINE" = "durable" ]; then
-  LOG_FILE="${BRIDGE_LOG_FILE:-$PROJECT_DIR/bridge-durable.log}"
+  LOG_FILE="${BRIDGE_LOG_FILE:-$DATA_DIR/bridge-durable.log}"
+  for old in "$PROJECT_DIR/bridge-durable.log"; do
+    [ -f "$old" ] && [ ! -f "$LOG_FILE" ] && mv "$old" "$LOG_FILE"
+  done
 else
-  LOG_FILE="${BRIDGE_LOG_FILE:-$PROJECT_DIR/bridge.log}"
+  LOG_FILE="${BRIDGE_LOG_FILE:-$DATA_DIR/bridge.log}"
+  for old in "$PROJECT_DIR/bridge.log"; do
+    [ -f "$old" ] && [ ! -f "$LOG_FILE" ] && mv "$old" "$LOG_FILE"
+  done
+fi
+# The tunnel's log is written by the child started further down, so it moves here too.
+if [ -f "$PROJECT_DIR/cloudflared.log" ] && [ ! -f "$DATA_DIR/cloudflared.log" ]; then
+  mv "$PROJECT_DIR/cloudflared.log" "$DATA_DIR/cloudflared.log"
 fi
 NODE_PID=""
 TUNNEL_PID=""
@@ -109,7 +129,7 @@ if [ -f "$SUPERVISOR_LOCK" ]; then
     # Also to the log file: this line is the difference between "the container is
     # in a restart loop" and "a second supervisor is holding the lock", and the
     # container's own stdout is not where anyone looks.
-    LOG_FILE="${BRIDGE_LOG_FILE:-$PROJECT_DIR/bridge-durable.log}"
+    LOG_FILE="${BRIDGE_LOG_FILE:-$DATA_DIR/bridge-durable.log}"
     echo "$(date '+%F %T') [start] refused to start: supervisor lock held by pid $OTHER (lock: $SUPERVISOR_LOCK)" >> "$LOG_FILE"
     exit 0
   fi
@@ -303,7 +323,7 @@ start_tunnel() {
   # stream, so the page stays blank while the model replies.
   log "cloudflared: starting tunnel with CLOUDFLARE_TUNNEL_TOKEN + local ingress ($CF_CONFIG)"
   "$CF_BIN" tunnel --config "$CF_CONFIG" run --token "$CLOUDFLARE_TUNNEL_TOKEN" \
-    >> "$PROJECT_DIR/cloudflared.log" 2>&1 &
+    >> "$DATA_DIR/cloudflared.log" 2>&1 &
   TUNNEL_PID=$!
 }
 

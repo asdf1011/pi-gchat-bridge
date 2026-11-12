@@ -111,7 +111,7 @@ curl -N https://pi.hl.id.au/web/api/c/1/events
 
 # 2. The identity path, end to end
 #    send a message in the browser, then:
-tail -f bridge-durable.log | grep '\[web\]'
+tail -f data/bridge-durable.log | grep '\[web\]'
 # [web] you@example.com: submitted to conversation 12 (submission 345)
 
 # 3. From a device with no Tailscale, load https://pi.hl.id.au/web/

@@ -16,7 +16,13 @@
 set -u
 
 PROJECT=/workspace/pi-gchat-bridge
-LOG="$PROJECT/bridge-restart.log"
+# Logs go where the state goes (`data/`), with the bridge's own log. See start-bridge.sh: the
+# move happens on the restart that picks that file up, and this script is started fresh each
+# time, so it can follow immediately.
+DATA_DIR="${BRIDGE_DATA_DIR:-$PROJECT/data}"
+mkdir -p "$DATA_DIR"
+LOG="$DATA_DIR/bridge-restart.log"
+[ -f "$PROJECT/bridge-restart.log" ] && [ ! -f "$LOG" ] && mv "$PROJECT/bridge-restart.log" "$LOG"
 DELAY="${1:-30}"
 
 log() { echo "$(date -u '+%F %T') $*" >> "$LOG"; }
