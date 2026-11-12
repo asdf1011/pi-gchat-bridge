@@ -1,10 +1,10 @@
 /**
  * The supervision wiring, with real children.
  *
- * §9 of `docs/planning/cleanup.md`: the fork + `ipcLink` + chord-accept path was only ever exercised
- * in production, which is the one place a mistake costs a surface instead of a test run. Everything
- * here is the code `main.ts` runs — `forkAdapter`, the supervisor, `acceptAdapterLink` — against a
- * real child process and a real link pair, with a fake seam so no store or model is involved.
+ * The fork + `ipcLink` + chord-accept path used to be exercised only in production, which is the one
+ * place a mistake costs a surface instead of a test run. Everything here is the code `main.ts` runs —
+ * `forkAdapter`, the supervisor, `acceptAdapterLink` — against a real child process and a real link
+ * pair, with a fake seam so no store or model is involved.
  *
  * What it proves, in the order the deployment would hit it:
  *
