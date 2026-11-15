@@ -116,9 +116,9 @@ export function searchPrompt(query: string): string {
     "",
     "Start with `search`, then read the conversations that look right with `read` before",
     "answering. Report what you found with the conversation each answer came from, and link each",
-    "one as a Markdown link on its own line, `[conversation <id>](https://pi.hl.id.au/<id>/)`,",
-    "rather than a bare URL, which this page does not turn into a link; say so plainly if nothing",
-    "matches.",
+    "one as a Markdown link on its own line, labelled with the conversation's name and when it",
+    "was said rather than ids alone, and not as a bare URL, which this page does not link; say so",
+    "plainly if nothing matches.",
   ].join("\n");
 }
 

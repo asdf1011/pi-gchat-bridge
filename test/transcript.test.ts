@@ -20,8 +20,12 @@ import {
   countByConversation,
   defaultIndexPath,
   displayText,
+  describeTime,
   entryLink,
   entryLinkMarkdown,
+  linkLabel,
+  readConversationNames,
+  shorten,
   flattenRecord,
   proseSnippet,
   readOrigins,
@@ -704,10 +708,12 @@ test("cli prints the link under a hit, and --link-host overrides where it points
   // Its own line: a URL spliced into the snippet stops being clickable.
   assert.equal(pinned.out.length, 2);
   assert.match(pinned.out[0]!, /memorable/);
-  // Markdown link form, because a bare URL is not clickable in the web bridge's renderer.
+  // Markdown link form, because a bare URL is not clickable in the web bridge's renderer. The
+  // label names the conversation and when, and this fixture has no binding, so the id leads and
+  // the time is the fixture's fixed timestamp.
   assert.equal(
     pinned.out[1]!.trim(),
-    `[conversation 1, message ${entryId}](https://example.test/1/#e${entryId})`,
+    `[conversation 1, message ${entryId} — 2023-11-14 22:13](https://example.test/1/#e${entryId})`,
   );
 
   const suppressed = lines();
@@ -730,4 +736,78 @@ test("entryLinkMarkdown writes the form both surfaces render as a link", () => {
   );
   // The same no-origin rule as the plain form.
   assert.equal(entryLinkMarkdown(7, 9, ""), "");
+});
+
+// --- labels a reader can recognise ------------------------------------------------------------
+
+test("describeTime says yesterday, days ago, or a date — and stops converting at a week", () => {
+  // Built from UTC fields: these labels are pasted into conversations, so the phrase has to be a
+  // property of the message rather than of when the tool ran.
+  const at = Date.UTC(2026, 10, 14, 18, 5); // 2026-11-14 18:05 UTC
+  assert.equal(describeTime(at, Date.UTC(2026, 10, 14, 20, 0)), "today at 6:05pm");
+  assert.equal(describeTime(at, Date.UTC(2026, 10, 15, 9, 0)), "yesterday at 6:05pm");
+  assert.equal(describeTime(at, Date.UTC(2026, 10, 17, 9, 0)), "3 days ago at 6:05pm");
+  // A week is where relative stops helping: "43 days ago" is a number nobody converts.
+  assert.equal(describeTime(at, Date.UTC(2026, 10, 21, 9, 0)), "2026-11-14 18:05");
+  // Midnight and noon are the two the twelve-hour form gets wrong if it is written carelessly.
+  assert.equal(describeTime(Date.UTC(2026, 10, 14, 0, 5), Date.UTC(2026, 10, 14, 12, 0)), "today at 12:05am");
+  assert.equal(describeTime(Date.UTC(2026, 10, 14, 12, 5), Date.UTC(2026, 10, 14, 20, 0)), "today at 12:05pm");
+  // By calendar date, not elapsed seconds: 23:50 then 00:10 is "yesterday" to a reader.
+  assert.equal(
+    describeTime(Date.UTC(2026, 10, 14, 23, 50), Date.UTC(2026, 10, 15, 0, 10)),
+    "yesterday at 11:50pm",
+  );
+  // No timestamp at all is nothing, not "1970".
+  assert.equal(describeTime(0), "");
+});
+
+test("shorten cuts at a word boundary, and leaves a short name alone", () => {
+  assert.equal(shorten("Ledger sync"), "Ledger sync");
+  const long = "I have accounts at several institutions. Chase, Schwab, Capital One, Wells Fargo";
+  const cut = shorten(long);
+  assert.ok(cut.length <= 49, cut);
+  assert.ok(cut.endsWith("…"));
+  // Cut at a space, so the last word is whole.
+  assert.ok(!/ [a-z]{1,2}…$/.test(cut) || cut.split(" ").at(-1) === "…", cut);
+});
+
+test("a link label names the conversation and when, keeping the id to disambiguate", () => {
+  const now = Date.UTC(2026, 10, 15, 9, 0);
+  const at = Date.UTC(2026, 10, 14, 18, 5);
+  assert.equal(
+    linkLabel(27202, 34779, { name: "Ledger sync", at }, now),
+    "Ledger sync — yesterday at 6:05pm — (27202, message 34779)",
+  );
+  // No name: the id leads, because a bare time says nothing about which conversation.
+  assert.equal(
+    linkLabel(6317, 6780, { at }, now),
+    "conversation 6317, message 6780 — yesterday at 6:05pm",
+  );
+  // No time either: still a usable label.
+  assert.equal(linkLabel(7, undefined, {}), "conversation 7");
+});
+
+test("readConversationNames prefers a title over a preview, and cleans both", () => {
+  const store = makeStore([["pi.user", "hello"]]);
+  const db = new DatabaseSync(store.storePath);
+  db.exec(`
+    CREATE TABLE documents (id INTEGER PRIMARY KEY, kind TEXT, scope_kind TEXT, owner_id INTEGER, retired_at INTEGER);
+    CREATE TABLE document_revisions (document_id INTEGER, seq INTEGER, content TEXT);
+    INSERT INTO documents VALUES (1, '"gchat.bindings"', 'session', 0, NULL);
+  `);
+  db.prepare("INSERT INTO document_revisions VALUES (1, 1, ?)").run(
+    JSON.stringify({
+      byChatKey: {
+        "spaces/a/threads/t1": { conversationId: 27202, label: "Ledger  sync", preview: "opening words" },
+        "spaces/a/threads/t2": { conversationId: 8508, preview: "I don't see any names yet" },
+        // A binding with neither is absent rather than an empty name.
+        "spaces/a/threads/t3": { conversationId: 9 },
+      },
+    }),
+  );
+  const names = readConversationNames(db);
+  db.close();
+  assert.equal(names.get(27202), "Ledger sync", "the title wins, and whitespace is collapsed");
+  assert.equal(names.get(8508), "I don't see any names yet", "the preview is the fallback");
+  assert.equal(names.has(9), false);
 });

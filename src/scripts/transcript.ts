@@ -855,6 +855,105 @@ export function entryLink(
 }
 
 /**
+ * What a conversation is called, by id, from the bindings document.
+ *
+ * The binding carries `label` (a generated title) and `preview` (the opening words, recorded once
+ * so the index has something to show before a title exists). A conversation the bindings do not
+ * describe — a web conversation created and never spoken in, or one whose binding predates the
+ * field — is simply absent, and the caller falls back to the id rather than inventing a name.
+ *
+ * Read once per run, not per hit: it is one document and every hit asks the same question.
+ */
+export function readConversationNames(store: DatabaseSync): Map<number, string> {
+  const names = new Map<number, string>();
+  let doc: { id: number } | undefined;
+  try {
+    doc = store
+      .prepare(
+        `SELECT id FROM documents
+          WHERE kind = ? AND scope_kind = 'session' AND retired_at IS NULL
+          ORDER BY id DESC LIMIT 1`,
+      )
+      .get('"gchat.bindings"') as { id: number } | undefined;
+  } catch {
+    return names;
+  }
+  if (doc === undefined) return names;
+  try {
+    const row = store
+      .prepare("SELECT content FROM document_revisions WHERE document_id = ? ORDER BY seq DESC LIMIT 1")
+      .get(doc.id) as { content?: string } | undefined;
+    if (row?.content === undefined) return names;
+    const byChatKey = (JSON.parse(row.content) as {
+      byChatKey?: Record<string, { conversationId?: unknown; label?: unknown; preview?: unknown }>;
+    }).byChatKey;
+    if (byChatKey === undefined || byChatKey === null) return names;
+    for (const binding of Object.values(byChatKey)) {
+      const id = binding?.conversationId;
+      if (typeof id !== "number") continue;
+      // The title first: a label is what somebody (or the titler) decided the thread is about,
+      // and the preview is only its opening words. Fall back in that order, never both.
+      const label = typeof binding.label === "string" && binding.label.trim() !== "" ? binding.label : undefined;
+      const preview =
+        typeof binding.preview === "string" && binding.preview.trim() !== "" ? binding.preview : undefined;
+      const name = label ?? preview;
+      if (name !== undefined) names.set(id, shorten(name.replace(/\s+/g, " ").trim()));
+    }
+  } catch {
+    // An unreadable document costs a nicer label, nothing else.
+  }
+  return names;
+}
+
+/**
+ * A name short enough to sit inside a link label.
+ *
+ * A generated title is already short; a *preview* is the opening words of the first message and can
+ * run to fifteen — "I have accounts at several institutions. Chase, Schwab, Capital One, Wells
+ * Fargo, interactive brokers, Morgan…" is a paragraph disguised as a name. Cut at a word boundary
+ * rather than mid-word, because a truncated name should still read as a phrase.
+ */
+export function shorten(name: string, limit = 48): string {
+  if (name.length <= limit) return name;
+  const cut = name.slice(0, limit);
+  const space = cut.lastIndexOf(" ");
+  return `${(space > limit / 2 ? cut.slice(0, space) : cut).replace(/[\s,.;:—-]+$/, "")}…`;
+}
+
+/**
+ * A clock time a reader can place: "yesterday at 6:05pm", "3 days ago", "2026-11-09 07:56".
+ *
+ * Relative for anything within a week, because that is the window where "yesterday" is more use
+ * than a date; absolute beyond it, because "43 days ago" is a number nobody converts. The relative
+ * forms are computed in UTC from the message's own timestamp, so the phrase is a property of the
+ * message rather than of when this tool happens to run — the same hit labelled twice says the same
+ * thing, which matters because these labels get pasted into conversations.
+ *
+ * Deliberately no timezone conversion: the store records UTC, the CLI prints UTC elsewhere, and
+ * silently rendering local time would make the label disagree with the timestamp beside it.
+ */
+export function describeTime(at: number, now: number = Date.now()): string {
+  if (at <= 0) return "";
+  const stamp = new Date(at);
+  const hhmm = `${String(stamp.getUTCHours()).padStart(2, "0")}:${String(stamp.getUTCMinutes()).padStart(2, "0")}`;
+  const clock = () => {
+    const hour = stamp.getUTCHours();
+    const suffix = hour < 12 ? "am" : "pm";
+    const twelve = hour % 12 === 0 ? 12 : hour % 12;
+    return `${twelve}:${String(stamp.getUTCMinutes()).padStart(2, "0")}${suffix}`;
+  };
+  // Whole days between the two, by calendar date rather than by elapsed seconds: 23:50 then 00:10
+  // is "yesterday" to a reader even though it is twenty minutes.
+  const dayOf = (value: Date) => Math.floor(Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate()) / 86_400_000);
+  const days = dayOf(new Date(now)) - dayOf(stamp);
+  if (days < 0) return `${stamp.toISOString().slice(0, 10)} ${hhmm}`; // clock skew, or a future stamp
+  if (days === 0) return `today at ${clock()}`;
+  if (days === 1) return `yesterday at ${clock()}`;
+  if (days < 7) return `${days} days ago at ${clock()}`;
+  return `${stamp.toISOString().slice(0, 10)} ${hhmm}`;
+}
+
+/**
  * The same link as Markdown, labelled with where it goes.
  *
  * A bare URL is not a link everywhere this text is read. The web bridge's renderer handles
@@ -870,14 +969,39 @@ export function entryLinkMarkdown(
   conversationId: number,
   entryId: number | undefined,
   origin: string = process.env.BRIDGE_WEB_ORIGIN ?? "",
+  described?: { name?: string; at?: number },
 ): string {
   const url = entryLink(conversationId, entryId, origin);
   if (url === "") return "";
-  const label =
-    entryId === undefined
-      ? `conversation ${conversationId}`
-      : `conversation ${conversationId}, message ${entryId}`;
-  return `[${label}](${url})`;
+  return `[${linkLabel(conversationId, entryId, described)}](${url})`;
+}
+
+/**
+ * What a link says it goes to.
+ *
+ * Ids are precise and opaque; a reader deciding whether to click wants to recognise the thread.
+ * So: the conversation's name when one is known, then when the message was, and the id only as
+ * the thing that disambiguates — `"Ledger sync" — yesterday at 6:05pm (27202)`. When the name is
+ * unknown the id leads, because a bare time says nothing about *which* conversation.
+ */
+export function linkLabel(
+  conversationId: number,
+  entryId: number | undefined,
+  described?: { name?: string; at?: number },
+  now: number = Date.now(),
+): string {
+  const name = described?.name?.trim();
+  const when = entryId === undefined || described?.at === undefined ? "" : describeTime(described.at, now);
+  if (name !== undefined && name !== "") {
+    const parts = [name];
+    if (when !== "") parts.push(when);
+    // The id is kept even when named: two threads can share a title, and the id is what a reader
+    // types when the link is not enough.
+    parts.push(`(${conversationId}${entryId === undefined ? "" : `, message ${entryId}`})`);
+    return parts.join(" — ");
+  }
+  const base = entryId === undefined ? `conversation ${conversationId}` : `conversation ${conversationId}, message ${entryId}`;
+  return when === "" ? base : `${base} — ${when}`;
 }
 
 function formatAt(at: number): string {
@@ -1120,6 +1244,21 @@ function searchVerb(args: SearchVerbArgs): number {
     return 0;
   }
 
+  // Read once, for every hit. Opened read-only and closed immediately: this is a label, and it
+  // must not be able to fail the search or hold the store open.
+  const names = (() => {
+    try {
+      const store = new DatabaseSync(deps.storePath, { readOnly: true });
+      try {
+        return readConversationNames(store);
+      } finally {
+        store.close();
+      }
+    } catch {
+      return new Map<number, string>();
+    }
+  })();
+
   for (const hit of hits) {
     // Role and origin when the entry has them: `user:webui` says a browser asked, which is a
     // different fact from `assistant:gchat` and one a reader often needs to tell a prompt from
@@ -1132,7 +1271,12 @@ function searchVerb(args: SearchVerbArgs): number {
     // Its own line, in Markdown link form: a URL that has been wrapped or spliced into a sentence
     // stops being clickable, and a bare URL is not a link at all in the web bridge's renderer.
     const link =
-      linkOrigin === false ? "" : entryLinkMarkdown(hit.conversationId, hit.entryId, linkOrigin);
+      linkOrigin === false
+        ? ""
+        : entryLinkMarkdown(hit.conversationId, hit.entryId, linkOrigin, {
+            ...(names.get(hit.conversationId) === undefined ? {} : { name: names.get(hit.conversationId)! }),
+            at: hit.at,
+          });
     if (link !== "") out(`              ${link}`);
   }
   if (wantStats) err(statsLine(stats));
