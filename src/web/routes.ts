@@ -47,6 +47,7 @@ import {
 import { manifestVersion, mountRootOf, webManifest } from "./manifest.js";
 import { renderMarkdown } from "./markdown.js";
 import { modelKey } from "../shared/model-key.js";
+import { readBody as readBodyShared } from "../shared/serve-routes.js";
 import { runCommand } from "../commands/command-surface.js";
 import { imageTypeOf, isMarkdown } from "../durable/artifacts.js";
 import { currentAddress, MAX_COMMENT_CHARS, modelText } from "../durable/comments.js";
@@ -809,12 +810,14 @@ export async function handleWebRequest(
   // (so the review survives a restart) and a turn (so the agent can act on it).
   // The record is written first — losing the answer is recoverable, losing the
   // reviewer's words is not.
-  const commentList = /^\/api\/c\/(\d+)\/comments$/.exec(api);
-  if (req.method === "GET" && commentList) {
-    const comments = await seam.comments(Number(commentList[1]));
+  // One pattern, matched once: the list and the create are the same path with different methods, and
+  // compiling the same regex in two adjacent branches is how a missing method guard hides.
+  const commentPath = /^\/api\/c\/(\d+)\/comments$/.exec(api);
+  if (req.method === "GET" && commentPath) {
+    const comments = await seam.comments(Number(commentPath[1]));
     if (comments === undefined) {
       res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: false, error: `no such conversation: ${commentList[1]}` }));
+      res.end(JSON.stringify({ ok: false, error: `no such conversation: ${commentPath[1]}` }));
       return true;
     }
     res.writeHead(200, { "Content-Type": "application/json" });
@@ -847,8 +850,7 @@ export async function handleWebRequest(
     return true;
   }
 
-  const commentCreate = /^\/api\/c\/(\d+)\/comments$/.exec(api);
-  if (req.method === "POST" && commentCreate) {
+  if (req.method === "POST" && commentPath) {
     if (token && req.headers.authorization !== `Bearer ${token}`) {
       res.writeHead(401, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: false, error: "unauthorized" }));
@@ -877,7 +879,7 @@ export async function handleWebRequest(
       res.end(JSON.stringify({ ok: false, error: "invalid JSON body" }));
       return true;
     }
-    const conversationId = Number(commentCreate[1]);
+    const conversationId = Number(commentPath[1]);
     if (typeof parsed.file !== "string" || parsed.file === "") {
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: false, error: "missing file" }));
@@ -1059,32 +1061,15 @@ export async function handleWebRequest(
   return false;
 }
 
-/** Read a request body up to `maxBytes`; returns null when the cap is exceeded. */
-export function readBody(req: http.IncomingMessage, maxBytes: number): Promise<string | null> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    let done = false;
-    req.on("data", (chunk: Buffer) => {
-      if (done) return;
-      size += chunk.length;
-      if (size > maxBytes) {
-        done = true;
-        resolve(null);
-        req.destroy();
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on("end", () => {
-      if (done) return;
-      done = true;
-      resolve(Buffer.concat(chunks).toString("utf8"));
-    });
-    req.on("error", (error) => {
-      if (done) return;
-      done = true;
-      reject(error);
-    });
-  });
+/**
+ * A request body as text, or `null` when it is too large.
+ *
+ * Kept as a thin adapter over `shared/serve-routes.ts` because the pane's routes treat "too large" as
+ * the only refusal a body can produce (they parse JSON themselves and answer 400 for that); the shared
+ * reader is where the reading and the cap live, and it distinguishes what the *protocol* needs to
+ * distinguish.
+ */
+export async function readBody(req: http.IncomingMessage, maxBytes: number): Promise<string | null> {
+  const body = await readBodyShared(req, maxBytes);
+  return body.ok ? body.text : null;
 }

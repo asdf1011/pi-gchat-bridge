@@ -235,9 +235,10 @@ below, because it is the same code and the same review.
 - **Done when:** the join happens once.
 
 ### 5.3 `/secret` allow-list fallback written twice, differently
-- **Status:** pending — deliberately left: the fallback is computed where identity is known on each surface, and
-  the two places differ for a real reason (Chat has an allow-listed sender; the web has a proxy
-  header). Unifying it would move an authorisation decision away from the identity.
+- **Status:** **wontfix — the duplication is the design.** Each surface computes the fallback where it
+  resolves identity, and the two differ because their identities differ: Chat has an allow-listed
+  sender, the web has a proxy header. One shared "who may touch secrets" would have to take an identity
+  kind and branch inside, which is the same two branches, further from the check.
 - **Where:** `src/chat/handler.ts` (`secretUsers: config.secretUsers.length > 0 ? … : allowedUsers`),
   `src/web/routes.ts` (`options.secretUsers ?? options.allowedUsers`), plus the checks in
   `src/chat/commands.ts`
@@ -348,14 +349,16 @@ below, because it is the same code and the same review.
 ## 8. Smaller, concrete
 
 ### 8.1 `commentList` and `commentCreate` compile the same regex twice
-- **Status:** pending
+- **Status:** done — one `commentPath`, matched once; the two branches differ only by method.
 - **Where:** `src/web/routes.ts`
 - **Issue:** `/^\/api\/c\/(\d+)\/comments$/` is built twice in adjacent branches; the shape hides a
   missing `req.method` guard when routes are extended.
 - **Done when:** one match, one branch per method.
 
 ### 8.2 Two request-body readers with two failure conventions
-- **Status:** pending
+- **Status:** done — `shared/serve-routes.ts`: `readBody` returns a value that distinguishes too-large from
+  unreadable, `readJsonBody` adds not-json, and `bodyFailure` names the status. The pane's routes keep
+  a three-line adapter because they only need text-or-null, and say so.
 - **Where:** `src/web/routes.ts` (`readBody` → `string | null`), `src/session-host/v1-routes.ts`
   (`readJson` → parsed `{}` or `null`)
 - **Issue:** "too large" and "not JSON" collapse into one value; six `catch { 400 }` blocks repeat the

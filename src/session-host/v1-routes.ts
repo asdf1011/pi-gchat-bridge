@@ -34,6 +34,7 @@ import type http from "node:http";
 
 import { entriesAfter, entriesBefore } from "../durable/entries.js";
 import type { SessionHost } from "../session-host/api.js";
+import { bodyFailure, readJsonBody } from "../shared/serve-routes.js";
 
 export interface ConversationAddress {
   conversationId: number;
@@ -150,11 +151,13 @@ export async function handleV1(
       json(res, 401, { ok: false, error: "unauthorized" });
       return true;
     }
-    const body = await readJson(req, 64 * 1024);
-    if (body === null) {
-      json(res, 413, { ok: false, error: "request body too large or not JSON" });
+    const parsed = await readJsonBody(req, 64 * 1024);
+    if (!parsed.ok) {
+      const failure = bodyFailure(parsed.reason);
+      json(res, failure.status, { ok: false, error: failure.error });
       return true;
     }
+    const body = parsed.value;
     const address = typeof (body as { address?: unknown }).address === "string"
       ? (body as { address: string }).address.trim()
       : "";
@@ -502,11 +505,13 @@ export async function handleV1(
       json(res, 401, { ok: false, error: "unauthorized" });
       return true;
     }
-    const body = await readJson(req, 64 * 1024);
-    if (body === null) {
-      json(res, 413, { ok: false, error: "request body too large" });
+    const parsed = await readJsonBody(req, 64 * 1024);
+    if (!parsed.ok) {
+      const failure = bodyFailure(parsed.reason);
+      json(res, failure.status, { ok: false, error: failure.error });
       return true;
     }
+    const body = parsed.value;
     const text = typeof (body as { text?: unknown }).text === "string" ? (body as { text: string }).text : "";
     if (text.trim() === "") {
       json(res, 400, { ok: false, error: "text is required" });
@@ -537,20 +542,3 @@ export async function handleV1(
   return true;
 }
 
-/** Read a JSON body up to `maxBytes`; null when the cap is exceeded or it is not JSON. */
-async function readJson(req: http.IncomingMessage, maxBytes: number): Promise<unknown | null> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of req) {
-    const buffer = chunk as Buffer;
-    size += buffer.length;
-    if (size > maxBytes) return null;
-    chunks.push(buffer);
-  }
-  if (size === 0) return {};
-  try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
-  } catch {
-    return null;
-  }
-}

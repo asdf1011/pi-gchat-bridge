@@ -76,3 +76,64 @@ function defaultError(error: unknown, res: http.ServerResponse): void {
   res.writeHead(500, { "Content-Type": "application/json" });
   res.end(JSON.stringify({ ok: false, error: message }));
 }
+
+/**
+ * A request body, or why there isn't one.
+ *
+ * There were two of these — one in the web routes returning `string | null`, one in `/v1` returning a
+ * parsed object or `null` — and the `null` meant different things in each: "too large" and "not JSON"
+ * were the same value, so every caller re-derived which refusal to send, and six `catch { 400 }` blocks
+ * said "invalid JSON body" for a body that was merely too big.
+ *
+ * The outcome is a value instead, because "too large" is a 413 and "not JSON" is a 400 and a caller
+ * cannot tell them apart from `null`.
+ */
+export type BodyResult =
+  | { ok: true; text: string }
+  | { ok: false; reason: "too-large" | "unreadable" };
+
+/** Read a body up to `maxBytes`. Never throws: a broken stream is a refusal, like any other. */
+export async function readBody(req: http.IncomingMessage, maxBytes: number): Promise<BodyResult> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  try {
+    for await (const chunk of req) {
+      const buffer = chunk as Buffer;
+      size += buffer.length;
+      if (size > maxBytes) {
+        // The rest of a body nobody will read is not worth draining, and draining it is how a slow
+        // client keeps a request alive.
+        req.destroy();
+        return { ok: false, reason: "too-large" };
+      }
+      chunks.push(buffer);
+    }
+  } catch {
+    return { ok: false, reason: "unreadable" };
+  }
+  return { ok: true, text: Buffer.concat(chunks).toString("utf8") };
+}
+
+/** The same, parsed as JSON. An empty body is `{}`, which is what a POST with no fields sends. */
+export async function readJsonBody(
+  req: http.IncomingMessage,
+  maxBytes: number,
+): Promise<{ ok: true; value: unknown } | { ok: false; reason: "too-large" | "unreadable" | "not-json" }> {
+  const body = await readBody(req, maxBytes);
+  if (!body.ok) return body;
+  if (body.text.trim() === "") return { ok: true, value: {} };
+  try {
+    return { ok: true, value: JSON.parse(body.text) as unknown };
+  } catch {
+    return { ok: false, reason: "not-json" };
+  }
+}
+
+/** The status a body refusal deserves, and the sentence a caller can log. */
+export function bodyFailure(reason: "too-large" | "unreadable" | "not-json"): { status: number; error: string } {
+  return reason === "too-large"
+    ? { status: 413, error: "request body too large" }
+    : reason === "not-json"
+      ? { status: 400, error: "invalid JSON body" }
+      : { status: 400, error: "request body could not be read" };
+}
