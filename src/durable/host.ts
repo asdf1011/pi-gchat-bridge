@@ -88,11 +88,33 @@ import { skillGuidance } from "./extensions/skills.js";
 import { artifactGuidance } from "./extensions/artifact-guidance.js";
 import { createCodingToolsWithDelivery } from "./extensions/coding-tools.js";
 import { createCommentTools } from "./extensions/comment-tools.js";
+import { createReviewAgent } from "./extensions/review-agent.js";
 import { createSecretRedactor, secretsFromEnvironment } from "./extensions/secret-redactor.js";
 import type { RegisteredSecret } from "./extensions/redact.js";
 import type { SecretStore } from "../secret-store.js";
 import { harnessSettings } from "./settings.js";
 import { acquireBridgeLock, type BridgeLock } from "./lock.js";
+
+/**
+ * The text of one model message, and nothing else.
+ *
+ * The role is checked in the *message*, not in the entry kind: a turn's answer is an
+ * assistant entry, but a write can carry an assistant message under a kind of its
+ * own, and "what the assistant said" is a fact about the message either way. An
+ * assistant message with only thinking in it yields `""`, which is what every
+ * caller here means by "no answer yet".
+ */
+function messageText(message: unknown): string {
+  const { role, content } = (message ?? {}) as { role?: string; content?: unknown };
+  if (role !== "assistant") return "";
+  const blocks = Array.isArray(content)
+    ? (content as readonly { type?: string; text?: string }[])
+    : [{ type: "text", text: content === undefined || content === null ? "" : String(content) }];
+  return blocks
+    .flatMap((block) => (block.type === "text" && block.text ? [block.text] : []))
+    .join("")
+    .trim();
+}
 
 /**
  * What a conversation is created with: the seam's `AgentConfig`, with tool names rather than
@@ -208,6 +230,22 @@ export class BridgeHost {
       self = target;
       registry.install(
         createCommentTools({
+          reply: (conversationId, commentId, text) =>
+            target.host
+              ? target.host.addCommentReply(conversationId, commentId, text)
+              : Promise.resolve({ error: "the session host is not ready" }),
+        }),
+      );
+      // Reviewing a change in a conversation of its own. Installed here rather than
+      // unconditionally because a review with nowhere to leave its findings is a
+      // review that has to become prose in the parent's transcript — which is the
+      // thing it exists to avoid.
+      registry.install(
+        createReviewAgent({
+          lastAnswer: (conversationId, context) =>
+            target.host
+              ? target.host.lastAnswer(conversationId, context)
+              : Promise.resolve(undefined),
           reply: (conversationId, commentId, text) =>
             target.host
               ? target.host.addCommentReply(conversationId, commentId, text)
@@ -756,12 +794,31 @@ export class BridgeHost {
       (tx) => tx.entry(AssistantEntry, answerId as never),
       this.context,
     );
-    const content = (entry?.model?.[0] as { content?: readonly { type?: string; text?: string }[] } | undefined)
-      ?.content;
-    return (content ?? [])
-      .flatMap((block) => (block.type === "text" && block.text ? [block.text] : []))
-      .join("")
-      .trim();
+    return messageText(entry?.model?.[0]);
+  }
+
+  /**
+   * The last thing a conversation said, for a caller that did not hold the submission.
+   *
+   * A parent driven by `review_change` (see `extensions/review-agent.ts`) waits on
+   * the child's *submission*, and a settled submission does not carry the answer's
+   * text — `awaitSubmission` gets it from the answer entry id. So a child's report
+   * back is read the same way, newest visible entry first, skipping anything that
+   * is not an assistant message with text in it.
+   *
+   * One page of entries, deliberately: the reviewer's answer is its last turn, and a
+   * transcript that ended with a compaction or a tool result still has it well within
+   * a page of the head. `undefined` when the conversation said nothing at all.
+   */
+  async lastAnswer(conversationId: number, context: Context = this.context): Promise<string | undefined> {
+    const conversation = await this.harness.conversation(conversationId as ConversationId, context);
+    if (!conversation) return undefined;
+    const page = await conversation.entries({ order: "descending" }, 20, undefined, context);
+    for (const entry of page.items) {
+      const text = messageText(entry.model?.[0]);
+      if (text !== "") return text;
+    }
+    return undefined;
   }
 
   /** Write an adapter-authored entry (a notice) into a conversation. */

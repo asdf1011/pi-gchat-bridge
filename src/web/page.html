@@ -613,9 +613,16 @@
      neighbouring pane was always cut off before it could be seen. */
   /* Hidden until a document is chosen: it covers the list, and while it is over
      nothing it must not swallow the taps meant for the rows underneath. */
+  /* A column of (affordance, window). `min-height: 0` on both this and the scroller is
+     what lets the window give up a row to the bar instead of pushing it off the top. */
   #artifact-doc { position: absolute; inset: 0; overflow: hidden; background: Canvas;
-    visibility: hidden; }
-  #artifacts.showing-doc #artifact-doc { visibility: visible; }
+    visibility: hidden; display: flex; flex-direction: column; }
+  #artifacts.showing-doc #artifact-doc { visibility: visible; display: flex; }
+  /* The window: it clips, and it scrolls. The track is pinned to its top so the frames
+     fill the window at rest; the overflow exists for the case the bar creates, where the
+     window is one row shorter than the frame it holds and a document already scrolled
+     could no longer reach its end. `flex: 1` + `min-height: 0` is what keeps it honest. */
+  #artifact-doc-scroll { flex: 1; min-height: 0; overflow: auto; }
   /* The track is the width of the drawer and each pane is one track wide, so
      translateX(-100%) moves exactly one document along. Every pane is `flex: none`
      at 100%: a flex-grown pane would be sized by the *track*, and the two would
@@ -662,15 +669,23 @@
      floating button the desktop build draws beside the selection, because on a phone
      that space belongs to the system's own selection menu. Kept to a single line so it
      costs the document as little height as possible while a selection is active. */
-  /* The safe-area inset is the one piece of system UI a page *can* clear: the home
-     indicator on a notched phone. The *keyboard* is the other thing it clears, and that
-     is why this bar sits at `bottom: 0` of the drawer rather than floating over the
-     text: with the keyboard up on a phone, the bottom of the viewport is right above it
-     — the one strip desktop sites put their sticky action bars in for the same reason. */
-  #selection-bar { position: absolute; left: 0; right: 0; bottom: 0; z-index: 3;
+  /* The comment affordance: one row, directly under the drawer's header. It used to sit
+     at the foot of the drawer, on the reasoning that a phone's bottom edge is the strip
+     just above the keyboard. What that missed is the layer the platform draws while text
+     is selected: the menu and its drag handles hang off the selection in the middle of the
+     text, and the handles reach down *below* the last line — which is the bottom of the
+     document, which is where this bar was. So the action sat in the one place the system
+     UI reliably visits, and was reported as missing rather than as covered.
+
+     The top is the side nothing the platform draws for a selection reaches. It is a fixed
+     strip under the header, not something anchored to the selection, so it is in the same
+     place for every selection rather than moving under the finger — and the header above it
+     is the drawer's own chrome, so the bar cannot collide with it either way. The quoted
+     text is ellipsised, so it costs one line whatever was selected. */
+  #selection-bar { position: absolute; left: 0; right: 0; top: 0; z-index: 3;
     display: flex; align-items: stretch; gap: .4rem;
-    padding: .4rem .5rem max(.4rem, env(safe-area-inset-bottom));
-    background: Canvas; border-top: 1px solid #8886; box-shadow: 0 -6px 24px #0002; }
+    padding: max(.4rem, env(safe-area-inset-top)) .5rem .4rem;
+    background: Canvas; border-bottom: 1px solid #8886; box-shadow: 0 6px 24px #0002; }
   #selection-bar[hidden] { display: none; }
   /* A finger has no hover, and highlighting on touch leaves the button looking stuck
      after the tap. The brief dim is the acknowledgement instead. */
@@ -879,27 +894,35 @@
       <ul id="artifact-list"></ul>
     </div>
     <div id="artifact-doc">
-      <!-- The sliding strip. `#artifact-doc` is the fixed window that clips it, this
-           is the wide track that moves: panes sit side by side on it, so dragging
-           carries the current document out and the neighbour in behind it. -->
-      <!-- The sliding strip. Frames are *created* here, one per document, and never
-           reloaded: moving to another artifact is a matter of which frame sits in the
-           middle, not of changing what a visible frame loads. -->
-      <div id="artifact-track"></div>
-
+      <!-- A column, because the comment affordance at the top is a *row* of this pane
+           rather than something laid over the document: laid over it, the bar would hide
+           the first lines of the file it is asking about — the one place a reader is
+           looking when they select the opening of a section. As a row, the window below
+           simply gets shorter, and the scroller (`#artifact-doc-scroll`) is what lets a
+           document that was already scrolled still reach its own end. -->
+      <!-- The sliding strip. `#artifact-doc-scroll` is the fixed window that clips it,
+           and `#artifact-track` is the wide track that moves: panes sit side by side on
+           it, so dragging carries the current document out and the neighbour in behind
+           it. Frames are *created* here, one per document, and never reloaded: moving to
+           another artifact is a matter of which frame sits in the middle, not of changing
+           what a visible frame loads. -->
       <!-- Composing a comment on a selection, from inside the framed document.
            The document can only *report* a selection; this is where it becomes
            a message, because this origin is the one allowed to send. -->
       <!-- On a touch device the document draws no button: the system selection menu and
            its drag handles own the space around the text, and no web API lets a page add
            itself to that menu. So the action lives here instead — outside the document,
-           above the composer, where nothing the platform draws can reach it. -->
+           at the top of the drawer, where nothing the platform draws for a selection
+           reaches (at the bottom it sat under the handles, which hang off the last line). -->
       <div id="selection-bar" hidden>
         <button type="button" id="selection-comment">
           <span class="what">Comment</span>
           <span class="on"></span>
         </button>
         <button type="button" id="selection-dismiss" title="Dismiss" aria-label="Dismiss">✕</button>
+      </div>
+      <div id="artifact-doc-scroll">
+        <div id="artifact-track"></div>
       </div>
       <div id="comment-bar" hidden>
         <div class="addr"><span id="comment-addr"></span></div>
@@ -3130,8 +3153,11 @@ function showCommentBar(selection) {
  *
  * The document reports the selection and draws nothing, because on a phone the space
  * around selected text belongs to the system menu and its handles. This bar is where
- * the action goes instead: at the foot of the drawer, above the composer, out of reach
- * of anything the platform draws.
+ * the action goes instead: at the *top* of the drawer, out of reach of anything the
+ * platform draws. The foot was where it started and the wrong end — a selection's drag
+ * handles hang below the last selected line, which in a document top-to-bottom is the
+ * bottom of the screen, so the one action a selection offers lived where the system's
+ * own chrome reliably goes.
  *
  * It only offers to *start* a comment. Once the composer is open the bar gets out of
  * the way — two boxes competing for the same strip would be worse than either alone.
