@@ -210,6 +210,22 @@ export const CommentAnchorSchema = Type.Object({
 });
 
 /**
+ * A rectangle of a picture, in the picture's own pixels.
+ *
+ * The size travels with it for the same reason it is stored: a rectangle without the
+ * picture's dimensions cannot tell whether the file it names is still the picture the
+ * comment was written against.
+ */
+export const CommentRegionSchema = Type.Object({
+  x: Type.Number(),
+  y: Type.Number(),
+  width: Type.Number(),
+  height: Type.Number(),
+  imageWidth: Type.Number(),
+  imageHeight: Type.Number(),
+});
+
+/**
  * One comment, as it crosses the wire.
  *
  * `positions` travels with it because the host resolved them against the live
@@ -220,6 +236,7 @@ export const CommentViewSchema = Type.Object({
   id: Type.String(),
   file: Type.String(),
   anchors: Type.Array(CommentAnchorSchema),
+  region: Type.Optional(CommentRegionSchema),
   quote: Type.Optional(Type.String()),
   charStart: Type.Optional(Type.Number()),
   charEnd: Type.Optional(Type.Number()),
@@ -341,10 +358,26 @@ export const ConversationContract = remote("pi-bridge.conversation", {
             charEnd: Type.Optional(Type.Number()),
             quote: Type.Optional(Type.String()),
             occurrence: Type.Optional(Type.Number()),
+            // A picture's position: present instead of the line fields when the comment
+            // is about part of an image.
+            region: Type.Optional(CommentRegionSchema),
             text: Type.String(),
             author: Type.Optional(Type.String()),
           }),
           CommentCreateResultSchema,
+        ),
+        /** The part of a picture a comment selected, cut out — base64, ready to attach. */
+        cropArtifactRegion: method(
+          Type.Object({ file: Type.String(), region: CommentRegionSchema }),
+          Type.Union([
+            Type.Object({
+              data: Type.String(),
+              mimeType: Type.String(),
+              width: Type.Number(),
+              height: Type.Number(),
+            }),
+            Type.Null(),
+          ]),
         ),
         resolveComment: method(
           Type.Object({ commentId: Type.String(), resolved: Type.Boolean() }),

@@ -702,6 +702,11 @@
     display: flex; gap: .5rem; align-items: baseline; }
   #comment-bar .addr span, #comment-sheet .addr span { flex: 1; min-width: 0; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; }
+  /* The selected part of a picture, before it is sent. Bounded in both directions so a
+     thin strip of a 4000px screenshot is still a thumbnail rather than a wall. */
+  #comment-preview, #comment-sheet-preview { max-height: 8rem; max-width: 100%; align-self: flex-start;
+    object-fit: contain; border-radius: .35rem; background: #8881; }
+  #comment-preview[hidden], #comment-sheet-preview[hidden] { display: none; }
   #comment-bar .quote, #comment-sheet .quote { margin: 0; padding: .3rem .5rem; border-left: 3px solid #8886;
     font: .82em var(--mono, monospace); opacity: .85; max-height: 6em; overflow: auto;
     white-space: pre-wrap; word-break: break-word; }
@@ -926,6 +931,7 @@
       </div>
       <div id="comment-bar" hidden>
         <div class="addr"><span id="comment-addr"></span></div>
+        <img id="comment-preview" alt="The selected part of the picture" hidden>
         <p class="quote" id="comment-quote" hidden></p>
         <textarea id="comment-text" placeholder="Comment on this…" rows="2"></textarea>
         <p id="comment-error" hidden></p>
@@ -937,6 +943,7 @@
       <!-- One comment's thread: what was said, what came back, and resolve. -->
       <div id="comment-sheet" hidden>
         <div class="addr"><span id="comment-sheet-addr"></span><button type="button" id="comment-sheet-close" title="Close">✕</button></div>
+        <img id="comment-sheet-preview" alt="The part of the picture this comment is about" hidden>
         <p class="quote" id="comment-sheet-quote" hidden></p>
         <div id="comment-thread"></div>
         <textarea id="comment-reply" placeholder="Reply in this thread…" rows="2"></textarea>
@@ -3074,11 +3081,15 @@ const selectionBar = document.getElementById('selection-bar');
 const selectionOn = document.querySelector('#selection-comment .on');
 const commentAddr = document.getElementById('comment-addr');
 const commentQuote = document.getElementById('comment-quote');
+/* The selected part of a picture, as the comment will attach it. */
+const commentPreview = document.getElementById('comment-preview');
 const commentText = document.getElementById('comment-text');
 const commentError = document.getElementById('comment-error');
 const commentSheet = document.getElementById('comment-sheet');
 const commentSheetAddr = document.getElementById('comment-sheet-addr');
 const commentSheetQuote = document.getElementById('comment-sheet-quote');
+/* The part of a picture a thread is about, when it is about one. */
+const commentSheetPreview = document.getElementById('comment-sheet-preview');
 const commentThread = document.getElementById('comment-thread');
 const commentReply = document.getElementById('comment-reply');
 
@@ -3097,6 +3108,12 @@ let commentsById = new Map();
  * the bar shows the quotation instead of inventing a line number.
  */
 function commentAddress(selection) {
+  // A rectangle has no line, and a `#L…` address would be a lie about a picture: it is
+  // four numbers naming the part of the picture that was dragged over.
+  if (selection.region) {
+    const region = selection.region;
+    return 'x' + region.x + ',y' + region.y + ' ' + region.width + '×' + region.height;
+  }
   const line = selection.line;
   if (line === undefined) {
     const quote = (selection.quote || '').replace(/\s+/g, ' ').trim();
@@ -3129,9 +3146,19 @@ function showCommentBar(selection) {
   pendingSelection = selection;
   closeThread();
   const where = commentAddress(selection);
-  commentAddr.textContent = (selection.file || '') + (selection.line === undefined ? ' — ' : '#') + where;
+  // A rectangle is written bare rather than after a `#`: `shot.png#x120,y64 320×180`
+  // reads like a line address and is not one. Everything else keeps the hash, because
+  // a line address is what a reader already knows.
+  const separator = selection.region ? ' ' : selection.line === undefined ? ' — ' : '#';
+  commentAddr.textContent = (selection.file || '') + separator + where;
   commentQuote.hidden = !selection.quote;
   commentQuote.textContent = selection.quote || '';
+  // The selected part of the picture, shown here so the reader can see what is about to
+  // be attached without having to remember what they dragged. It is the same URL the
+  // comment will carry, so a wrong rectangle is visible *before* it is sent.
+  const preview = regionPreviewUrl(selection);
+  commentPreview.hidden = preview === '';
+  if (preview !== '') commentPreview.src = preview;
   if (opening) {
     commentText.value = '';
     commentError.hidden = true;
@@ -3234,6 +3261,10 @@ function closeCommentBar() {
   pendingSelection = null;
   commentBar.hidden = true;
   commentText.value = '';
+  // The preview is the picture's crop, not the picture: leaving its src set keeps the
+  // bytes alive in memory and shows a stale rectangle the next time the bar opens.
+  commentPreview.hidden = true;
+  commentPreview.removeAttribute('src');
 }
 
 function closeThread() {
@@ -3241,6 +3272,8 @@ function closeThread() {
   commentSheet.hidden = true;
   commentThread.innerHTML = '';
   commentReply.value = '';
+  commentSheetPreview.hidden = true;
+  commentSheetPreview.removeAttribute('src');
 }
 
 /** Post one comment, then redraw the frame so the new highlight appears. */
@@ -3260,6 +3293,7 @@ async function sendComment() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         file: selection.file,
+        ...(selection.region === undefined ? {} : { region: selection.region }),
         ...(selection.line === undefined ? {} : { line: selection.line }),
         ...(selection.endLine === undefined ? {} : { endLine: selection.endLine }),
         ...(selection.charStart === undefined ? {} : { charStart: selection.charStart }),
@@ -3329,6 +3363,14 @@ async function openThread(id) {
   commentSheetAddr.textContent = comment.address || id;
   commentSheetQuote.hidden = !comment.quote;
   commentSheetQuote.textContent = comment.quote || '';
+  // A region comment has no quote: what it selected is a rectangle, and the crop is the
+  // honest way to show it. Same URL as the composer previews, so the thread and the
+  // comment show the same pixels — and a picture that has since been replaced is
+  // visibly not the one the comment was written against.
+  const selected = comment.region === undefined ? '' : regionPreviewUrl(comment);
+  commentSheetPreview.hidden = selected === '';
+  if (selected === '') commentSheetPreview.removeAttribute('src');
+  else commentSheetPreview.src = selected;
   commentThread.innerHTML = '';
   commentThread.append(threadTurn(comment.author || 'you', comment.text, 'question'));
   if (comment.replies > 0) commentThread.append(threadTurn('agent', '…', 'answer-pending'));
@@ -3416,6 +3458,15 @@ window.addEventListener('message', (event) => {
   if (!data || typeof data !== 'object') return;
   if (data.t === 'pi-artifact-select' && typeof data.file === 'string') {
     showCommentBar(data);
+  } else if (data.t === 'pi-artifact-region') {
+    // A rectangle dragged over a picture. Only the frame on screen counts: a parked
+    // frame's document is not what the reader is pointing at.
+    if (imageFrameFor(event.source)) commentOnRegion(data);
+  } else if (data.t === 'pi-artifact-image') {
+    // The picture finished loading, or was tapped. Either way the drawer now knows it is
+    // looking at a commentable picture and can say so — a tap is most of what a reader
+    // does with one, and silence would read as "this file is not commentable".
+    if (imageFrameFor(event.source)) showImageHint(typeof data.file === 'string' ? data.file : '');
   } else if (data.t === 'pi-artifact-select-touch') {
     // A touch device: the document drew nothing and sent the selection here instead.
     const picked = data.message && typeof data.message.file === 'string' ? data.message : null;

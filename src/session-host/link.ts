@@ -42,8 +42,10 @@ import { createHost, type Host } from "@earendil-works/chord";
 import type {
   AgentConfig,
   CommentInput,
+  CommentRegion,
   CommentReply,
   CommentView,
+  CroppedImage,
   TranscriptMessage,
   AdapterEntry,
   AdapterVerdict,
@@ -203,6 +205,7 @@ export function serveSessionHost(seam: SessionHost): Host {
         charEnd?: number;
         quote?: string;
         occurrence?: number;
+        region?: CommentRegion;
         text: string;
         author?: string;
       }) => {
@@ -215,6 +218,7 @@ export function serveSessionHost(seam: SessionHost): Host {
             ...(input.endLine === undefined ? {} : { endLine: input.endLine }),
             ...(input.charStart === undefined ? {} : { charStart: input.charStart }),
             ...(input.charEnd === undefined ? {} : { charEnd: input.charEnd }),
+            ...(input.region === undefined ? {} : { region: input.region }),
           },
           text: input.text,
           ...(input.author === undefined ? {} : { author: input.author }),
@@ -225,6 +229,8 @@ export function serveSessionHost(seam: SessionHost): Host {
         if ("error" in result) return { error: result.error };
         return { comment: result.comment };
       },
+      cropArtifactRegion: async ({ file, region }: { file: string; region: CommentRegion }) =>
+        (await seam.cropArtifactRegion(conversation, file, region)) ?? null,
       resolveComment: async ({ commentId, resolved }: { commentId: string; resolved: boolean }) =>
         seam.resolveComment(conversation, commentId, resolved),
       noteCommentSubmission: async ({
@@ -385,6 +391,11 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
         }
         return { comment: result.comment };
       }),
+
+    cropArtifactRegion: (conversationId: number, file: string, region: CommentRegion) =>
+      withRef(host, session, conversationId, undefined, async (ref) =>
+        (await host.root((ctx) => ref.cropArtifactRegion({ file, region }, ctx))) ?? undefined,
+      ),
 
     resolveComment: (conversationId: number, commentId: string, resolved: boolean) =>
       withRef(host, session, conversationId, false, async (ref) =>

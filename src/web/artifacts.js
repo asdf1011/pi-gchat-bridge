@@ -202,6 +202,95 @@ function rawArtifactUrl(key) {
   return artifactUrl(key, false, true) + '?raw';
 }
 
+/**
+ * The selected part of a picture, as an image URL.
+ *
+ * The artifact origin does the cutting, because the bytes are already there and the
+ * allow-list has already approved the file: fetching them a second time to crop them
+ * elsewhere would be a second read of the same untrusted file, and the crop would have
+ * to travel back as base64 over the session API to be attached to anything.
+ *
+ * `region` is in the picture's own pixels — see `REGION_SCRIPT` — and never in screen
+ * pixels, so the same URL means the same rectangle in a narrow drawer and a wide one.
+ */
+function regionArtifactUrl(key, region) {
+  const path = key.split('/').map(encodeURIComponent).join('/');
+  return (
+    artifactsBase +
+    '/c/' +
+    current +
+    '/' +
+    path +
+    '?region=x' + region.x + ',y' + region.y + ',w' + region.width + ',h' + region.height
+  );
+}
+
+/**
+ * The URL the composer and the thread preview for a rectangle, or '' when there is none.
+ *
+ * Takes either shape: a pending selection (which has `file`) and a stored comment (which
+ * has `file` too, as the artifact key) are the same two facts, and the crop is the same
+ * URL for both — so what is about to be sent and what was sent cannot differ.
+ */
+function regionPreviewUrl(selection) {
+  if (!selection || !selection.region || !selection.file || artifactsBase === '') return '';
+  return regionArtifactUrl(selection.file, selection.region);
+}
+
+/**
+ * The picture the drawer is showing, when it is showing one.
+ *
+ * The composer sits over the whole drawer, so a message from a frame is a selection in
+ * *that* frame's document; a rectangle from a parked frame would be a comment on a
+ * picture nobody is looking at.
+ */
+function imageFrameFor(source) {
+  return currentFrame && currentFrame.contentWindow === source ? currentFrame : null;
+}
+
+/**
+ * The hint that a picture is commentable, and the one thing a tap can say.
+ *
+ * A drag is a selection and a tap is not, which is right for the gesture but leaves a
+ * reader who taps a picture with no sign that anything is possible. So the bar appears
+ * saying what to do, and gets out of the way as soon as a rectangle is drawn.
+ */
+function showImageHint(file) {
+  hideSelectionBar();
+  if (!commentBar.hidden) return;
+  selectionOn.textContent = file + ' — drag across the picture to comment on part of it';
+  selectionBar.hidden = false;
+}
+
+/**
+ * A rectangle the reader dragged over a picture.
+ *
+ * This is the one selection the host cannot derive for itself: a source view reports a
+ * line and the host finds it in the file, a rendered view reports text and the host
+ * finds *that*, but a rectangle is a fact about the picture's pixels that only the
+ * document which drew it knows. So the rectangle is measured in there (in the
+ * picture's own pixels) and taken as given here — the host still refuses a shape that
+ * is not a region inside the picture.
+ */
+function commentOnRegion(message) {
+  const region = message && message.region;
+  if (!region || typeof region !== 'object') return;
+  if (typeof message.file !== 'string' || message.file === '') return;
+  hideSelectionBar();
+  showCommentBar({
+    file: message.file,
+    region: {
+      x: Number(region.x) || 0,
+      y: Number(region.y) || 0,
+      width: Number(region.width) || 0,
+      height: Number(region.height) || 0,
+      imageWidth: Number(region.imageWidth) || 0,
+      imageHeight: Number(region.imageHeight) || 0,
+    },
+    intent: message.intent === 'comment' ? 'comment' : undefined,
+  });
+}
+
 /** The last path segment: what the file is actually called. */
 function baseName(key) {
   const parts = key.split('/');

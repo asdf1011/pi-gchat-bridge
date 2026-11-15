@@ -187,6 +187,8 @@ export interface CommentView {
   id: string;
   file: string;
   anchors: CommentAnchor[];
+  /** The part of a picture this comment is about, when it is about part of one. */
+  region?: CommentRegion;
   quote?: string;
   charStart?: number;
   charEnd?: number;
@@ -211,6 +213,15 @@ export interface CommentView {
   submissions?: number[];
 }
 
+/** A rectangle of a picture that has been cut out and is ready to attach. */
+export interface CroppedImage {
+  /** Base64 bytes, as an image content part carries them. */
+  data: string;
+  mimeType: string;
+  width: number;
+  height: number;
+}
+
 /**
  * A selection, as a viewer reports it.
  *
@@ -227,6 +238,26 @@ export interface CommentSelection {
   quote?: string;
   /** 0-based occurrence of `quote`, when the same text appears more than once. */
   occurrence?: number;
+  /**
+   * The part of a *picture* the comment is about.
+   *
+   * A picture has no lines, so this is the position instead of the four fields above:
+   * when it is present, nothing is annotated and no anchor is derived. It is measured
+   * by the document that drew the picture — the only party that knows how the pixels
+   * on screen map onto the file's own pixels — and checked here rather than trusted.
+   */
+  region?: CommentRegion;
+}
+
+/** A rectangle of a picture, in the picture's own pixels. */
+export interface CommentRegion {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** The picture's size when the rectangle was drawn, so a replaced file can be noticed. */
+  imageWidth: number;
+  imageHeight: number;
 }
 
 /** What a new comment needs. The anchors are derived host-side, never sent. */
@@ -533,6 +564,21 @@ export interface SessionHost {
     conversationId: number,
     input: CommentInput,
   ): Promise<{ comment: CommentView } | { error: string }>;
+
+  /**
+   * The part of a picture a comment selected, cut out of the file.
+   *
+   * On the seam rather than in the adapter because the bytes are the *host's* — the
+   * same artifact the viewer served — and because the crop has to agree with whatever
+   * the viewer drew. `undefined` means "could not be cropped": a format the decoder does
+   * not know, or a deployment without one. Never an error, because the comment is
+   * already recorded and its words are the part that matters.
+   */
+  cropArtifactRegion(
+    conversationId: number,
+    file: string,
+    region: CommentRegion,
+  ): Promise<CroppedImage | undefined>;
 
   /** Resolve, or reopen, one comment. True when something changed. */
   resolveComment(

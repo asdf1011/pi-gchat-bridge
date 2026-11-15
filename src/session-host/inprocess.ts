@@ -25,11 +25,14 @@ import type { AgentChange, ConversationId, UserInput } from "@earendil-works/pi-
 
 import {
   deriveArtifacts,
+  imageTypeOf,
   mergeArtifacts,
   presentArtifacts,
+  readArtifactBytes,
   type ArtifactEntryLike,
   type ArtifactFile,
 } from "../durable/artifacts.js";
+import { cropRegion } from "../web/crop.js";
 import {
   annotate,
   artifactKeyForPath,
@@ -50,6 +53,7 @@ import {
   deriveQuoteSelection,
   MAX_COMMENT_CHARS,
   newCommentId,
+  normalizeRegion,
   selectionFromOffsets,
 } from "../durable/comments.js";
 import { filesChangedSince } from "../durable/observed-files.js";
@@ -67,7 +71,9 @@ import type {
   AdapterVerdict,
   AgentConfig,
   CommentInput,
+  CommentRegion,
   CommentReply,
+  CroppedImage,
   CommentSuccessor,
   CommentView,
   ConversationState,
@@ -504,6 +510,10 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
       }
       const classified = await reanchorAll(
         repo,
+        // Comments on a picture are not `StoredComment`s that `classifyComments` can
+        // type as line comments: the two shapes differ in exactly one field, which is
+        // the whole point — a rectangle is not an anchor. The cast is the seam between
+        // two structs that are otherwise identical, not a lie about what is in them.
         classifyComments(stored as readonly ArtifactComment[], annotated),
         stored,
         located,
@@ -512,6 +522,7 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
         id: comment.id,
         file: comment.file,
         anchors: comment.anchors,
+        ...(comment.region === undefined ? {} : { region: comment.region }),
         ...(comment.quote === undefined ? {} : { quote: comment.quote }),
         ...(comment.charStart === undefined ? {} : { charStart: comment.charStart }),
         ...(comment.charEnd === undefined ? {} : { charEnd: comment.charEnd }),
@@ -544,6 +555,37 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
       }
       const conversation = await conversationOf(conversationId);
       if (!conversation) return { error: `no such conversation: ${conversationId}` };
+
+      // A comment on part of a picture takes a different road, and it has to start
+      // here: a picture has no lines for jj to annotate, so everything below is about
+      // a position that does not exist. The rectangle is measured by the document that
+      // drew the picture (the only party that knows how screen pixels map onto the
+      // file's), and checked here rather than trusted — a rectangle off the picture, or
+      // a tap wearing a rectangle's clothes, is refused with a reason rather than
+      // stored as an anchor nobody can act on.
+      if (input.selection.region !== undefined) {
+        const region = normalizeRegion(input.selection.region);
+        if (region === undefined) {
+          return { error: "that selection is not a rectangle inside the picture; drag across part of it and try again" };
+        }
+        const id = newCommentId();
+        const atRevision = await currentRevision(repo).catch(() => undefined);
+        const stored = {
+          id,
+          file: input.file,
+          // No anchors, and that is the point: there is nothing in the file's *history*
+          // for a rectangle to belong to. Liveness for an image comment is the picture's
+          // dimensions, not a revision's line numbers.
+          anchors: [],
+          region,
+          text,
+          at: Date.now(),
+          ...(input.author === undefined ? {} : { author: input.author }),
+          ...(atRevision === undefined ? {} : { atRevision }),
+        };
+        await host.addComment(conversationId, stored);
+        return { comment: { ...stored, state: "visible", positions: [] } };
+      }
 
       // The annotation is the authority: the viewer says which lines a person
       // dragged across, and this decides which revisions those lines came from
@@ -626,6 +668,36 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
             return line?.line ?? anchor.originalLine;
           }),
         },
+      };
+    },
+
+    /**
+     * The part of a picture a comment selected, cut out of the file.
+     *
+     * The file is found through the conversation's own artifact *list*, not through the
+     * key as a path: that list is the allow-list the viewer serves from, so a comment
+     * that names something the conversation never wrote crops nothing rather than
+     * reading it. The crop is the same code the artifact origin serves `?region=` with,
+     * so what the drawer previews and what the model receives are the same pixels.
+     */
+    async cropArtifactRegion(
+      conversationId: number,
+      file: string,
+      region: CommentRegion,
+    ): Promise<CroppedImage | undefined> {
+      const files = await listArtifacts(conversationId);
+      const artifact = files?.find((candidate) => candidate.key === file);
+      if (artifact === undefined) return undefined;
+      const type = imageTypeOf(artifact.key);
+      if (type === undefined) return undefined;
+      const bytes = readArtifactBytes(artifact).bytes;
+      const cropped = cropRegion(bytes, type, { ...region, imageWidth: 0, imageHeight: 0 });
+      if (cropped === undefined) return undefined;
+      return {
+        data: cropped.bytes.toString("base64"),
+        mimeType: cropped.mimeType,
+        width: cropped.width,
+        height: cropped.height,
       };
     },
 
@@ -893,6 +965,13 @@ async function reanchorAll(
 
   const out: (ResolvedComment & { successor?: CommentSuccessor })[] = [];
   for (const comment of classified) {
+    // A rectangle is not a line: it does not slide when the file changes, and the diff
+    // that maps one anchor to its successor has nothing to map. An image comment that
+    // went stale stays stale until somebody looks at it again.
+    if (comment.region !== undefined) {
+      out.push(comment);
+      continue;
+    }
     const atRevision = stored.find((candidate) => candidate.id === comment.id)?.atRevision;
     if (comment.state !== "orphaned" || atRevision === undefined) {
       out.push(comment);

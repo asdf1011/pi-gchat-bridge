@@ -15,6 +15,7 @@
  * What stays the bridge's job, deliberately: which Chat thread maps to which
  * conversation, and what a conversation's agent should be when it is created.
  */
+import fs from "node:fs";
 import path from "node:path";
 import {
   AssistantEntry,
@@ -88,7 +89,11 @@ import { skillGuidance } from "./extensions/skills.js";
 import { artifactGuidance } from "./extensions/artifact-guidance.js";
 import { createCodingToolsWithDelivery } from "./extensions/coding-tools.js";
 import { createCommentTools } from "./extensions/comment-tools.js";
+import { createImageRegionTools } from "./extensions/image-region.js";
 import { createReviewAgent } from "./extensions/review-agent.js";
+import { commitTurn, initArtifactRepo } from "./artifact-vcs.js";
+import { cropRegion } from "../web/crop.js";
+import { imageTypeOf } from "./artifacts.js";
 import { createSecretRedactor, secretsFromEnvironment } from "./extensions/secret-redactor.js";
 import type { RegisteredSecret } from "./extensions/redact.js";
 import type { SecretStore } from "../secret-store.js";
@@ -144,8 +149,11 @@ export interface BridgeHostOptions {
   secrets?: SecretStore;
   /**
    * Root of the per-conversation artifact repositories, or empty to leave the
-   * prompt alone. Only used to tell the model where to write; the commits happen
-   * in the session host.
+   * prompt alone.
+   *
+   * Used for two things: telling the model where to write, and committing on the
+   * reply path (`commitArtifacts`). The per-turn commit still happens in the
+   * session host; this is the mid-turn commit that a comment needs.
    */
   artifactsDir?: string;
 }
@@ -181,6 +189,14 @@ export class BridgeHost {
     readonly context: Context,
     /** Pid file proving this process is the only one on `dbPath`. */
     private readonly lock: BridgeLock,
+    /**
+     * A conversation's artifact repository directory, when artifacts are tracked.
+     *
+     * Derived from the same `artifactsDir` rule the session host uses for its
+     * end-of-turn commit; both must name the same repository, or a mid-turn commit
+     * would land somewhere the turn does not look.
+     */
+    private readonly artifactRepoFor?: (conversationId: number) => string | undefined,
   ) {}
 
   static async open(options: BridgeHostOptions): Promise<BridgeHost> {
@@ -234,6 +250,26 @@ export class BridgeHost {
             target.host
               ? target.host.addCommentReply(conversationId, commentId, text)
               : Promise.resolve({ error: "the session host is not ready" }),
+          // A comment anchors to a revision, and mid-turn there is not one yet: the
+          // end-of-turn commit has not run. Committing here is what lets a
+          // conversation write a file and comment on it in the same turn.
+          commitArtifacts: async (conversationId) =>
+            target.host ? target.host.commitArtifacts(conversationId) : undefined,
+        }),
+      );
+      // Looking at the part of a picture a comment selected. Installed with the comment
+      // tools because it reads a *comment's* rectangle: a model asking for coordinates
+      // of its own choosing would be viewing something nobody pointed at.
+      registry.install(
+        createImageRegionTools({
+          regionOf: (conversationId, commentId) =>
+            target.host
+              ? target.host.imageRegionOf(conversationId, commentId)
+              : Promise.resolve(undefined),
+          crop: (conversationId, file, region) =>
+            target.host
+              ? target.host.cropArtifactRegion(conversationId, file, region)
+              : Promise.resolve(undefined),
         }),
       );
       // Reviewing a change in a conversation of its own. Installed here rather than
@@ -250,6 +286,10 @@ export class BridgeHost {
             target.host
               ? target.host.addCommentReply(conversationId, commentId, text)
               : Promise.resolve({ error: "the session host is not ready" }),
+          // The reviewed conversation's working copy, not the reviewer's: the
+          // end-of-turn commit belongs to the turn that is still running.
+          commitArtifacts: async (conversationId) =>
+            target.host ? target.host.commitArtifacts(conversationId) : undefined,
         }),
       );
     }
@@ -307,7 +347,13 @@ export class BridgeHost {
     // store, and the only thing that resumes a run interrupted by a restart.
     harness.resume();
 
-    const host = new BridgeHost(harness, modelRuntime, options.dbPath, options.cwd, context, lock);
+    const artifactRepoFor =
+      options.artifactsDir === undefined || options.artifactsDir === ""
+        ? undefined
+        : (conversationId: number) =>
+            path.join(options.artifactsDir!, "conversation", String(conversationId));
+
+    const host = new BridgeHost(harness, modelRuntime, options.dbPath, options.cwd, context, lock, artifactRepoFor);
     // Hand the tools a way back in, now that there is something to hand them.
     self.host = host;
     // Before anything serves: `OriginsDoc` became conversation-scoped, and the stamps the
@@ -444,6 +490,31 @@ export class BridgeHost {
     return binding?.revisions ?? [];
   }
 
+  /**
+   * Commit a conversation's artifact working copy now, and return the change id.
+   *
+   * The end-of-turn commit (`commitTurn`, called from `inprocess.ts` once a
+   * submission settles) is a backstop, not the rule: a comment anchors to lines that
+   * exist in a *revision*, and during a turn the change being discussed is still in
+   * the working copy. So "write it, then comment on it" — a review subagent's whole
+   * loop, and what any conversation does when it produces a document and discusses
+   * it — needs a commit before the anchor is written.
+   *
+   * Described by the turn's own submission id where there is one, so history reads
+   * as it always did; `commitTurn` returns `undefined` and makes no operation when
+   * the working copy is clean, so calling this too often costs a `jj st`.
+   *
+   * Failure is swallowed by the caller. A comment that could not be committed for is
+   * still better than a reply that was lost, and a repository in a strange state is
+   * a lost annotation, not a lost answer.
+   */
+  async commitArtifacts(conversationId: number, submissionId?: number | string): Promise<string | undefined> {
+    const dir = this.artifactRepoFor?.(conversationId);
+    if (dir === undefined) return undefined;
+    await initArtifactRepo(dir);
+    return commitTurn(dir, submissionId ?? `reply-${conversationId}-${Date.now()}`);
+  }
+
   /** Every comment recorded against a conversation, oldest first. */
   async comments(conversationId: number): Promise<readonly StoredComment[]> {
     const value = await this.harness.snapshot(CommentsDoc, this.context);
@@ -506,6 +577,100 @@ export class BridgeHost {
       doc.byConversation[key] = { comments: next.comments };
     }, this.context);
     return { id: found.id };
+  }
+
+  /**
+   * One comment, by the short id a model was sent.
+   *
+   * The prefix is resolved host-side and an ambiguous one is refused, exactly as
+   * `addCommentReply` does — a tool that guessed between two threads would answer about
+   * the wrong one, and the model has no way of telling.
+   */
+  async commentFor(
+    conversationId: number,
+    shortId: string,
+  ): Promise<StoredComment | { error: string }> {
+    const existing = await this.comments(conversationId);
+    const found = findByShortId(existing, shortId);
+    if (found === undefined) return { error: `no comment with id ${shortId}` };
+    if ("ambiguous" in found) return { error: `more than one comment starts with ${shortId}` };
+    return found;
+  }
+
+  /**
+   * The rectangle a comment names, for `view_image`.
+   *
+   * Reached through the *comment* rather than through coordinates a model supplies:
+   * the rectangle someone drew is the one fact here that cannot be re-derived, so the
+   * tool reads it from the record instead of trusting a request.
+   */
+  async imageRegionOf(
+    conversationId: number,
+    shortId: string,
+  ): Promise<{ file: string; x: number; y: number; width: number; height: number; imageWidth: number; imageHeight: number } | undefined> {
+    const found = await this.commentFor(conversationId, shortId);
+    if ("error" in found) return undefined;
+    const region = found.region;
+    if (region === undefined) return undefined;
+    return { file: found.file, ...region };
+  }
+
+  /**
+   * The directories an artifact key may name, in the order the session host tries them.
+   *
+   * A key is a path under a *root* — `PI_CWD` plus the agent config dir, by the same
+   * rule the viewer uses — and this is the host's copy of that list. Duplicated rather
+   * than passed in because the host is built before the session host, and a crop that
+   * disagreed with the viewer about where a key points would be a picture of the wrong
+   * file.
+   */
+  private artifactRoots(): string[] {
+    const roots = [this.cwd];
+    try {
+      roots.push(getAgentDir());
+    } catch {
+      // No agent dir in this deployment: one root is enough.
+    }
+    return [...new Set(roots)];
+  }
+
+  /**
+   * That rectangle, cut out of the artifact.
+   *
+   * The file is resolved against this conversation's own artifact *set*, not against
+   * the path in the comment: a comment names a key, and the key is only meaningful
+   * because it appears in the list the conversation derived. Reading by path would let
+   * a stale comment point at anything.
+   */
+  async cropArtifactRegion(
+    conversationId: number,
+    file: string,
+    region: { x: number; y: number; width: number; height: number },
+  ): Promise<{ data: string; mimeType: string; width: number; height: number } | undefined> {
+    const dir = this.artifactRepoFor?.(conversationId);
+    if (dir === undefined) return undefined;
+    // The roots the session host resolves artifact keys against, longest first — the
+    // same list, so a key that opens in the viewer opens here.
+    const bases = [...this.artifactRoots()].sort((a, b) => b.length - a.length);
+    const candidates = [path.dirname(dir), dir, ...bases].map((base) => path.join(base, file));
+    for (const candidate of candidates) {
+      if (!fs.existsSync(candidate) || !fs.statSync(candidate).isFile()) continue;
+      const type = imageTypeOf(candidate);
+      if (type === undefined) return undefined;
+      const cropped = cropRegion(
+        fs.readFileSync(candidate),
+        type,
+        { ...region, imageWidth: 0, imageHeight: 0 },
+      );
+      if (cropped === undefined) return undefined;
+      return {
+        data: cropped.bytes.toString("base64"),
+        mimeType: cropped.mimeType,
+        width: cropped.width,
+        height: cropped.height,
+      };
+    }
+    return undefined;
   }
 
   /** Note a submission a comment started, so its answer can be joined later. */

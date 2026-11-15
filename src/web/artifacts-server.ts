@@ -24,8 +24,10 @@ import http from "node:http";
 
 import { imageTypeOf, isMarkdown, readArtifact, readArtifactBytes, type ArtifactFile } from "../durable/artifacts.js";
 import { repoRelativePath, showFile, showFileBytes } from "../durable/artifact-vcs.js";
+import { parseRegion } from "../durable/comments.js";
 import { logger } from "../logger.js";
 import type { SessionHost } from "../session-host/api.js";
+import { cropRegion } from "./crop.js";
 import { escapeHtml, markdownDocument, renderMarkdown } from "./markdown.js";
 
 export interface ArtifactsServerOptions {
@@ -387,6 +389,160 @@ export const SWIPE_SCRIPT = `
         parent.postMessage({ t: "pi-artifact-swipe", direction: moved > 0 ? "left" : "right" }, "*");
       }, 120);
     }, { passive: true });
+  })();
+`;
+
+/**
+ * Choosing part of a picture, for the image document only.
+ *
+ * Separate from `SWIPE_SCRIPT` and `COMMENT_SCRIPT` because it needs an `<img>` (the
+ * source and rendered views have none) and because a rectangle is not a line: it is
+ * the one gesture whose result the host cannot re-derive, so this computes the answer
+ * itself, in the picture's own pixels, and reports it. Exported so the e2e test can
+ * serve a document that really carries it.
+ */
+export const REGION_SCRIPT = `
+  // --- Choosing part of a picture ------------------------------------------
+  //
+  // A picture has no lines to select, so the commentable unit is a rectangle dragged
+  // over it. What the parent needs is the rectangle **in the picture's own pixels**: a
+  // picture is scaled to fit the drawer, so the pixels under the finger are not the
+  // pixels in the file, and a rectangle counted in screen pixels would point somewhere
+  // else the moment the drawer is a different width. The scale is naturalWidth /
+  // drawnWidth, and it is applied here because this document is the only party that
+  // knows both numbers.
+  //
+  // Every message here is report-only, like the selection script: this origin cannot
+  // submit anything, and the parent decides what a rectangle means.
+  (function () {
+    var image = document.querySelector("img.crop-target");
+    if (!image) return;
+
+    var MIN_SIDE = 8;        // a tap is not a selection (see MIN_REGION_SIDE in comments.ts)
+    var drag = null;         // { x, y } where the finger went down, in client coordinates
+    var marquee = null;      // the box being drawn
+    var endedAt = 0;         // when a real drag finished, so the click it causes is not mistaken for a tap
+
+    /** The drag so far, in the picture's own pixels, or null when it is not a selection. */
+    function regionOf(from, to) {
+      var naturalWidth = image.naturalWidth || 0;
+      var naturalHeight = image.naturalHeight || 0;
+      var box = image.getBoundingClientRect();
+      if (naturalWidth < 1 || naturalHeight < 1 || box.width < 1 || box.height < 1) return null;
+      // The picture is fitted, so one scale serves both axes and the letterbox is
+      // outside box — a drag starting on the empty margin is clamped to the edge
+      // rather than refused, because it obviously meant the picture.
+      var scaleX = naturalWidth / box.width;
+      var scaleY = naturalHeight / box.height;
+      var left = Math.max(0, Math.min(from.x, to.x) - box.left) * scaleX;
+      var top = Math.max(0, Math.min(from.y, to.y) - box.top) * scaleY;
+      var right = Math.min(box.width, Math.max(from.x, to.x) - box.left) * scaleX;
+      var bottom = Math.min(box.height, Math.max(from.y, to.y) - box.top) * scaleY;
+      var region = {
+        x: Math.round(left),
+        y: Math.round(top),
+        width: Math.round(right - left),
+        height: Math.round(bottom - top),
+        imageWidth: naturalWidth,
+        imageHeight: naturalHeight
+      };
+      if (region.width < MIN_SIDE || region.height < MIN_SIDE) return null;
+      return region;
+    }
+
+    function clear() {
+      if (marquee && marquee.parentNode) marquee.parentNode.removeChild(marquee);
+      marquee = null;
+      drag = null;
+    }
+
+    /**
+     * The picture's size, which is all a tap can say.
+     *
+     * A tap is not a selection — swiping pages, and a stray touch must not start a box —
+     * but a tap is also most of what a reader does with a picture, and without an answer
+     * to it the drawer could not tell them the picture is commentable at all. So a tap
+     * takes one *measurement*: the picture's size, nothing more, and the parent draws the
+     * affordance that says "drag across the picture to comment on part of it".
+     */
+    document.addEventListener("click", function () {
+      // A drag also produces a click on release. That one is the end of a selection, not a
+      // tap, and answering it would replace the comment box with the hint.
+      if (drag || Date.now() - endedAt < 400) return;
+      parent.postMessage(
+        {
+          t: "pi-artifact-image",
+          file: document.body.getAttribute("data-file") || "",
+          width: image.naturalWidth || 0,
+          height: image.naturalHeight || 0
+        },
+        "*"
+      );
+    });
+
+    image.addEventListener("pointerdown", function (event) {
+      // Primary button or a finger; a right-click is the browser's menu.
+      if (typeof event.button === "number" && event.button !== 0) return;
+      // One finger only: a second is a pinch, and touch-action: none on the picture
+      // means the browser will not take it back.
+      if (event.pointerType === "touch" && drag) return;
+      event.preventDefault();
+      try {
+        image.setPointerCapture(event.pointerId);
+      } catch (e) {
+        // Capture is an optimisation; the handlers below work without it.
+      }
+      drag = { x: event.clientX, y: event.clientY };
+      marquee = document.createElement("div");
+      marquee.className = "marquee";
+      marquee.style.left = drag.x + "px";
+      marquee.style.top = drag.y + "px";
+      marquee.style.width = "0px";
+      marquee.style.height = "0px";
+      document.body.appendChild(marquee);
+    });
+
+    image.addEventListener("pointermove", function (event) {
+      if (!drag || !marquee) return;
+      var left = Math.min(drag.x, event.clientX);
+      var top = Math.min(drag.y, event.clientY);
+      marquee.style.left = left + "px";
+      marquee.style.top = top + "px";
+      marquee.style.width = Math.abs(event.clientX - drag.x) + "px";
+      marquee.style.height = Math.abs(event.clientY - drag.y) + "px";
+    });
+
+    /** The finger or the mouse came up: the rectangle is decided here, once. */
+    function end(event) {
+      if (!drag) return;
+      // Nothing is sent while the box is being drawn: a message per pointermove would
+      // have the drawer re-render a bar sixty times a second under the finger, and the
+      // only rectangle that matters is the one the reader let go of.
+      var region = regionOf(drag, { x: event.clientX, y: event.clientY });
+      clear();
+      // A press that ended where it began is a tap: no region, and no message — the
+      // click that follows offers the hint instead.
+      if (!region) return;
+      endedAt = Date.now();
+      parent.postMessage(
+        {
+          t: "pi-artifact-region",
+          file: document.body.getAttribute("data-file") || "",
+          region: region,
+          // Where the comment box should be talked about: the reader let go here, and a
+          // bar pinned to a fixed strip would be a separate place from the box they just
+          // drew.
+          at: { x: event.clientX, y: event.clientY },
+          intent: "comment"
+        },
+        "*"
+      );
+    }
+
+    image.addEventListener("pointerup", end);
+    // A gesture the system claims (a scroll that turns into a back-swipe) ends here and
+    // never at pointerup, so the box is taken down rather than left on the picture.
+    image.addEventListener("pointercancel", clear);
   })();
 `;
 
@@ -1087,13 +1243,27 @@ function imageDocument(input: {
      capped too, so a tall one does not need a scroll to see what it is. */
   img { max-width: 100%; max-height: 100%; object-fit: contain;
         image-rendering: auto; background: #8881; border-radius: .4rem; }
+  /* The picture is the gesture surface, so the browser must not claim a drag for
+     scrolling or for a back-swipe: touch-action: none hands every touch to the region
+     script, which is the only way a rectangle can be drawn on a phone. Vertical
+     scrolling of a picture too tall for the frame is the cost, and the drawer opens a
+     picture fitted rather than scrolling it (see the sizing above). */
+  img.crop-target { touch-action: none; cursor: crosshair; user-select: none;
+        -webkit-user-select: none; -webkit-user-drag: none; }
+  /* The rectangle being dragged. Fixed, because the script works in client
+     coordinates; pointer-events: none, because the box sits under the finger that is
+     drawing it and would otherwise steal its own pointermove. */
+  .marquee { position: fixed; z-index: 2147483647; pointer-events: none;
+        border: 2px solid #4c9aff; background: #4c9aff33; border-radius: 2px;
+        box-shadow: 0 0 0 1px #0006 inset; }
   .note { position: absolute; bottom: .5rem; left: .5rem; margin: 0; opacity: .7; }
 </style>
 </head>
-<body>
-<img src="${escapeHtml(href)}" alt="${escapeHtml(input.key)}">
+<body data-file="${escapeHtml(input.key)}">
+<img class="crop-target" src="${escapeHtml(href)}" alt="${escapeHtml(input.key)}" draggable="false">
 ${note}
 <script nonce="${input.nonce}">${SWIPE_SCRIPT}</script>
+<script nonce="${input.nonce}">${REGION_SCRIPT}</script>
 </body>
 </html>`;
 }
@@ -1290,6 +1460,27 @@ async function handle(
     // it over a PNG would corrupt it. That is a real gap and it is stated here
     // rather than hidden — an image this agent produced can contain whatever it
     // drew, and the reviewer of an image is a person looking at it.
+    //
+    // The *region* the reader dragged over, cut out of the same bytes. This lives on
+    // the artifact origin and not on the API host because the bytes are already here:
+    // fetching them again through `?raw` would be a second read of a file the
+    // allow-list has already approved, and it would have to be fetched as base64 over
+    // the session API to be cropped anywhere else. The rectangle is clamped here as
+    // well as in `normalizeRegion` — two independent checks, because this is the one
+    // that would index past the end of a decoded picture.
+    if (url.searchParams.has("region")) {
+      const asked = parseRegion(url.searchParams.get("region") ?? "");
+      const cropped = asked === undefined ? undefined : cropRegion(image.bytes, imageType, asked);
+      if (cropped === undefined) {
+        send(res, 404, "text/plain; charset=utf-8", TEXT_CSP, `cannot crop ${key} at that region`);
+        return;
+      }
+      send(res, 200, cropped.mimeType, IMAGE_CSP, cropped.bytes, {
+        "Content-Disposition": "inline; filename=\"region.png\"",
+        "Color-Scheme": "light dark",
+      });
+      return;
+    }
     if (!url.searchParams.has("raw")) {
       // A nonce, because this document now carries the swipe script. The permission
       // is the narrowest that works: one script, ours, for this response only — the

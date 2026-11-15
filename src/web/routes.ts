@@ -52,7 +52,7 @@ import { runCommand } from "../commands/command-surface.js";
 import { imageTypeOf, isMarkdown } from "../durable/artifacts.js";
 import { currentAddress, MAX_COMMENT_CHARS, modelText } from "../durable/comments.js";
 import { entriesBefore } from "../durable/entries.js";
-import type { SessionHost } from "../session-host/api.js";
+import type { CommentRegion, SessionHost } from "../session-host/api.js";
 import { logger } from "../logger.js";
 
 /** Keep a number inside a range, without trusting the query string. */
@@ -832,6 +832,9 @@ export async function handleWebRequest(
           // had commented on.
           address: currentAddress(comment, comment.positions),
           anchors: comment.anchors,
+          // A picture's position. Present instead of `positions` for an image comment,
+          // and carried to the page so a thread can show which part was pointed at.
+          ...(comment.region === undefined ? {} : { region: comment.region }),
           ...(comment.quote === undefined ? {} : { quote: comment.quote }),
           text: comment.text,
           at: comment.at,
@@ -870,6 +873,8 @@ export async function handleWebRequest(
       charEnd?: unknown;
       quote?: unknown;
       occurrence?: unknown;
+      /** A rectangle of a picture, in the picture's own pixels. See `normalizeRegion`. */
+      region?: unknown;
       text?: unknown;
     };
     try {
@@ -899,6 +904,10 @@ export async function handleWebRequest(
       ...(number(parsed.charEnd) === undefined ? {} : { charEnd: number(parsed.charEnd)! }),
       ...(typeof parsed.quote === "string" && parsed.quote.trim() !== "" ? { quote: parsed.quote } : {}),
       ...(number(parsed.occurrence) === undefined ? {} : { occurrence: number(parsed.occurrence)! }),
+      // Not trusted, and deliberately not checked here: the host normalises it against
+      // the picture's own bounds, and a route that also clamped would be a second rule
+      // to keep in step with the first.
+      ...(parsed.region === undefined ? {} : { region: parsed.region as CommentRegion }),
     };
     const speaker = (who.email ?? "someone").split("@")[0]!;
     const created = await seam.addComment(conversationId, {
@@ -923,8 +932,30 @@ export async function handleWebRequest(
     // what the request claimed.
     const stored = created.comment;
     const message = modelText({ ...stored, author: speaker }, { path });
+    // A comment on part of a picture travels as *two parts*: the words that say which
+    // file and which rectangle, and the rectangle itself, cut out of the file. The
+    // words are the whole message for a model without image input, which is why they
+    // never depend on the picture having been cropped successfully.
+    //
+    // The crop is best-effort. Unable to decode the file (an SVG, a `.png` that holds
+    // text, a deployment without the image library) the comment is still sent, with a
+    // sentence saying where to look — losing the attachment is recoverable, losing the
+    // review is not.
+    const crop =
+      stored.region === undefined
+        ? undefined
+        : await seam
+            .cropArtifactRegion(conversationId, stored.file, stored.region)
+            .catch(() => undefined);
+    const content =
+      crop === undefined
+        ? message
+        : [
+            { type: "text" as const, text: message },
+            { type: "image" as const, data: crop.data, mimeType: crop.mimeType },
+          ];
     const result = await seam.submit(conversationId, {
-      content: message,
+      content,
       whenBusy: "steer",
       // A review comment is words from the browser, whoever typed them.
       origin: "webui",

@@ -291,6 +291,23 @@ export interface ArtifactAnchor {
   content: string;
 }
 
+/**
+ * A rectangle of a picture, in the picture's own pixels.
+ *
+ * `imageWidth`/`imageHeight` are the size the rectangle was measured against, kept
+ * so a picture that was later replaced can be spotted: the same numbers over a
+ * re-exported screenshot frame a different thing, and saying the anchor is stale is
+ * better than drawing a box over the wrong part of the new picture.
+ */
+export interface ArtifactRegion {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  imageWidth: number;
+  imageHeight: number;
+}
+
 /** A comment on an artifact, anchored to `(revision, line)` pairs. */
 export interface ArtifactComment {
   /** Stable id, unique within a conversation. */
@@ -303,6 +320,15 @@ export interface ArtifactComment {
    * single triple.
    */
   anchors: ArtifactAnchor[];
+  /**
+   * The part of a *picture* the comment is about, when it is about part of one.
+   *
+   * A picture has no lines for jj to annotate, so `anchors` is empty and this is the
+   * position. It is deliberately not resolved like an anchor: a rectangle measured in
+   * the picture's own pixels does not move when the file is edited, so liveness is a
+   * question about the picture's dimensions, which `classifyComments` answers.
+   */
+  region?: ArtifactRegion;
   /**
    * The selected text, when the selection was narrower than whole lines.
    *
@@ -605,9 +631,30 @@ export async function annotate(
 export function classifyComments(
   comments: readonly ArtifactComment[],
   annotated: ReadonlyMap<string, readonly AnnotatedLine[]>,
+  /**
+   * The size each picture is *now*, keyed by file.
+   *
+   * A rectangle is measured in the picture's own pixels, so it does not move when the
+   * file is edited — the only thing that can invalidate it is the picture itself
+   * changing shape. Absent means "not known", and an image comment whose picture
+   * could not be measured is reported visible rather than orphaned: a deployment that
+   * cannot read the file's dimensions has not learned that the comment is wrong.
+   */
+  imageSizes: ReadonlyMap<string, { width: number; height: number }> = new Map(),
 ): ResolvedComment[] {
   return comments.map((comment) => {
     if (comment.resolved) return { ...comment, state: "resolved", positions: [] };
+    // A picture's position is a rectangle, not a line: there is nothing to resolve and
+    // nothing to highlight in a source view, so `positions` is empty by construction.
+    // Whether it still points at what it described is a question about the picture's
+    // dimensions.
+    if (comment.region !== undefined) {
+      const now = imageSizes.get(comment.file);
+      const same =
+        now === undefined ||
+        (now.width === comment.region.imageWidth && now.height === comment.region.imageHeight);
+      return { ...comment, state: same ? "visible" : "orphaned", positions: [] };
+    }
     const lines = annotated.get(comment.file);
     if (!lines || comment.anchors.length === 0) {
       return { ...comment, state: "orphaned", positions: [] };

@@ -33,6 +33,23 @@ export type StoredAnchor = {
 };
 
 /**
+ * A rectangle of a picture, in the picture's own pixels.
+ *
+ * The size is stored with it so a later read can tell whether the file is still the
+ * picture the comment was written against. A rectangle without it would silently
+ * highlight the wrong part of a re-exported screenshot, which is worse than saying
+ * the anchor is stale.
+ */
+export type StoredRegion = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  imageWidth: number;
+  imageHeight: number;
+};
+
+/**
  * One thing the agent said *in a thread*, rather than as a turn.
  *
  * Deliberately not a transcript entry. A review reply is plumbing: the person
@@ -52,6 +69,16 @@ export type StoredComment = {
   id: string;
   file: string;
   anchors: StoredAnchor[];
+  /**
+   * The part of a picture the comment is about, when it is about part of one.
+   *
+   * A picture has no lines to annotate, so `anchors` is empty and this is the whole
+   * position. Both fields exist because they are different kinds of address: a line
+   * is a place in *history* and has to be resolved, a rectangle is a place in a
+   * picture and does not move. Stored beside `anchors` rather than instead of it so
+   * every reader can keep one shape.
+   */
+  region?: StoredRegion;
   quote?: string;
   charStart?: number;
   charEnd?: number;

@@ -23,7 +23,9 @@ import {
   selectionFromOffsets,
   MAX_QUOTE_CHARS,
   modelText,
+  normalizeRegion,
   parseAnchor,
+  parseRegion,
   sortForReview,
 } from "../src/durable/comments.js";
 
@@ -309,4 +311,77 @@ test("a comment that has moved is cited where it is now", () => {
   // Nothing resolved: fall back to where it was written rather than inventing a place.
   assert.equal(currentAddress(moved, []), anchorAddress(moved));
   assert.equal(currentAddress(moved, []), "notes.md#L121C10-L121C48");
+});
+
+/** A rectangle as the image document reports it: in the picture's own pixels. */
+const region = { x: 120, y: 64, width: 320, height: 180, imageWidth: 1280, imageHeight: 800 };
+
+test("a region is addressed by its rectangle, in the picture's own pixels", () => {
+  const address = anchorAddress({ file: "shot.png", anchors: [], region });
+  assert.equal(address, "shot.png#x120,y64,w320,h180");
+  // Nothing in the address is a ratio: the four numbers are pixels, so a reader can hold
+  // them against the picture, and the same comment means the same part after a resize.
+  assert.equal(anchorSuffix({ anchors: [], region }), "#x120,y64,w320,h180");
+});
+
+test("an image comment has no line address to resolve, and says so by naming its rectangle", () => {
+  const comment = { file: "shot.png", anchors: [], region };
+  // `positions` is empty for an image: there is nothing in the file's history for a
+  // rectangle to belong to, so "where is it now" is the rectangle itself.
+  assert.equal(currentAddress(comment, []), "shot.png#x120,y64,w320,h180");
+  assert.equal(currentAddress(comment, [7]), "shot.png#x120,y64,w320,h180", "positions do not move it");
+});
+
+test("a region round-trips through its address, and nonsense is refused", () => {
+  const parsed = parseRegion("#x120,y64,w320,h180");
+  assert.deepEqual(parsed, { x: 120, y: 64, width: 320, height: 180, imageWidth: 0, imageHeight: 0 });
+  assert.equal(parseRegion("x0,y0,w1,h1")?.x, 0, "the hash is optional");
+  for (const bad of ["", "#L20", "#x120,y64", "#x-4,y0,w10,h10", "#x0,y0,w0,h10", "shot.png"]) {
+    assert.equal(parseRegion(bad), undefined, `refused: ${bad}`);
+  }
+});
+
+test("a rectangle is clamped to the picture, and a tap is not one", () => {
+  // Off the right edge by 100 pixels: the drag ended past the picture, and the part that
+  // was over it is the part that was selected.
+  const clamped = normalizeRegion({ x: 1200, y: 780, width: 500, height: 500, imageWidth: 1280, imageHeight: 800 });
+  assert.deepEqual(clamped, { x: 1200, y: 780, width: 80, height: 20, imageWidth: 1280, imageHeight: 800 });
+
+  // The bug this guards: a click is a zero-sized box, and a comment anchored to nothing
+  // would open a thread that highlights no part of any picture.
+  assert.equal(normalizeRegion({ x: 10, y: 10, width: 0, height: 0, imageWidth: 100, imageHeight: 100 }), undefined);
+  assert.equal(normalizeRegion({ x: 10, y: 10, width: 3, height: 40, imageWidth: 100, imageHeight: 100 }), undefined);
+  // And a shape without the size it was measured against cannot be checked, so it is not
+  // one: guessing "probably fine" is how a rectangle lands somewhere nobody pointed.
+  assert.equal(normalizeRegion({ x: 1, y: 1, width: 40, height: 40 }), undefined);
+  assert.equal(normalizeRegion("not a region"), undefined);
+  assert.equal(normalizeRegion(null), undefined);
+});
+
+test("the model is told which part of which picture, and that the crop is attached", () => {
+  const text = modelText(
+    { id: "2f4f5da0-7c07-4e39-8f7b-9fd9aaee6a92", file: "conversation/7/shot.png", anchors: [], region, text: "this button is in the wrong place", author: "henry" },
+    { path: "/workspace/artifacts/conversation/7/shot.png" },
+  );
+  assert.match(text.split("\n")[0]!, /^henry commented on the selected region of conversation\/7\/shot\.png#x120,y64,w320,h180/);
+  assert.match(text, /\[comment 2f4f5da0\]/);
+  // The size, so a model with no image input still knows the rectangle's scale.
+  assert.match(text, /Selected region: 320x180 at \(120, 64\) of a 1280x800 image/);
+  // The attachment is *described*: without this sentence a seeing model is handed a
+  // floating fragment with no sign of what it is.
+  assert.match(text, /attached to this message as an image/);
+  assert.match(text, /this button is in the wrong place$/);
+  // The path a tool could use, because a key is not a path.
+  assert.match(text, /\/workspace\/artifacts\/conversation\/7\/shot\.png/);
+});
+
+test("Chat is told about the same region in words a person reads", () => {
+  const text = chatText(
+    { file: "conversation/7/shot.png", anchors: [], region, text: "wrong place", author: "henry" },
+    { url: "https://artifacts.example/c/7/conversation/7/shot.png", speaker: "henry" },
+  );
+  // The link still points at the file; the rectangle is spelled out underneath, because a
+  // Chat reader cannot hover an image link to see which part was meant.
+  assert.match(text, /\[shot\.png#x120,y64,w320,h180\]/);
+  assert.match(text, /the 320×180 region at \(120, 64\) of a 1280×800 image/);
 });

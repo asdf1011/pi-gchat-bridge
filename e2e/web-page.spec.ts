@@ -19,6 +19,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import { SWIPE_SCRIPT } from "../src/web/artifacts-server.js";
+import { imageDocumentFor } from "./image-document.js";
 
 const CONVERSATIONS = [
   { conversationId: 7, chatKey: "spaces/A/threads/T1", model: "deepseek/deepseek-flash", name: "deploy notes" },
@@ -2194,4 +2195,210 @@ test("a link to a message that is not there says so", async ({ page }) => {
   await page.goto("/7/#e999");
   // The fragment survives a reload, so an old link must read as "gone", not as "here".
   await expect(page.locator("#log .anchor-miss")).toHaveText(/not in this conversation/);
+});
+
+test("artifacts: dragging over a picture selects a region and opens the comment box", async ({ page }) => {
+  // The gesture this feature exists for. It can only be checked in a real browser: the
+  // rectangle is measured against a *laid out* image, so the scale from screen pixels to
+  // the picture's own pixels is what is being tested, and a jsdom element has no layout.
+  //
+  // The wrapper served here is the real `imageDocument` markup (class, `data-file`, both
+  // scripts), so the messages the drawer receives are the ones production would send.
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAYAAACinX6EAAAAJUlEQVR42u3NMQEAAAgDoC251a3gLwSgcyfTVFVVVVVVVVVVVVX1tQFrwAPhpO4WAAAAAElFTkSuQmCC",
+    "base64",
+  );
+
+  await stubApi(page);
+  await page.route("**/api/environment", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ artifactsBaseUrl: "https://artifacts.example", pageVersion: "t" }),
+    }),
+  );
+  await page.route("**/api/c/*/artifacts", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([
+        { key: "pi/out/screenshot.png", wrote: 1, edited: 0, markdown: false, image: true },
+      ]),
+    }),
+  );
+  await page.route("**/api/c/*/comments", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
+  );
+
+  const posted: unknown[] = [];
+  await page.route("**/api/c/*/comments", (route) => {
+    if (route.request().method() === "POST") {
+      posted.push(route.request().postDataJSON());
+      return route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true, id: "c1", submissionId: 5 }),
+      });
+    }
+    return route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+  });
+
+  await page.route("https://artifacts.example/**", (route) => {
+    const url = route.request().url();
+    if (url.includes("?raw")) return route.fulfill({ status: 200, contentType: "image/png", body: png });
+    if (url.includes("?region=")) {
+      return route.fulfill({ status: 200, contentType: "image/png", body: png });
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: "text/html",
+      body: imageDocumentFor("pi/out/screenshot.png"),
+    });
+  });
+
+  await page.goto("/7/");
+  await page.locator("#artifacts-toggle").click();
+  await page.locator("#artifact-list li").first().click();
+  await expect
+    .poll(() => page.evaluate(() => getComputedStyle(document.getElementById("artifact-track")!).transform))
+    .toBe("matrix(1, 0, 0, 1, 0, 0)");
+
+  const frameOf = async (): Promise<import("@playwright/test").Frame> => {
+    for (const candidate of page.frames()) {
+      if (candidate === page.mainFrame() || !candidate.url().includes("screenshot.png")) continue;
+      try {
+        if (await candidate.evaluate(() => document.images.length > 0)) return candidate;
+      } catch {
+        // Mid-navigation; try the next poll.
+      }
+    }
+    throw new Error("no frame with the picture yet");
+  };
+  await expect.poll(async () => {
+    try {
+      await frameOf();
+      return true;
+    } catch {
+      return false;
+    }
+  }).toBe(true);
+  const frame = await frameOf();
+  const drawn = await frame.evaluate(() => {
+    const image = document.querySelector("img")!;
+    const box = image.getBoundingClientRect();
+    return { left: box.left, top: box.top, width: box.width, height: box.height };
+  });
+  // The picture is drawn smaller than its 64x32 self, so the scale from screen to file
+  // pixels is real and the assertion below is not trivially true.
+  expect(drawn.width).toBeGreaterThan(0);
+
+  // Drag across the left half of the picture. A mouse is used rather than a touch: the
+  // region script listens to pointer events, and a mouse drag is the same gesture.
+  await frame.evaluate(() => {
+    const image = document.querySelector("img")!;
+    const box = image.getBoundingClientRect();
+    const at = (fx: number, fy: number) => ({ x: box.left + box.width * fx, y: box.top + box.height * fy });
+    const from = at(0.1, 0.2);
+    const to = at(0.6, 0.7);
+    const send = (type: string, point: { x: number; y: number }) =>
+      image.dispatchEvent(
+        new PointerEvent(type, { clientX: point.x, clientY: point.y, bubbles: true, pointerId: 1, pointerType: "mouse", button: 0 }),
+      );
+    send("pointerdown", from);
+    send("pointermove", to);
+    send("pointerup", to);
+  });
+
+  // The comment box opens, addressed by the rectangle rather than by a line.
+  await expect(page.locator("#comment-bar")).toBeVisible();
+  await expect(page.locator("#comment-addr")).toContainText("screenshot.png x");
+  // And the selected part is previewed, from the same URL the comment will carry.
+  await expect(page.locator("#comment-preview")).toBeVisible();
+  expect(await page.locator("#comment-preview").getAttribute("src")).toMatch(/\?region=x\d+,y\d+,w\d+,h\d+$/);
+
+  await page.locator("#comment-text").fill("this button is in the wrong place");
+  await page.locator("#comment-send").click();
+
+  await expect.poll(() => posted.length).toBe(1);
+  const body = posted[0] as { file: string; region: { x: number; y: number; width: number; height: number; imageWidth: number; imageHeight: number } };
+  expect(body.file).toBe("pi/out/screenshot.png");
+  // In the picture's own pixels: the 64x32 file, not the drawn box. A rectangle counted
+  // in screen pixels would be a different number here and would point elsewhere in a
+  // drawer of another width — which is the bug this conversion exists to prevent.
+  expect(body.region.imageWidth).toBe(64);
+  expect(body.region.imageHeight).toBe(32);
+  expect(body.region.x).toBeGreaterThan(0);
+  expect(body.region.y).toBeGreaterThan(0);
+  expect(body.region.width).toBeGreaterThan(8);
+  expect(body.region.height).toBeGreaterThan(8);
+  expect(body.region.x + body.region.width).toBeLessThanOrEqual(64);
+  expect(body.region.y + body.region.height).toBeLessThanOrEqual(32);
+});
+
+test("artifacts: opening an image comment shows the part of the picture it is about", async ({ page }) => {
+  // A region comment has no quote to show, so the thread's only honest answer to "what
+  // is this about" is the crop. It also means a picture that has since been replaced is
+  // visibly not the one the comment was written against.
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAYAAACinX6EAAAAJUlEQVR42u3NMQEAAAgDoC251a3gLwSgcyfTVFVVVVVVVVVVVVX1tQFrwAPhpO4WAAAAAElFTkSuQmCC",
+    "base64",
+  );
+  await stubApi(page);
+  await page.route("**/api/environment", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ artifactsBaseUrl: "https://artifacts.example", pageVersion: "t" }),
+    }),
+  );
+  await page.route("**/api/c/*/artifacts", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([{ key: "pi/out/screenshot.png", wrote: 1, edited: 0, markdown: false, image: true }]),
+    }),
+  );
+  const comment = {
+    id: "c1",
+    file: "pi/out/screenshot.png",
+    anchors: [],
+    region: { x: 8, y: 4, width: 16, height: 12, imageWidth: 64, imageHeight: 32 },
+    address: "pi/out/screenshot.png#x8,y4,w16,h12",
+    text: "this button is in the wrong place",
+    at: 1,
+    author: "henry",
+    state: "visible",
+    resolved: false,
+    positions: [],
+    replies: 0,
+  };
+  await page.route("**/api/c/*/comments", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([comment]) }),
+  );
+  await page.route("**/api/c/*/comments/*/thread", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
+  );
+  await page.route("https://artifacts.example/**", (route) => {
+    const url = route.request().url();
+    if (url.includes("?raw") || url.includes("?region=")) {
+      return route.fulfill({ status: 200, contentType: "image/png", body: png });
+    }
+    return route.fulfill({ status: 200, contentType: "text/html", body: imageDocumentFor("pi/out/screenshot.png") });
+  });
+
+  await page.goto("/7/");
+  await page.locator("#artifacts-toggle").click();
+  await page.locator("#artifact-list li").first().click();
+  await expect(page.locator("#artifacts-title")).toHaveText("screenshot.png");
+
+  // Open the thread the way the drawer does — `openThread(id)`, which is what a click on
+  // a commented line's mark calls. The mark itself is drawn inside the frame, and a
+  // picture has none yet (see `docs/artifacts.md`, "not done yet"), so the entry point is
+  // the part under test here.
+  await page.evaluate(() => (window as unknown as { openThread?: (id: string) => void }).openThread?.("c1"));
+  await expect(page.locator("#comment-sheet")).toBeVisible();
+  await expect(page.locator("#comment-sheet-addr")).toHaveText("pi/out/screenshot.png#x8,y4,w16,h12");
+  await expect(page.locator("#comment-sheet-preview")).toBeVisible();
+  expect(await page.locator("#comment-sheet-preview").getAttribute("src"))
+    .toBe("https://artifacts.example/c/7/pi/out/screenshot.png?region=x8,y4,w16,h12");
 });

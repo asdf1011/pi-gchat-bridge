@@ -29,6 +29,7 @@ import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 import { BridgeHost } from "../src/durable/host.js";
 import { createReviewAgent } from "../src/durable/extensions/review-agent.js";
+import { createCommentTools } from "../src/durable/extensions/comment-tools.js";
 
 async function memoryHost(): Promise<BridgeHost> {
   // Installed, not merely named: `configure()` stores extension *names*, and a name
@@ -186,4 +187,88 @@ test("an empty brief is refused, and nothing is spawned", async () => {
   }).execute({ brief: "   " }, {} as never, background() as never)) as { isError?: boolean };
   assert.equal(refused.isError, true);
   assert.deepEqual(replies, [], "the reply writer is not called");
+});
+
+test("a reply commits the artifact working copy first, so the line it comments on has a revision", async () => {
+  // The case this guards: a turn writes a file and comments on it in the same turn.
+  // The end-of-turn commit has not run, so without a commit before the reply the
+  // comment anchors to a revision that does not contain the line it is about.
+  const commits: number[] = [];
+  const extension = createCommentTools({
+    reply: async () => ({ id: "c1" }),
+    commitArtifacts: async (conversationId) => {
+      commits.push(conversationId);
+      return "change123";
+    },
+  });
+
+  const hooks = extension.hooks ?? [];
+  assert.equal(hooks.length, 1, "one hook: commit before a reply");
+  const before = (hooks[0]!.handlers as {
+    beforeTool(c: { name: string }, api: { conversationId: number }): Promise<unknown>;
+  }).beforeTool.bind(hooks[0]!.handlers);
+
+  await before({ name: "comment_reply" }, { conversationId: 42 });
+  assert.deepEqual(commits, [42], "the reply path committed the conversation's artifacts");
+
+  // Every other tool pays nothing: a commit per tool call is history nobody asked for.
+  await before({ name: "bash" }, { conversationId: 42 });
+  await before({ name: "read" }, { conversationId: 42 });
+  assert.deepEqual(commits, [42]);
+});
+
+test("a commit failure does not cost the reply", async () => {
+  const extension = createCommentTools({
+    reply: async () => ({ id: "c1" }),
+    commitArtifacts: async () => {
+      throw new Error("jj is having a day");
+    },
+  });
+  const handlers = (extension.hooks ?? [])[0]!.handlers as {
+    beforeTool(c: { name: string }, api: { conversationId: number }): Promise<unknown>;
+  };
+  const result = await handlers.beforeTool({ name: "comment_reply" }, { conversationId: 7 });
+  assert.equal(result, undefined, "the call proceeds; the lost annotation is the smaller loss");
+});
+
+test("a comment's rectangle is found by its short id, and an image comment is what has one", async () => {
+  // What `view_image` reads. The tool takes the id from the message it was sent, so the
+  // prefix resolution — and the refusal to guess between two threads — is the behaviour
+  // that decides whether the model sees the right picture.
+  const host = await memoryHost();
+  const id = (await host.createNamed("threads/I", { model: { provider: "p", modelId: "m" } })).conversationId;
+  const region = { x: 4, y: 8, width: 16, height: 12, imageWidth: 48, imageHeight: 32 };
+  await host.addComment(id, {
+    id: "2f4f5da0-aaaa-bbbb-cccc",
+    file: "shot.png",
+    anchors: [],
+    region,
+    text: "this button is in the wrong place",
+    at: 1,
+  });
+  await host.addComment(id, {
+    id: "9c1e0000-dddd-eeee-ffff",
+    file: "notes.md",
+    anchors: [{ changeId: "aaa", originalLine: 3, content: "the line" }],
+    text: "and this prose",
+    at: 2,
+  });
+
+  assert.deepEqual(await host.imageRegionOf(id, "2f4f5da0"), { file: "shot.png", ...region });
+  // A comment on a line is not a region: it has no rectangle to look at.
+  assert.equal(await host.imageRegionOf(id, "9c1e0000"), undefined);
+  assert.equal(await host.imageRegionOf(id, "ffffffff"), undefined, "unknown id");
+  // An ambiguous prefix is refused rather than guessed — the model is told which thread
+  // to look at, and a guess would answer about the wrong picture.
+  await host.addComment(id, {
+    id: "2f4f5da0-9999",
+    file: "other.png",
+    anchors: [],
+    region,
+    text: "another",
+    at: 3,
+  });
+  assert.equal(await host.imageRegionOf(id, "2f4f5da0"), undefined);
+  assert.ok(await host.imageRegionOf(id, "2f4f5da0-aaaa"));
+  await host.harness.close(BACKGROUND_CONTEXT);
 });

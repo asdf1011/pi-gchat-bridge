@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import zlib from "node:zlib";
 import os from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
@@ -213,7 +214,10 @@ test("the plain image URL is a document that centres the picture", async () => {
     const html = await response.text();
     // The picture, fetched from this same origin — never a remote host, never the
     // file's own bytes interpreted as markup.
-    assert.match(html, /<img src="shot\.png\?raw"/);
+    // The picture, and the class that makes it the gesture surface for a region
+    // comment: without `touch-action: none` the browser keeps the drag for scrolling
+    // and no rectangle can be drawn on a phone at all.
+    assert.match(html, /<img class="crop-target" src="shot\.png\?raw"/);
     assert.match(html, /color-scheme: light dark/);
     assert.match(html, /background: Canvas/);
     assert.ok(html.includes('alt="shot.png"'), html);
@@ -619,6 +623,139 @@ test("both documents carry the same comment affordance", async () => {
     const source = block(await (await fetch(`${harness.base}/c/1/notes.md?view=source`)).text());
     const rendered = block(RENDER_SCRIPT);
     assert.equal(source, rendered);
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * A real RGBA PNG, `size` by `size`, built here so a crop has something to decode.
+ *
+ * The 1×1 fixture above is deliberately not used: a rectangle inside a 1-pixel picture
+ * is not a selection, so a test of the crop needs pixels to select.
+ */
+function pngOfSize(size: number): Buffer {
+  const crcTable: number[] = [];
+  for (let n = 0; n < 256; n += 1) {
+    let c = n;
+    for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    crcTable[n] = c >>> 0;
+  }
+  const crc32 = (buffer: Buffer): number => {
+    let crc = 0xffffffff;
+    for (const byte of buffer) crc = (crc >>> 8) ^ crcTable[(crc ^ byte) & 0xff]!;
+    return (crc ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type: string, data: Buffer): Buffer => {
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(data.length);
+    const body = Buffer.concat([Buffer.from(type, "ascii"), data]);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(body));
+    return Buffer.concat([length, body, crc]);
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(size, 0);
+  header.writeUInt32BE(size, 4);
+  header[8] = 8; // bit depth
+  header[9] = 6; // RGBA
+  const raw = Buffer.alloc((size * 4 + 1) * size);
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const at = y * (size * 4 + 1) + 1 + x * 4;
+      raw[at] = x * 4;
+      raw[at + 1] = y * 4;
+      raw[at + 2] = 128;
+      raw[at + 3] = 255;
+    }
+  }
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk("IHDR", header),
+    chunk("IDAT", zlib.deflateSync(raw)),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+/** The width and height an image declares in its own header. */
+function sizeOfPng(bytes: Buffer): { width: number; height: number } {
+  return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+}
+
+test("?region cuts the selected rectangle out of the picture", async () => {
+  // The whole point of an image comment: the model is shown the part the reader pointed
+  // at, not only told where it is. The rectangle is in the picture's own pixels, so the
+  // crop is too — no scaling between what was drawn and what is sent.
+  const root = tempDir();
+  const harness = await serve(root, ["shot.png"]);
+  try {
+    fs.writeFileSync(path.join(root, "shot.png"), pngOfSize(64));
+    const response = await fetch(`${harness.base}/c/1/shot.png?region=x4,y8,w16,h12`);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "image/png");
+    const bytes = Buffer.from(await response.arrayBuffer());
+    // A PNG whatever the source format was, and the *rectangle's* size rather than the
+    // picture's — 16x12, not 64x64.
+    assert.deepEqual(sizeOfPng(bytes), { width: 16, height: 12 });
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a region outside the picture is clamped, and nonsense is refused", async () => {
+  const root = tempDir();
+  const harness = await serve(root, ["shot.png"]);
+  try {
+    fs.writeFileSync(path.join(root, "shot.png"), pngOfSize(32));
+    // Dragged off the right edge: the part over the picture is the part selected.
+    const clamped = await fetch(`${harness.base}/c/1/shot.png?region=x24,y24,w40,h40`);
+    assert.equal(clamped.status, 200);
+    assert.deepEqual(sizeOfPng(Buffer.from(await clamped.arrayBuffer())), { width: 8, height: 8 });
+
+    // A shape that names no rectangle does not become a crop of the whole picture.
+    for (const bad of ["x4,y4", "garbage", "x4,y4,w0,h0", "x-1,y0,w8,h8"]) {
+      const response = await fetch(`${harness.base}/c/1/shot.png?region=${encodeURIComponent(bad)}`);
+      assert.equal(response.status, 404, `refused: ${bad}`);
+    }
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a region of a file that is not a decodable picture is refused, not guessed at", async () => {
+  const root = tempDir();
+  const harness = await serve(root, ["notreally.png"]);
+  try {
+    // Named like an image, holds text. The browser will not draw it either, and a crop
+    // of it would be an attachment of noise.
+    fs.writeFileSync(path.join(root, "notreally.png"), "this is not a png\n");
+    const response = await fetch(`${harness.base}/c/1/notreally.png?region=x0,y0,w8,h8`);
+    assert.equal(response.status, 404);
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the image document carries the region script, and refuses network like the rest", async () => {
+  const root = tempDir();
+  const harness = await serve(root, ["shot.png"]);
+  try {
+    fs.writeFileSync(path.join(root, "shot.png"), PNG_BYTES);
+    const response = await fetch(`${harness.base}/c/1/shot.png`);
+    const html = await response.text();
+    // The gesture, and the file it is about: the parent is told which artifact a
+    // rectangle belongs to, because a drawer can show several.
+    assert.match(html, /pi-artifact-region/);
+    assert.ok(html.includes('data-file="shot.png"'), html);
+    // The script talks to the parent and nothing else: `default-src 'none'` still holds,
+    // so a rectangle cannot be posted anywhere but the drawer.
+    const csp = response.headers.get("content-security-policy") ?? "";
+    assert.match(csp, /default-src 'none'/);
+    assert.doesNotMatch(csp, /connect-src/);
   } finally {
     await harness.close();
     fs.rmSync(root, { recursive: true, force: true });

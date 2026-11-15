@@ -88,6 +88,10 @@ test("every surface file is one of the ones we know about", () => {
     "chat/router.ts",
     "commands/command-surface.ts",
     "web/artifacts-server.ts",
+    // The decoder behind `?region=` and the seam's `cropArtifactRegion`. A surface file
+    // because it is reached from two surfaces — the artifact origin and an adapter — and
+    // it must not know about either: it takes bytes and a rectangle, and returns a PNG.
+    "web/crop.ts",
     "web/manifest.ts",
     "web/markdown.ts",
     "web/routes.ts",

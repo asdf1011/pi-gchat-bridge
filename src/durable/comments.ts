@@ -74,6 +74,108 @@ export interface Selection {
 export type Anchored = Pick<ArtifactComment, "anchors" | "quote" | "charStart" | "charEnd">;
 
 /**
+ * A rectangle of a picture, in pixels of the picture as it was drawn.
+ *
+ * Not in the frame's pixels and not in screen pixels: a picture is scaled to fit the
+ * drawer, so the same picture in a narrow window is a different number of screen
+ * pixels and a rectangle counted there would mean nothing on the next read. The
+ * rectangle is only ever produced by a *document* displayed by **the server that
+ * serves the picture**, and it carries the size it was measured against for the one
+ * check that matters: a rectangle larger than the picture cannot have come from the
+ * picture.
+ */
+export interface Region {
+  /** Left edge, in pixels of the original picture. */
+  x: number;
+  /** Top edge, in pixels of the original picture. */
+  y: number;
+  width: number;
+  height: number;
+  /**
+   * The picture's own size, as the document knew it when the reader dragged.
+   *
+   * Recorded with the rectangle because it is the only way to notice later that the
+   * file was replaced by one of different dimensions — in which case the rectangle
+   * no longer frames what the person pointed at, and saying so is better than
+   * drawing a highlight over the wrong part of the new picture.
+   */
+  imageWidth: number;
+  imageHeight: number;
+}
+
+/**
+ * The smallest rectangle worth calling one.
+ *
+ * A tap is not a selection. Below this the gesture was a click — which is how a
+ * person opens a picture, not how they choose part of it — so the honest reading is
+ * "no region", and the comment is about the file.
+ */
+export const MIN_REGION_SIDE = 8;
+
+/**
+ * A rectangle clamped to the picture, or `undefined` when it is not a selection.
+ *
+ * The viewer computes this from where the finger was, so it can be off the picture
+ * by a pixel or two at an edge, or nonsense from a stale document that measured a
+ * different size. Everything is kept inside the picture's bounds and rounded to
+ * whole pixels; a shape that ends up too small after that is not a rectangle.
+ */
+export function normalizeRegion(value: unknown): Region | undefined {
+  if (value === null || typeof value !== "object") return undefined;
+  const input = value as Record<string, unknown>;
+  const number = (field: unknown): number | undefined =>
+    typeof field === "number" && Number.isFinite(field) ? field : undefined;
+  const x = number(input.x);
+  const y = number(input.y);
+  const width = number(input.width);
+  const height = number(input.height);
+  const imageWidth = number(input.imageWidth);
+  const imageHeight = number(input.imageHeight);
+  if (x === undefined || y === undefined || width === undefined || height === undefined) return undefined;
+  if (imageWidth === undefined || imageHeight === undefined) return undefined;
+  if (imageWidth < 1 || imageHeight < 1) return undefined;
+  if (width <= 0 || height <= 0) return undefined;
+  // Inside the picture: a rectangle that starts off it describes nothing.
+  const left = Math.max(0, Math.min(Math.round(x), Math.round(imageWidth) - 1));
+  const top = Math.max(0, Math.min(Math.round(y), Math.round(imageHeight) - 1));
+  const right = Math.min(Math.round(imageWidth), Math.max(Math.round(x + width), left + 1));
+  const bottom = Math.min(Math.round(imageHeight), Math.max(Math.round(y + height), top + 1));
+  const clamped = { x: left, y: top, width: right - left, height: bottom - top };
+  if (clamped.width < MIN_REGION_SIDE || clamped.height < MIN_REGION_SIDE) return undefined;
+  return { ...clamped, imageWidth: Math.round(imageWidth), imageHeight: Math.round(imageHeight) };
+}
+
+/**
+ * The rectangle as an address: `shot.png#x120,y64,w320,h180`.
+ *
+ * The same shape as the line address, and for the same reason: it is a fragment, so it
+travels as a link and can be parsed back. `x,y,w,h` rather than a ratio, because a
+person reading it can hold the four numbers against a picture, and because a ratio
+would silently behave differently for the same comment after a crop.
+ */
+export function regionSuffix(region: Region): string {
+  return `#x${region.x},y${region.y},w${region.width},h${region.height}`;
+}
+
+/** The rectangle an address names, or `undefined` when it names a line instead. */
+export function parseRegion(fragment: string): Region | undefined {
+  const match = /^#?x(\d+),y(\d+),w(\d+),h(\d+)$/.exec(fragment.trim());
+  if (!match) return undefined;
+  const region = {
+    x: Number(match[1]),
+    y: Number(match[2]),
+    width: Number(match[3]),
+    height: Number(match[4]),
+    // The size is not in the address: a reader sees the rectangle, and the size it was
+    // measured against is a fact about the file, not about the comment.
+    imageWidth: 0,
+    imageHeight: 0,
+  };
+  if (region.width < 1 || region.height < 1) return undefined;
+  return region;
+}
+
+/**
  * What a formatter needs, structurally.
  *
  * Deliberately looser than `ArtifactComment`: this module formats comments that
@@ -88,12 +190,24 @@ export interface Printable {
   quote?: string;
   charStart?: number;
   charEnd?: number;
+  /**
+   * The part of a picture this comment is about, when it is about part of one.
+   *
+   * A picture has no lines, so `anchors` is empty for an image comment and this is
+   * the position instead. Kept apart from the line fields rather than folded into
+   * them: the two are different kinds of address, and a reader that could not tell
+   * them apart would draw a highlight in the wrong place.
+   */
+  region?: Region;
   text: string;
   author?: string;
 }
 
-/** The suffix of a comment's address: `#L20C15-L20C30`, or `#L20-L24`. */
-export function anchorSuffix(comment: Pick<Printable, "anchors" | "charStart" | "charEnd">): string {
+/** The suffix of a comment's address: `#L20C15-L20C30`, `#L20-L24`, or `#x0,y0,w8,h8`. */
+export function anchorSuffix(
+  comment: Pick<Printable, "anchors" | "charStart" | "charEnd" | "region">,
+): string {
+  if (comment.region !== undefined) return regionSuffix(comment.region);
   const first = comment.anchors[0];
   const last = comment.anchors[comment.anchors.length - 1];
   if (!first || !last) return "";
@@ -125,8 +239,10 @@ export function shortName(file: string): string {
   return at === -1 ? file : file.slice(at + 1);
 }
 
-/** The full address: `foo.md#L20C15-L20C30`. */
-export function anchorAddress(comment: Pick<Printable, "file" | "anchors" | "charStart" | "charEnd">): string {
+/** The full address: `foo.md#L20C15-L20C30`, or `shot.png#x120,y64,w320,h180`. */
+export function anchorAddress(
+  comment: Pick<Printable, "file" | "anchors" | "charStart" | "charEnd" | "region">,
+): string {
   return `${comment.file}${anchorSuffix(comment)}`;
 }
 
@@ -140,9 +256,13 @@ export function anchorAddress(comment: Pick<Printable, "file" | "anchors" | "cha
  * citation follows them — and falls back to the original when nothing resolved.
  */
 export function currentAddress(
-  comment: Pick<Printable, "file" | "anchors" | "charStart" | "charEnd">,
+  comment: Pick<Printable, "file" | "anchors" | "charStart" | "charEnd" | "region">,
   positions: readonly number[],
 ): string {
+  // A picture does not move: its rectangle is in the picture's own pixels, so there is
+  // no "where it is now" to resolve — the same numbers address it until the file is
+  // replaced, which is what `imageWidth`/`imageHeight` are for.
+  if (comment.region !== undefined) return anchorAddress(comment);
   if (positions.length === 0) return anchorAddress(comment);
   const first = positions[0] as number;
   const last = positions[positions.length - 1] as number;
@@ -274,6 +394,40 @@ function quoteBlock(quote: string | undefined): string {
 }
 
 /**
+ * What the model is sent when someone comments on part of a picture.
+ *
+ * The rectangle is on the first line as an address a person could also read, and the
+ * picture itself is described behind a blank line so a model with image input is not
+ * left reading the field name as part of an instruction. The file is named in full:
+ * a crop shown without its source is a floating fragment, and the point of the
+ * attachment is to show *which part of which picture*.
+ *
+ * Nothing here depends on the model being able to see. The rectangle and the path are
+ * the whole message for a text-only model, and they are enough for `read`; the extra
+ * line tells a seeing model there is something attached rather than that the reader
+ * is being confusingly precise.
+ */
+export function imageRegionText(comment: Printable & { region: Region }, options: { path: string }): string {
+  const who = comment.author ?? "the user";
+  const region = comment.region;
+  const address = anchorAddress(comment);
+  const tag = comment.id === undefined ? "" : ` [comment ${shortId(comment.id)}]`;
+  const where = options.path === comment.file ? address : `${address} (${options.path})`;
+  const size =
+    region.imageWidth > 0 && region.imageHeight > 0
+      ? ` of a ${region.imageWidth}x${region.imageHeight} image`
+      : "";
+  return [
+    `${who} commented on the selected region of ${where}${tag}`,
+    `Selected region: ${region.width}x${region.height} at (${region.x}, ${region.y})${size}.`,
+    "The selection is attached to this message as an image: it is that rectangle of the picture, cut out, so you can see exactly what was pointed at even if you cannot view the whole file.",
+    comment.text.trim(),
+  ]
+    .filter((part) => part !== "")
+    .join("\n\n");
+}
+
+/**
  * What the model is sent when someone comments.
  *
  * The address on the first line is the one a person sees, with the absolute path
@@ -283,6 +437,7 @@ function quoteBlock(quote: string | undefined): string {
  * the person.
  */
 export function modelText(comment: Printable, options: { path: string }): string {
+  if (comment.region !== undefined) return imageRegionText({ ...comment, region: comment.region }, options);
   const who = comment.author ?? "the user";
   const address = anchorAddress(comment);
   // The short id is how the agent replies into this thread: the tool takes it, and
@@ -316,8 +471,21 @@ export function chatText(comment: Printable, options: { url: string; speaker: st
   // is then `static.md#L3C126-L3C131`, which is the thing being commented on.
   const label = `${shortName(comment.file)}${anchorSuffix(comment)}`;
   const linked = options.url === "" ? label : `[${label}](${options.url})`;
+  // A picture gets one sentence of its own: the address is a rectangle rather than a
+  // line, and a reader of a Chat thread is owed the plain version of that. The quoted
+  // text stays above it, because a comment on a picture may still quote the caption
+  // it was written about.
+  const region = comment.region;
+  const subject =
+    region === undefined
+      ? []
+      : [
+          `the ${region.width}×${region.height} region at (${region.x}, ${region.y})` +
+            (region.imageWidth > 0 ? ` of a ${region.imageWidth}×${region.imageHeight} image` : ""),
+        ];
   return [
     `**${options.speaker}** commented on ${linked}`,
+    ...subject,
     quoteBlock(comment.quote).trimEnd(),
     comment.text.trim(),
   ]
