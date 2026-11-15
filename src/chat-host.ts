@@ -41,13 +41,6 @@ import { serveRoutes } from "./shared/serve-routes.js";
 const port = Number(process.env.BRIDGE_CHAT_PORT ?? 0);
 const bind = process.env.BRIDGE_BIND ?? "127.0.0.1";
 const config = loadConfig();
-/**
- * Where the store lives — not to open it, but because two files sit beside it and belong to this
- * side: the delivery cursor (`bridge-ledger.json`) and the secrets file. The adapter must never open
- * the database; these two paths are the only reason it knows the directory.
- */
-const dbPath = process.env.BRIDGE_DB ?? new URL("../bridge.sqlite", import.meta.url).pathname;
-
 if (!port) {
   logger.error("[chat-host] BRIDGE_CHAT_PORT is not set — nothing to serve");
   process.exit(2);
@@ -63,6 +56,17 @@ const client = createHost({
   },
 });
 const seam = linkSessionHost({ host: client });
+
+/**
+ * Where the store is — asked, not read from the environment.
+ *
+ * Two files sit beside it and belong to this side: the delivery cursor (`bridge-ledger.json`) and the
+ * secrets file. The adapter must never *open* the database; that is the host's, and this process is the
+ * one that could otherwise be pointed at a copy. Reading `BRIDGE_DB` here meant the path arrived by two
+ * routes and the fork had to keep passing it; `info()` is the route that cannot disagree with the
+ * process actually holding the store.
+ */
+const dbPath = (await seam.info()).dbPath;
 
 const chat = new ChatClient(config.serviceAccountPath);
 const state = new StateStore(config.stateFile);

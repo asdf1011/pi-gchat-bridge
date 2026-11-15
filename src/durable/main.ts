@@ -180,8 +180,10 @@ async function main(): Promise<void> {
     {
       entry: new URL("../chat-host.js", import.meta.url),
       env: {
-        // It needs the store's *directory* for the ledger and the secrets file, and nothing else
-        // about the store. `BRIDGE_DB` stays set for that reason and no other.
+        // Nothing about the store: the adapter asks the host where it is (`info().dbPath`) for the two
+        // files that sit beside it — the ledger and the secrets file — and cannot open it. An
+        // environment variable is how a second process gets pointed at the wrong database.
+        BRIDGE_DB: "",
         BRIDGE_CHAT_PORT: String(chatPort),
       },
       marker: "CHAT_ADAPTER_LISTENING ",

@@ -250,7 +250,9 @@ below, because it is the same code and the same review.
 ## 6. Abstractions that do not abstract
 
 ### 6.1 `info().dbPath` vs adapters reading `BRIDGE_DB`
-- **Status:** pending
+- **Status:** done — the Chat adapter asks `info().dbPath` and the fork passes `BRIDGE_DB=""`. The storage
+  location has one owner, and a second process cannot be pointed at a different database by its
+  environment.
 - **Where:** `src/session-host/api.ts` (`HostInfo`), `src/chat-host.ts`, `src/web-host.ts`,
   `src/chat/commands.ts` (`/engine`)
 - **Issue:** the same path arrives by two routes (env in two hosts, the seam in `/engine`), each with
@@ -329,7 +331,8 @@ below, because it is the same code and the same review.
 - **Done when:** the "busy" contract is deleted or something produces it.
 
 ### 7.4 `/notify` seeds the transcript after posting
-- **Status:** pending
+- **Status:** done — seed first, post second. The remaining window is the harmless one (the transcript knows
+  about a message Chat does not), which a retry closes.
 - **Where:** `src/durable/notify.ts` (`plainNotify`)
 - **Issue:** the Chat message is posted, then the transcript write is attempted; a crash between them
   leaves Chat holding a message the model never saw — which contradicts the at-least-once note in the

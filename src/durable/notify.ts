@@ -219,7 +219,10 @@ async function plainNotify(
   const { space, text, threadKey, title } = req;
   const chatKey = threadKey ? threadChatKey(space, threadKey) : undefined;
   try {
-    const { messageName, threadName } = await postText(deps.client, space, chunks, threadKey);
+    // **Seed first, post second.** The other order leaves a crash window where Chat holds a message the
+    // conversation has never seen: the reply to it would be answered by a model that had not read the
+    // notification, which is the failure this endpoint exists to prevent. This order's window is the
+    // harmless one — the transcript knows about a message Chat does not, and the next run posts it.
     let seeded = false;
     if (chatKey) {
       try {
@@ -228,9 +231,10 @@ async function plainNotify(
         await deps.router.notify(chatKey, title ? `${title}\n\n${text}` : text);
         seeded = true;
       } catch (error) {
-        logger.error(`[notify] ${chatKey} seeding failed (message WAS posted):`, (error as Error).message);
+        logger.error(`[notify] ${chatKey} seeding failed (posting anyway):`, (error as Error).message);
       }
     }
+    const { messageName, threadName } = await postText(deps.client, space, chunks, threadKey);
     logger.info(`[notify] posted ${chunks.length} chunk(s) to ${space} thread=${threadName ?? "(top-level)"} seeded=${seeded}`);
     return {
       status: 200,
