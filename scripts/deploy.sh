@@ -78,6 +78,13 @@ done
 
 say() { echo "deploy: $*"; }
 
+# The restart script resolves its project from its own location, and it is this one. Exported
+# rather than assumed so a deploy run through a symlinked checkout (or by absolute path into
+# another one) restarts *this* bridge — the one that was just built — rather than whatever the
+# script's default happens to find. The two ends disagreeing is silent: the lock is not seen,
+# "no bridge owns the lock" is logged, and nothing restarts.
+export BRIDGE_PROJECT_DIR="$PROJECT_DIR"
+
 if ! [ -f "$RESTART" ]; then
   say "$RESTART is missing — cannot restart without it" >&2
   exit 1

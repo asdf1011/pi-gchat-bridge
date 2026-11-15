@@ -38,7 +38,18 @@
 # gone, which is the whole point.
 set -u
 
-PROJECT=/workspace/pi-gchat-bridge
+# Where this script lives, not where it was once written down.
+#
+# This used to be the literal `/workspace/pi-gchat-bridge`, and the repository is reached
+# by more than one path (`pi-chat-bridge` is a symlink to it; a checkout elsewhere is a
+# copy, not a symlink). A deploy builds in whichever directory it was run from and then
+# hands the restart to this script, so a hardcoded path is how the two ends up disagreeing
+# about which database to look at — and that disagreement is silent: the lock is not found,
+# "no bridge owns the lock" is logged, and nothing restarts.
+#
+# Resolved through `cd`/`pwd` so the lock, `.env.durable` and `data/` are all read through
+# one real path even when the caller used a symlinked one. Overridable for a scratch copy.
+PROJECT="${BRIDGE_PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 # Logs go where the state goes (`data/`), with the bridge's own log. See start-bridge.sh: the
 # move happens on the restart that picks that file up, and this script is started fresh each
 # time, so it can follow immediately.
@@ -243,5 +254,19 @@ done
 
 # Loud on purpose: a skipped deploy is a decision somebody has to make, whereas a
 # restart that killed a running build is a loss nobody asked for.
-log "gave up after ${MAXWAIT}s: still busy ($${turn_running:+turn running}${:+-}$(busy_children "$BRIDGE" | head -1)…) — NOT restarting; arm again when it is calm"
+#
+# The reason used to be built by one line of parameter expansion, and it was wrong: `${:+-}`
+# has no parameter, so bash reported `bad substitution`, wrote that to stderr and never reached
+# the sentence that matters. A deploy that gave up read as a shell error, and the log held no
+# "NOT restarting" line at all. Assembled in parts instead — each part is a separate question,
+# and a run with only one of them busy is exactly the case worth being able to read.
+why=""
+if turn_running; then
+  why="a turn is still running"
+fi
+work=$(busy_children "$BRIDGE" | head -1)
+if [ -n "$work" ]; then
+  why="${why:+$why; }work is in flight (${work:0:80})"
+fi
+log "gave up after ${MAXWAIT}s: ${why:-still busy} — NOT restarting; arm again when it is calm"
 exit 1
