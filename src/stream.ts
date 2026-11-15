@@ -1,4 +1,5 @@
 import { ChatClient, MAX_MESSAGE_CHARS } from "./chat-client.js";
+import type { ChatTarget } from "./session-key.js";
 import { MARKER_DELAY_MS, PATCH_DEBOUNCE_MS, THINKING_TEXT, TOOL_STATUS_DELAY_MS } from "./constants.js";
 import { toChatMarkdown } from "./chat-markdown.js";
 import { logger } from "./logger.js";
@@ -79,6 +80,32 @@ export function splitMessage(text: string, max: number = MAX_MESSAGE_CHARS): str
  * conversation key so the steering path can relocate the placeholder, and
  * unregister in a finally block.
  */
+/**
+ * Post one message to an address, turning a thread *key* into the thread it creates.
+ *
+ * A conversation is addressed by its chat key, and a key of the form `spaces/S/<threadKey>` names a
+ * thread the app opens on its first message: there is no thread resource name to reply into until
+ * that message exists. This is the one place that resolves the two, and it returns the address with
+ * the name filled in so the caller can reuse it for the rest of the reply — a PATCH, an overflow
+ * chunk, a second message. Without that, a keyed conversation's answer posted as a new top-level
+ * message and the thread stayed empty (which is what happened to every cron-opened thread).
+ */
+export async function postMessage(
+  client: ChatClient,
+  address: ChatTarget,
+  text: string,
+  opts?: { silent?: boolean },
+): Promise<{ messageName: string; address: ChatTarget }> {
+  if (address.threadName) {
+    return { messageName: await client.createMessage(address.space, text, address.threadName, opts), address };
+  }
+  if (address.threadKey) {
+    const created = await client.createMessageWithThreadKey(address.space, text, address.threadKey);
+    return { messageName: created.name, address: { ...address, threadName: created.threadName } };
+  }
+  return { messageName: await client.createMessage(address.space, text, undefined, opts), address };
+}
+
 export class ReplyStream {
   private markerName: string | undefined;
   private markerTimer: NodeJS.Timeout | undefined;
@@ -91,15 +118,45 @@ export class ReplyStream {
   private streamed = "";
   /** Post a fresh message with the final answer instead of keeping the patched placeholder. */
   private readonly replaceOnFinish: boolean;
+  /**
+   * Where the reply goes: a space, plus *either* a thread name *or* a thread key.
+   *
+   * A thread key is how a thread the app opened is addressed before it has a name — a Chat thread's
+   * resource name does not exist until the first message creates it, and an app-keyed thread
+   * (`/notify`, every cron job) is created *by* that first message. So the first post carries the key
+   * and the response returns the name, which is remembered here for everything after it: a PATCH, an
+   * overflow chunk, a relocated placeholder. Without that, a keyed conversation's answer was posted
+   * as a new top-level message in the space and the thread it belonged to stayed empty.
+   */
+  private address: ChatTarget;
+  private display: string;
 
   constructor(
     private client: ChatClient,
-    private spaceName: string,
-    private threadName: string | undefined,
-    private display: string,
+    address: ChatTarget,
+    display: string,
     opts: { replaceOnFinish?: boolean } = {},
   ) {
+    this.address = { ...address };
+    this.display = display;
     this.replaceOnFinish = opts.replaceOnFinish ?? true;
+  }
+
+  /** The thread a reply belongs to, once it is known. `undefined` means "top level". */
+  private get threadName(): string | undefined {
+    return this.address.threadName;
+  }
+
+  /**
+   * Post one message at this address, creating the keyed thread if there is one to create.
+   *
+   * The single place a message leaves this class, so "which thread" is answered once. A key is
+   * resolved to a name on the first post and never sent again.
+   */
+  private async post(text: string, opts?: { silent?: boolean }): Promise<string> {
+    const sent = await postMessage(this.client, this.address, text, opts);
+    this.address = sent.address;
+    return sent.messageName;
   }
 
   /** Register in the shared markers map and start the placeholder delay timer. */
@@ -197,7 +254,7 @@ export class ReplyStream {
       // losing the reply.
       let posted = false;
       try {
-        await this.client.sendMessage(this.spaceName, chunks[0], this.threadName);
+        await this.post(chunks[0] as string);
         posted = true;
       } catch (err) {
         logger.error("[chat] final post failed — keeping the streamed placeholder:", (err as Error).message);
@@ -240,7 +297,7 @@ export class ReplyStream {
   private async postChunks(chunks: string[], start: number, opts: { firstNotifies: boolean }): Promise<void> {
     for (let i = start; i < chunks.length; i++) {
       const silent = !this.threadName && !(opts.firstNotifies && i === start) ? { silent: true } : undefined;
-      await this.client.sendMessage(this.spaceName, chunks[i], this.threadName, silent);
+      await this.post(chunks[i] as string, silent);
     }
   }
 
@@ -263,7 +320,7 @@ export class ReplyStream {
         this.markerName = undefined;
       }
       if (partial) {
-        await this.client.sendMessage(this.spaceName, partial, this.threadName).catch((e) =>
+        await this.post(partial).catch((e) =>
           logger.error("[chat] final partial post failed:", (e as Error).message),
         );
       }
@@ -304,7 +361,7 @@ export class ReplyStream {
       // the rest. The final answer posted at the end is the complete text.
       this.streamed = "";
       const silent = !this.threadName && this.replaceOnFinish ? { silent: true } : undefined;
-      this.markerName = await this.client.createMessage(this.spaceName, THINKING_TEXT, this.threadName, silent);
+      this.markerName = await this.post(THINKING_TEXT, silent);
       const capped = this.displayText();
       if (capped) {
         try {
@@ -325,7 +382,7 @@ export class ReplyStream {
     // must be the thing that notifies (otherwise a slow top-level reply would
     // arrive with no ping at all).
     const silent = !this.threadName && this.replaceOnFinish ? { silent: true } : undefined;
-    this.markerName = await this.client.createMessage(this.spaceName, THINKING_TEXT, this.threadName, silent);
+    this.markerName = await this.post(THINKING_TEXT, silent);
     // A tool is already running — show its status right away.
     if (this.statusText) await this.patchNow();
   }

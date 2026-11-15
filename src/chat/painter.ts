@@ -17,7 +17,7 @@ import { Ledger } from "../durable/ledger.js";
 import { observeTurn } from "../durable/observe.js";
 import { Painter, type PaintSummary } from "../durable/painter.js";
 import { httpPoll } from "../session-host/poll-client.js";
-import { ReplyStream } from "../stream.js";
+import { postMessage, ReplyStream } from "../stream.js";
 import { attachViewSink, viewFramePainter } from "../session-host/view-sink.js";
 import type { SessionHost } from "../session-host/api.js";
 import type { Config } from "../config.js";
@@ -145,7 +145,10 @@ export async function startChatPainter(options: ChatPainterOptions): Promise<Cha
           const target = chatTarget(await addressOf(conversationId));
           if (!target) return undefined;
           const key = (await addressOf(conversationId)) ?? String(conversationId);
-          const stream = new ReplyStream(options.client, target.space, target.threadName, "gchat", {
+          // The whole target, not just its space and thread name: a conversation keyed by a thread
+          // *key* has no thread name until its first message creates the thread, and passing only the
+          // name posted that answer at the top level of the space instead.
+          const stream = new ReplyStream(options.client, target, "gchat", {
             replaceOnFinish: options.config.replaceOnFinish,
           });
           stream.register(key);
@@ -201,15 +204,15 @@ export async function startChatPainter(options: ChatPainterOptions): Promise<Cha
           };
         },
         post: async (conversationId, text) => {
-          const target = chatTarget(await addressOf(conversationId));
-          if (!target) return;
+          // `postMessage` resolves a thread *key* into the thread it creates and hands back the address
+          // with the name filled in, so the overflow chunks join the same thread instead of starting a
+          // second one. One helper, one place, because the same resolution is needed by `ReplyStream`.
+          let address = chatTarget(await addressOf(conversationId));
+          if (!address) return;
           for (const [index, chunk] of splitMessage(text).entries()) {
-            await options.client.sendMessage(
-              target.space,
-              chunk,
-              target.threadName,
-              index > 0 && target.threadName === undefined ? { silent: true } : undefined,
-            );
+            const silent = index > 0 && address.threadName === undefined ? { silent: true } : undefined;
+            const sent = await postMessage(options.client, address, chunk, silent);
+            address = sent.address;
           }
         },
       },

@@ -375,7 +375,8 @@ That the list is this short is the claim being tested: `bridge-cli.ts` exists to
 needs no server work. Cron is the third surface, and five changes is the answer.
 
 ### 9.1 The painter drops `threadKey`, so cron answers land at top level
-- **Status:** pending
+- **Status:** done — `postMessage()` in `src/stream.ts` resolves a key to the thread it creates and
+  returns the address; `ReplyStream` and the painter both post through it.
 - **Where:** `src/chat/painter.ts:144` (`open`), `:203` (`post`), `src/stream.ts:95` (`ReplyStream`
   ctor), `src/session-key.ts` (`chatTarget`)
 - **Issue:** `chatTarget("spaces/S/tarpsnow-order-abc")` returns `{ space, threadKey }` with
