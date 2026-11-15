@@ -99,7 +99,6 @@ export const AdapterVerdictSchema = Type.Object({
  */
 export const SettledSchema = Type.Object({
   status: Type.Union([Type.Literal("done"), Type.Literal("unanswered")]),
-  answerId: Type.Optional(Type.Number()),
   text: Type.Optional(Type.String()),
   reason: Type.Optional(Type.String()),
   detail: Type.Optional(Type.Unknown()),
@@ -118,7 +117,6 @@ export const SubmissionStateSchema = Type.Object({
     Type.Literal("done"),
     Type.Literal("unanswered"),
   ]),
-  answerId: Type.Optional(Type.Number()),
   text: Type.Optional(Type.String()),
   reason: Type.Optional(Type.String()),
   detail: Type.Optional(Type.Unknown()),

@@ -213,13 +213,9 @@ export class PubSubReceiver implements MessageReceiver {
       }
       this.processing.add(dedupeKey);
       try {
-        const result = await handler(incoming);
-        if (result === "busy") {
-          // Session is busy: leave the message unacked so Pub/Sub redelivers
-          // it later (acts as the per-thread queue). Don't mark processed.
-          logger.info(`[pubsub] ${incoming.space.name}: busy, leaving unacked`);
-          return;
-        }
+        // A handler that throws is the one case that means "not accounted for": the catch below leaves
+        // it unacked so Pub/Sub redelivers. Everything else is settled, whatever the turn does next.
+        await handler(incoming);
         this.state.markProcessed(incoming.space.name, dedupeKey);
         // Persist before acking so a redelivered message stays deduped even if
         // the ack below fails or the process restarts.

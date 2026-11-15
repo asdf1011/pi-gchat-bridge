@@ -325,12 +325,14 @@ export interface TranscriptMessage {
 /**
  * How a submission ended.
  *
- * `done` carries the answer's text, extracted by the host: an adapter should
- * never have to know how an assistant entry is shaped. `answerId` stays because
- * the Chat adapter's "post this answer once" claim is keyed by it.
+ * `done` carries the answer's *text*, extracted by the host: an adapter should never have to know how
+ * an assistant entry is shaped. `answerId` used to travel with it, for the claim the Chat adapter made
+ * before the painter became the only mouth — nothing reads it now, and a field kept for a deleted
+ * consumer is exactly the kind of thing this list exists to remove. The id is still used inside the
+ * host, to read the entry's text and to stamp the answer's origin.
  */
 export type Settled =
-  | { status: "done"; answerId: number; text: string }
+  | { status: "done"; text: string }
   | { status: "unanswered"; reason?: string; detail?: unknown };
 
 /**
@@ -471,9 +473,9 @@ export interface SessionHost {
   /**
    * Snapshot, then frames. Returns `undefined` when the conversation is gone.
    *
-   * The **current state arrives as the first frame**, before any commit, so a
-   * caller never needs a separate initial paint and cannot paint a stale
-   * snapshot over a newer frame.
+   * The **current state arrives as the first frame**, before any commit: a caller never needs a
+   * separate initial paint, and a frame is a whole snapshot, so paint order costs a redundant repaint
+   * rather than a wrong screen.
    *
    * The frame callback is why this operation cannot cross a link unchanged: a
    * function is the one thing a serializing boundary cannot carry. Over a link

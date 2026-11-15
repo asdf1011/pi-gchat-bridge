@@ -36,7 +36,6 @@ import { actionParam, anyFormValue, formValue } from "./card-input.js";
 import { isAllowed } from "../access.js";
 import type { ChatClient } from "../chat-client.js";
 import {
-  BUSY,
   MODEL_ACTION,
   REMOVE_SECRET_ACTION,
   RESUME_ACTION,
@@ -616,7 +615,6 @@ export async function runDurableCommand(ctx: DurableCommandContext): Promise<Han
         modelId: modelId ?? "",
         thinkingLevel,
       });
-      if (!result.ok && result.error === BUSY) return "busy";
       const summary = result.ok
         ? `-> ${result.modelLabel} · thinking ${result.thinkingLevel ?? "?"}`
         : `failed: ${result.error}`;

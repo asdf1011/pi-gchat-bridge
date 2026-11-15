@@ -271,7 +271,8 @@ below, because it is the same code and the same review.
 - **Done when:** every `signal` in the seam either does something or is gone.
 
 ### 6.4 `Settled.answerId` is kept for a deleted consumer
-- **Status:** pending
+- **Status:** done — dropped from the seam and the wire. The id is still used inside the host, to read the
+  answer's text and stamp its origin.
 - **Where:** `src/session-host/api.ts`, `src/session-host/link-contract.ts` (`SettledSchema`),
   `src/durable/host.ts`
 - **Issue:** the comment says it stays "because the Chat adapter's post-this-answer-once claim is
@@ -280,7 +281,9 @@ below, because it is the same code and the same review.
 - **Done when:** the field is gone, or a caller that reads it is named in the comment.
 
 ### 6.5 Dead and stale seam surface
-- **Status:** pending
+- **Status:** done — `BridgeHost.unbind` deleted (nothing called it, and `architecture.md` already claimed it
+  was gone), `notImplemented` deleted, `link.ts`'s header rewritten to describe the rule instead of a
+  state. `session-host-api.md` S5 now reads as history and says where the truth is.
 - **Where:** `src/durable/host.ts` (`unbind`), `src/session-host/link.ts` (`notImplemented`, header)
 - **Issue:** `unbind` is on `SessionHost` and `BridgeHost` but in no contract; `notImplemented` is
   unreachable; the `link.ts` header still says `awaitSubmission` throws over the link (it is
@@ -310,7 +313,8 @@ below, because it is the same code and the same review.
 - **Done when:** dedupe is `requestId` alone and the per-message disk write is gone.
 
 ### 7.3 The `"busy"` return code is unreachable
-- **Status:** pending
+- **Status:** done — `HandleResult` is `"ok"`; the only "not accounted for" case is a handler that throws,
+  which the receiver already leaves unacked.
 - **Where:** `src/receiver.ts` (`HandleResult`), `src/chat/router.ts`, `src/pubsub-receiver.ts`
 - **Issue:** `DurableRouter.deliver` always steers and never reports busy; the receiver's
   leave-unacked-on-busy path is dead.
@@ -356,14 +360,17 @@ below, because it is the same code and the same review.
 - **Done when:** one reader, distinct outcomes.
 
 ### 8.3 `switchModel` throws for "no binding"
-- **Status:** pending
+- **Status:** **wontfix — the premise was wrong.** Both callers handle it: `applyModelPick` catches it and
+  returns `{ok:false,error}`, and `web/routes.ts` wraps `runCommand` so a throw becomes a text answer
+  rather than a 500. Changing it to a value would move a branch for no reader.
 - **Where:** `src/chat/queries.ts`
 - **Issue:** `throw new Error(\`no conversation for ${chatKey}\`)` reaches the web route as a 500
   through the generic handler; everywhere else in this codebase "not found" is data.
 - **Done when:** missing state is a returned value at every seam boundary.
 
 ### 8.4 `attach` ordering comments disagree with the code
-- **Status:** pending
+- **Status:** done — both the seam and the in-process implementation now say what the code does (subscribe, then
+  paint; a whole-snapshot frame makes the order a repaint rather than a wrong screen).
 - **Where:** `src/session-host/inprocess.ts` (`attach`), `src/session-host/link.ts` (`attach`),
   `src/session-host/api.ts`
 - **Issue:** three documents, two of them wrong about subscribe-then-paint. Both implementations
@@ -371,7 +378,7 @@ below, because it is the same code and the same review.
 - **Done when:** the guarantee is stated once, correctly.
 
 ### 8.5 `link.ts` and `session-host-api.md` S5 describe a state that no longer exists
-- **Status:** pending
+- **Status:** done — with 6.5.
 - **Where:** `src/session-host/link.ts` (header), `docs/session-host-api.md` (S5), `docs/architecture.md`
 - **Issue:** claims `unbind` and `awaitSubmission` are unpublished; claims settings ops were the open
   question. Both shipped. Ties to 6.5, but the docs are the part a new reader trusts first.

@@ -316,11 +316,12 @@ place until the last adapter is ported; the seam is additive.
   - **A `has(conversation)` method on the session object.** A chord object springs into existence on
     demand, so without it "the conversation is gone" and "the conversation is empty" are the same
     state, and the seam promises `undefined` for the first.
-  - **Nothing else is published.** `state`, `models`, `setModel`, `create`, `bind`, `unbind`,
+  - **Nothing else was published *at that point*** — `state`, `models`, `setModel`, `create`, `bind`,
     `label`, `compact`, `abort`, `usage`, `awaitSubmission`, `write`, the claim/verdict operations and
-    `firstTurn` throw `not implemented over the link yet`. Each becomes a contract method the day an
-    adapter in another process needs it — and `awaitSubmission` is the one that will need the
-    state-instead-of-call shape the second spike established.
+    `firstTurn` each became a contract method the day an adapter in another process needed it, which is
+    the rule: a contract method with no consumer is speculation. (This paragraph is history, and reads
+    as history. `src/session-host/api.ts` is the contract as it stands; `link.ts` implements all of it
+    or fails to compile, and the "not published over the link yet" error no longer exists.)
 
   **Second increment landed: the web front end can run in its own process.**
   `BRIDGE_WEB_ENGINE=link` makes the session host fork `dist/web-host.js`, accept its chord link, and

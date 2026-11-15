@@ -16,20 +16,16 @@
  * ordinary method calls. That is why `attach` needs no callback plumbing: chord
  * has been doing it all along.
  *
- * Deliberately not published yet: everything no adapter calls. `unbind` and
- * `awaitSubmission` throw `notImplemented` over the link, and each becomes a
- * contract method the day an adapter in another process needs it — `awaitSubmission`
- * is the one waiting for a consumer, since the Chat adapter words its failure notices
- * from a settled turn.
+ * **What crosses is what a running adapter calls**, and this file is the record of that rule working
+ * in both directions. The settings group — `state`, `models`, `setModel`, `bind`, `label`, `compact`,
+ * `abort` — was published the day the command surface started calling it, because a `/status` or
+ * `/model` typed into a web conversation is an adapter calling the seam. `unbind`, which nothing
+ * called, was deleted rather than published. `awaitSubmission` was on the wrong side of the same line
+ * for a while: the Chat adapter words its failure notices from a settled turn, so it crosses.
  *
- * The settings group — `state`, `models`, `setModel`, `bind`, `label`, `compact`,
- * `abort` — was published when the command surface started calling it: a `/status`
- * or `/model` typed into a web conversation is an adapter calling the seam, and
- * an adapter in another process therefore needs these to be on the wire. Until then the
- * commands worked in tests and answered "not published over the link yet" in the
- * deployment that runs them. That is the rule doing its job in both directions: a
- * contract method with no consumer is speculation, and an operation a running
- * adapter calls is not.
+ * Nothing in this module throws "not published over the link yet" any more, and there is no list of
+ * operations waiting for a consumer here — `api.ts` is the whole contract, and a method on it that
+ * this file does not implement would not compile.
  *
  * Two constraints that cost real debugging and are easy to walk into again:
  *
@@ -67,11 +63,6 @@ import type {
 import type { ArtifactFile } from "../durable/artifacts.js";
 import type { ProjectedView } from "./projection.js";
 import { ConversationContract, SessionContract, ViewSchema } from "./link-contract.js";
-
-/** Thrown by the operations this first cut does not publish. */
-function notImplemented(operation: string): Error {
-  return new Error(`${operation} is not published over the link yet (see docs/session-host-api.md, S5)`);
-}
 
 /** The chord host name every contract in `link-contract.ts` points at. */
 export const SESSION_HOST_NAME = "session-host";

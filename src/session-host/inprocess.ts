@@ -369,9 +369,12 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
         if (!attached) return;
         onFrame(projectView(value as unknown as ViewLike));
       });
-      // The current state as the first frame, emitted after subscribing so it
-      // cannot overwrite a newer commit: the subscription is installed before
-      // this paint, and every later frame supersedes it.
+      // The current state as the first frame, which is what the seam promises. It is emitted *after*
+      // subscribing so a frame that arrives during the attach is not lost — a later frame supersedes
+      // this paint, and a frame is a whole snapshot, so painting this one over a newer commit costs
+      // one redundant repaint rather than a wrong screen. (An earlier comment here claimed the
+      // opposite ordering was what made it safe; both implementations have always subscribed first,
+      // which is the ordering that cannot *drop* anything.)
       const snapshot = projectView(opened.value as unknown as ViewLike);
       onFrame(snapshot);
       return {

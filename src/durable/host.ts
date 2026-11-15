@@ -558,16 +558,6 @@ export class BridgeHost {
     return { conversation, binding };
   }
 
-  /** Forget a Chat key's binding (does not delete the transcript). */
-  async unbind(chatKey: string): Promise<boolean> {
-    return this.harness.commit(async (tx) => {
-      const doc = await tx.doc(BindingsDoc);
-      if (!doc.byChatKey[chatKey]) return false;
-      delete doc.byChatKey[chatKey];
-      return true;
-    }, this.context);
-  }
-
   // --- Host-side operations the seam exposes --------------------------------
   //
   // These live here, next to the storage, rather than in the seam's in-process
@@ -736,7 +726,7 @@ export class BridgeHost {
     // turn's completion.
     await this.recordAnswerOrigin(conversationId, answerId, submissionId).catch(() => {});
     const text = await this.answerText(conversationId, answerId);
-    return { status: "done", answerId, text };
+    return { status: "done", text };
   }
 
   /**
