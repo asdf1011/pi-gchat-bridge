@@ -2979,6 +2979,42 @@ test("re-selecting restarts the wait, and shows the latest text", async () => {
   }
 });
 
+test("a selection being adjusted keeps the bar up rather than re-waiting", async () => {
+  // Dragging a selection handle sends a fresh selection every few dozen milliseconds. If
+  // each one restarted the wait, the bar would blink out from under the finger and come
+  // back after it stopped — and a drag that outlasts the timer would never offer it at
+  // all. The delay is for the platform's menu on the *first* selection, not for every
+  // movement of one that is already being commented on.
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      pathname: "/7/",
+      artifactsBaseUrl: "http://127.0.0.1:8082",
+      artifacts: drawerFiles,
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+    });
+    await openFirstArtifact(h);
+    const bar = h.dom.window.document.getElementById("selection-bar")!;
+
+    await fromFrame(h, {
+      t: "pi-artifact-select-touch",
+      message: { file: "notes.md", line: 3, quote: "first", intent: "comment" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    assert.equal(bar.hidden, false);
+
+    // The handle moves: still the same gesture, so still offered.
+    await fromFrame(h, {
+      t: "pi-artifact-select-touch",
+      message: { file: "notes.md", line: 3, quote: "first and more", intent: "comment" },
+    });
+    assert.equal(bar.hidden, false, "no second wait over a selection already offered");
+    assert.match(bar.textContent ?? "", /first and more/, "but it follows the text");
+  } finally {
+    h?.close();
+  }
+});
+
 test("opening the composer puts the touch bar away", async () => {
   let h: Harness | undefined;
   try {

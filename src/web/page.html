@@ -649,6 +649,10 @@
   /* Review comments. The bar sits at the foot of the drawer rather than floating
      over the selection: it is one place for all comment chrome, it cannot cover
      the text being commented on, and on a phone the keyboard pushes it up. */
+  /* `z-index` is not decoration here: this chrome is *later* in the document than the
+     frames, so without a stacking order of its own the iframe paints over it. An
+     iframe is one of the few elements that paints above positioned siblings, which is
+     how the composer could open and be completely invisible behind the document. */
   #comment-bar, #comment-sheet { position: absolute; left: 0; right: 0; bottom: 0; z-index: 3;
     background: Canvas; border-top: 1px solid #8886; box-shadow: 0 -6px 24px #0002;
     padding: .6rem .75rem; display: flex; flex-direction: column; gap: .45rem;
@@ -659,14 +663,18 @@
      that space belongs to the system's own selection menu. Kept to a single line so it
      costs the document as little height as possible while a selection is active. */
   /* The safe-area inset is the one piece of system UI a page *can* clear: the home
-     indicator on a notched phone. It cannot clear the selection menu — that is drawn
-     above the page in a layer nothing here reaches — which is why the bar also waits
-     to appear (see SELECTION_BAR_DELAY_MS) rather than fighting for the same space. */
+     indicator on a notched phone. The *keyboard* is the other thing it clears, and that
+     is why this bar sits at `bottom: 0` of the drawer rather than floating over the
+     text: with the keyboard up on a phone, the bottom of the viewport is right above it
+     — the one strip desktop sites put their sticky action bars in for the same reason. */
   #selection-bar { position: absolute; left: 0; right: 0; bottom: 0; z-index: 3;
     display: flex; align-items: stretch; gap: .4rem;
     padding: .4rem .5rem max(.4rem, env(safe-area-inset-bottom));
     background: Canvas; border-top: 1px solid #8886; box-shadow: 0 -6px 24px #0002; }
   #selection-bar[hidden] { display: none; }
+  /* A finger has no hover, and highlighting on touch leaves the button looking stuck
+     after the tap. The brief dim is the acknowledgement instead. */
+  #selection-comment:active { background: #8883; }
   #selection-comment { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: .45rem;
     padding: .5rem .7rem; text-align: left; font-size: .9em; }
   /* The quoted text is ellipsised, not wrapped: a bar that grows to three lines covers
@@ -3117,6 +3125,12 @@ function showCommentBar(selection) {
  * Both Google Docs and Medium solve it the same way — their toolbars appear a beat
  * after the selection settles — which is why this number is a little over half a
  * second rather than instant.
+ *
+ * It applies to a **replacement**: a selection that arrives while this bar is already
+ * on screen means the menu it was waiting for has been and gone, and the one gesture
+ * left is dragging a handle. Waiting *again* there would take the bar away under the
+ * finger and bring it back after every adjustment, which reads as flicker — and, when
+ * the handle drag outlasts the timer, as a Comment action that never appears at all.
  */
 const SELECTION_BAR_DELAY_MS = 700;
 
@@ -3147,11 +3161,14 @@ function showSelectionBar(selection) {
     selectionBar.hidden = true;
     return;
   }
-  // Hide immediately and show on a delay: a new selection means the platform menu has
-  // just appeared, and the bar must not be visible underneath it.
-  selectionBar.hidden = true;
   const quote = (selection.quote || '').replace(/\s+/g, ' ').trim();
   selectionOn.textContent = quote ? '“' + quote.slice(0, 80) + (quote.length > 80 ? '…' : '') + '”' : '';
+  // Already offered, and this is the same gesture still moving: update what it says and
+  // leave it where it is (see SELECTION_BAR_DELAY_MS for why re-waiting is the bug).
+  if (!selectionBar.hidden) return;
+  // Otherwise hide and show on a delay: a *first* selection means the platform menu has
+  // just appeared, and the bar must not be visible underneath it.
+  selectionBar.hidden = true;
   selectionBarTimer = setTimeout(() => {
     selectionBarTimer = undefined;
     // Re-checked at fire time: the selection may have been dismissed while waiting, and
