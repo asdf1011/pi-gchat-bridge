@@ -2,6 +2,7 @@ import { ChatClient, MAX_MESSAGE_CHARS } from "./chat-client.js";
 import type { ChatTarget } from "./session-key.js";
 import { MARKER_DELAY_MS, PATCH_DEBOUNCE_MS, THINKING_TEXT, TOOL_STATUS_DELAY_MS } from "./constants.js";
 import { toChatMarkdown } from "./chat-markdown.js";
+import { toolSummary } from "./shared/tool-line.js";
 import { logger } from "./logger.js";
 
 /**
@@ -14,16 +15,16 @@ import { logger } from "./logger.js";
  */
 export const markers = new Map<string, { owner: object; relocate: () => Promise<void> }>();
 
-/** One-line status shown under the stream while a tool is running (e.g. the command).
- *  The placeholder is PATCHed with `markupSyntax: MARKDOWN` (verified Oct 2026),
- *  so this renders as real Markdown: backtick monospace for the command, italic
- *  for the label. Inner backticks are stripped so the span can't break. */
+/**
+ * One-line status shown under the stream while a tool is running.
+ *
+ * The placeholder is PATCHed with `markupSyntax: MARKDOWN`, so this renders as Markdown: a backtick
+ * code span for the command, italics for the label. What to *say* comes from `shared/tool-line.ts`,
+ * which the web pane's plain-text status row also uses — the sentence is the shared part, the syntax
+ * is not.
+ */
 export function toolStatusLine(toolName: string, args: unknown): string {
-  const a = (args ?? {}) as Record<string, unknown>;
-  const command = typeof a.command === "string" ? a.command.trim().replace(/\s+/g, " ") : "";
-  const path = typeof a.path === "string" ? a.path.trim() : "";
-  const detail = (command || path).replace(/`/g, "").slice(0, 140);
-  const label = command ? "Running" : `Running ${toolName}`;
+  const { label, detail } = toolSummary(toolName, args);
   return detail ? `_${label}:_ \`${detail}\`` : `_${label}_…`;
 }
 

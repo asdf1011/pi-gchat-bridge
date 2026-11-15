@@ -28,6 +28,7 @@ import { logger } from "../logger.js";
 import { renderMarkdown, type RenderOptions } from "./markdown.js";
 import type { ProjectedView } from "../session-host/projection.js";
 import type { SessionHost, WhenBusy } from "../session-host/api.js";
+import { toolSummary } from "../shared/tool-line.js";
 
 /**
  * How this surface renders Markdown.
@@ -41,31 +42,14 @@ import type { SessionHost, WhenBusy } from "../session-host/api.js";
 export const WEB_RENDER_OPTIONS: RenderOptions = { images: true };
 
 /**
- * The one-line summary a status row shows for a tool: the command, or the path.
+ * The status line for a running tool: the same sentence Chat shows, as plain text.
  *
- * Same rule the Chat status line uses, kept here as plain text because the web
- * pane is not Chat markdown. Truncated: a long command should not push the row
- * sideways.
- */
-function toolSummary(args: unknown): string {
-  const a = (args ?? {}) as Record<string, unknown>;
-  const command = typeof a.command === "string" ? a.command.trim().replace(/\s+/g, " ") : "";
-  const path = typeof a.path === "string" ? a.path.trim() : "";
-  return (command || path).slice(0, 90);
-}
-
-/**
- * The status line for a running tool, worded exactly as Chat words it.
- *
- * `toolStatusLine` in `stream.ts` renders "Running: `cmd`" as Chat markdown; this
- * is the same sentence as plain text, because the web pane shows it inside the
- * bubble rather than as a patched Chat message. Sharing the wording matters more
- * than sharing the function: the two surfaces should say the same thing about the
- * same tool.
+ * The sentence is `shared/tool-line.ts` — one function, because "which argument is worth showing, and
+ * how much of it" is one question, and the two copies had already drifted to 140 characters and 90.
+ * This keeps only the syntax the pane needs: plain text inside the bubble, not Chat markdown.
  */
 function toolLine(name: string, args: unknown): string {
-  const detail = toolSummary(args);
-  const label = detail && typeof (args as { command?: unknown })?.command === "string" ? "Running" : `Running ${name}`;
+  const { label, detail } = toolSummary(name, args);
   return detail ? `${label}: ${detail}` : `${label}…`;
 }
 

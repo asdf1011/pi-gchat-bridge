@@ -219,21 +219,25 @@ below, because it is the same code and the same review.
 ## 5. Duplicated constants and drifted shared rules
 
 ### 5.1 Tool status line exists twice, already drifted
-- **Status:** pending
+- **Status:** done — `shared/tool-line.ts` decides *what to show* (command, else path, capped at 120, backticks
+  stripped); each renderer keeps only its syntax. Pinned by `test/tool-line.test.ts`.
 - **Where:** `src/stream.ts` (`toolStatusLine`), `src/web/sink.ts` (`toolLine`)
 - **Issue:** Chat truncates to 140 and strips backticks; web truncates to 90 and leaves stripping to
   the caller. `session-host/view-sink.ts` then feeds both from the same projection.
 - **Done when:** one wording function (rendering is allowed to differ; the sentence is not).
 
 ### 5.2 `provider/modelId` re-derived in four places
-- **Status:** pending
+- **Status:** done — `shared/model-key.ts`. It also names the two separators (`/` for a key, `|` for a Chat form
+  value) in one place, which were being written out by hand at the picker's edge.
 - **Where:** `src/commands/command-surface.ts` (`modelKey`), `src/chat/queries.ts`, `src/durable/host.ts`,
   `src/chat/cards.ts`
 - **Fix:** one `modelLabel()` on `ModelInfo` at the seam.
 - **Done when:** the join happens once.
 
 ### 5.3 `/secret` allow-list fallback written twice, differently
-- **Status:** pending
+- **Status:** pending — deliberately left: the fallback is computed where identity is known on each surface, and
+  the two places differ for a real reason (Chat has an allow-listed sender; the web has a proxy
+  header). Unifying it would move an authorisation decision away from the identity.
 - **Where:** `src/chat/handler.ts` (`secretUsers: config.secretUsers.length > 0 ? … : allowedUsers`),
   `src/web/routes.ts` (`options.secretUsers ?? options.allowedUsers`), plus the checks in
   `src/chat/commands.ts`

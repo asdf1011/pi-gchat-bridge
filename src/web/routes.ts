@@ -46,6 +46,7 @@ import {
 } from "./sink.js";
 import { manifestVersion, mountRootOf, webManifest } from "./manifest.js";
 import { renderMarkdown } from "./markdown.js";
+import { modelKey } from "../shared/model-key.js";
 import { runCommand } from "../commands/command-surface.js";
 import { imageTypeOf, isMarkdown } from "../durable/artifacts.js";
 import { currentAddress, MAX_COMMENT_CHARS, modelText } from "../durable/comments.js";
@@ -491,7 +492,7 @@ export async function handleWebRequest(
         models: models.map((model) => ({
           provider: model.provider,
           id: model.id,
-          key: `${model.provider}/${model.id}`,
+          key: modelKey({ provider: model.provider, modelId: model.id }),
           label: model.label,
           levels: model.thinkingLevels ?? [],
         })),

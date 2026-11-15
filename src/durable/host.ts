@@ -42,6 +42,7 @@ import { getSupportedThinkingLevels } from "@earendil-works/pi-ai/models";
 import { getAgentDir, ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 import { logger } from "../logger.js";
+import { modelKey } from "../shared/model-key.js";
 import type {
   AdapterEntry,
   ConversationState,
@@ -541,7 +542,7 @@ export class BridgeHost {
       const doc = await tx.doc(BindingsDoc);
       const value: ConversationBinding = {
         conversationId: record.id as number,
-        model: `${agent.model.provider}/${agent.model.modelId}`,
+        model: modelKey(agent.model),
         ...(agent.thinkingLevel ? { thinking: String(agent.thinkingLevel) } : {}),
         createdAt: Date.now(),
       };
@@ -604,7 +605,7 @@ export class BridgeHost {
     const usage = totalUsage(value.docs?.["pi.usage"]);
     return {
       conversationId,
-      model: `${model.provider}/${model.modelId}`,
+      model: modelKey(model),
       provider: model.provider,
       modelId: model.modelId,
       ...(agent.thinkingLevel ? { thinkingLevel: String(agent.thinkingLevel) } : {}),
@@ -623,7 +624,7 @@ export class BridgeHost {
   ): Promise<{ model: string; thinkingLevel?: string }> {
     const binding = await this.bindingFor(chatKey);
     if (!binding) throw new Error(`no conversation for ${chatKey}`);
-    const model = `${change.provider}/${change.modelId}`;
+    const model = modelKey(change);
 
     await this.harness.commit(async (tx) => {
       await configure(tx, binding.conversationId as ConversationId, {
@@ -681,7 +682,7 @@ export class BridgeHost {
       const previous = doc.byChatKey[chatKey];
       const binding: ConversationBinding = {
         conversationId,
-        model: `${target.provider}/${target.modelId}`,
+        model: modelKey(target),
         ...(level ? { thinking: String(level) } : {}),
         createdAt: Date.now(),
         ...(previous?.name ? { name: previous.name } : {}),

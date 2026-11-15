@@ -17,6 +17,7 @@ import type http from "node:http";
 
 import { handleV1 } from "../session-host/v1-routes.js";
 import { logger } from "../logger.js";
+import { modelKey } from "../shared/model-key.js";
 import type { Config } from "../config.js";
 import type { RouteTable } from "../shared/serve-routes.js";
 import type { ActivityFeed } from "./activity.js";
@@ -120,7 +121,7 @@ export function hostRoutes(deps: HostRoutesDeps): RouteTable {
       const blocked = failures.filter((failure) => failure.persistent === true);
       json(res, blocked.length === 0 ? 200 : 503, {
         ok: blocked.length === 0,
-        model: `${deps.model.provider}/${deps.model.modelId}`,
+        model: modelKey(deps.model),
         failing: blocked.length > 0,
         failures,
       });

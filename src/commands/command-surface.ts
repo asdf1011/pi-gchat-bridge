@@ -15,6 +15,7 @@
  * here, not trusted because a surface offered it in a dropdown.
  */
 import { clampToSupported } from "../settings.js";
+import { modelKey } from "../shared/model-key.js";
 import type { ModelInfo, SessionHost } from "../session-host/api.js";
 
 /** A row in a list. `command` makes the row clickable: it is the command the click sends. */
@@ -141,9 +142,14 @@ const HELP: readonly { command: string; about: string; surfaces?: readonly strin
   { command: "/help", about: "this list" },
 ];
 
-/** `provider/modelId`, which is how a model is named on the wire and in a form value. */
-export function modelKey(model: { provider: string; id: string }): string {
-  return `${model.provider}/${model.id}`;
+/**
+ * `provider/modelId`, for a `ModelInfo` (which names the field `id`).
+ *
+ * The formatting itself is `shared/model-key.ts`, shared with the host and the web routes; this is the
+ * one-line adaptation for the shape a picker holds.
+ */
+export function keyOfModel(model: ModelInfo): string {
+  return modelKey({ provider: model.provider, modelId: model.id });
 }
 
 /** Every thinking level any model offers, deduplicated and ordered as the model lists them. */
@@ -185,10 +191,10 @@ function modelForm(
         // The thinking options below are this model's, so changing the model asks the command again.
         requery: true,
         options: models.map((model) => ({
-          id: modelKey(model),
+          id: keyOfModel(model),
           label: model.label,
-          detail: modelKey(model),
-          selected: modelKey(model) === current.model,
+          detail: keyOfModel(model),
+          selected: keyOfModel(model) === current.model,
         })),
       },
       {
@@ -266,26 +272,26 @@ export async function runCommand(
     const state = await seam.state(subject.conversationId);
     const shown = state?.model ?? "";
     if (!wanted) {
-      const current = models.find((model) => modelKey(model) === shown);
+      const current = models.find((model) => keyOfModel(model) === shown);
       return modelForm(
         models,
         { model: shown, ...(state?.thinkingLevel === undefined ? {} : { thinking: state.thinkingLevel }) },
         current?.thinkingLevels,
       );
     }
-    const requested = models.filter((model) => modelKey(model) === wanted || model.id === wanted || model.label === wanted);
+    const requested = models.filter((model) => keyOfModel(model) === wanted || model.id === wanted || model.label === wanted);
     if (requested.length === 0) {
       return {
         kind: "list",
         title: `No model called ${wanted}`,
-        rows: models.map((model) => ({ label: model.label, detail: modelKey(model), command: `/model ${modelKey(model)}` })),
+        rows: models.map((model) => ({ label: model.label, detail: keyOfModel(model), command: `/model ${keyOfModel(model)}` })),
       };
     }
     if (requested.length > 1) {
       return {
         kind: "list",
         title: `${wanted} matches more than one model`,
-        rows: requested.map((model) => ({ label: model.label, detail: modelKey(model), command: `/model ${modelKey(model)}` })),
+        rows: requested.map((model) => ({ label: model.label, detail: keyOfModel(model), command: `/model ${keyOfModel(model)}` })),
       };
     }
     const chosen = requested[0]!;
@@ -300,7 +306,7 @@ export async function runCommand(
         wantedThinking !== undefined && (levels.length === 0 || levels.includes(wantedThinking))
           ? wantedThinking
           : levels[0];
-      return modelForm(models, { model: modelKey(chosen), ...(thinking === undefined ? {} : { thinking }) }, levels);
+      return modelForm(models, { model: keyOfModel(chosen), ...(thinking === undefined ? {} : { thinking }) }, levels);
     }
     const wantedLevel = values.thinking ?? (rest.length > 1 ? rest.slice(1).join(" ") : undefined);
     const levels = chosen.thinkingLevels ?? [];
