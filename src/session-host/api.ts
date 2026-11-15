@@ -9,8 +9,10 @@
  * Two rules decide what belongs here, both learned from shipping the artifact
  * origin first (see docs/session-host-api.md):
  *
- *   1. **Plain data only.** Ids are `number`, cancellation is an `AbortSignal`,
- *      and nothing is a class instance, a branded type, or a live handle.
+ *   1. **Plain data only.** Ids are `number`, and nothing is a class instance, a branded type, or a
+ *      live handle. Cancellation is *not* a parameter here: none of these operations was ever
+ *      cancellable, and 33 signatures carrying an `AbortSignal` their implementations ignored made a
+ *      promise no caller could keep. A long operation says so in its own comment instead.
  *   2. **Small by construction.** What crosses must be bounded regardless of how
  *      long the conversation is — a projection, a derived list, an id. The
  *      transcript itself never travels: `snapshot()` is a projection, not
@@ -396,7 +398,7 @@ export interface SessionHost {
    * contract whose methods are *almost* all async is one an adapter cannot be written against
    * without knowing which side of a process boundary it is on.
    */
-  info(options?: { signal?: AbortSignal }): Promise<HostInfo>;
+  info(): Promise<HostInfo>;
 
   /**
    * Conversations, most recently used first.
@@ -404,10 +406,10 @@ export interface SessionHost {
    * `limit`/`offset` exist because the web index pages through them; a caller
    * that omits both gets everything, which is what the Chat commands want.
    */
-  list(options?: { limit?: number; offset?: number; signal?: AbortSignal }): Promise<NamedConversation[]>;
+  list(options?: { limit?: number; offset?: number }): Promise<NamedConversation[]>;
 
   /** One conversation by its adapter-chosen name, if it exists. */
-  resolve(name: string, options?: { signal?: AbortSignal }): Promise<NamedConversation | undefined>;
+  resolve(name: string): Promise<NamedConversation | undefined>;
 
   /**
    * The conversation named `name`, created on first use.
@@ -420,7 +422,6 @@ export interface SessionHost {
   getOrCreate(
     name: string,
     agent: AgentConfig,
-    options?: { signal?: AbortSignal },
   ): Promise<NamedConversation>;
 
   /**
@@ -443,7 +444,7 @@ export interface SessionHost {
    */
   history(
     conversationId: number,
-    options?: { limit?: number; offset?: number; signal?: AbortSignal },
+    options?: { limit?: number; offset?: number },
   ): Promise<readonly TranscriptMessage[] | undefined>;
 
   /**
@@ -456,7 +457,6 @@ export interface SessionHost {
     conversationId: number,
     entryId: number,
     index: number,
-    options?: { signal?: AbortSignal },
   ): Promise<{ mimeType: string; data: string } | undefined>;
 
   /**
@@ -465,7 +465,7 @@ export interface SessionHost {
    * Separate from `snapshot` because the link needs it before every operation, and a boolean is a much
    * smaller question than a projection of the whole conversation.
    */
-  exists(conversationId: number, options?: { signal?: AbortSignal }): Promise<boolean>;
+  exists(conversationId: number): Promise<boolean>;
 
   /**
    * Whether a turn is running in this conversation.
@@ -474,10 +474,10 @@ export interface SessionHost {
    * "was anything running", and the gate that decides whether a command should interrupt — and a
    * projection each time was the wrong price for the answer.
    */
-  busy(conversationId: number, options?: { signal?: AbortSignal }): Promise<boolean>;
+  busy(conversationId: number): Promise<boolean>;
 
   /** What this conversation looks like right now. Small and bounded. */
-  snapshot(conversationId: number, options?: { signal?: AbortSignal }): Promise<ProjectedView | undefined>;
+  snapshot(conversationId: number): Promise<ProjectedView | undefined>;
 
   /**
    * Snapshot, then frames. Returns `undefined` when the conversation is gone.
@@ -494,7 +494,6 @@ export interface SessionHost {
   attach(
     conversationId: number,
     onFrame: (view: ProjectedView) => void,
-    options?: { signal?: AbortSignal },
   ): Promise<ViewHandle | undefined>;
 
   /**
@@ -505,7 +504,6 @@ export interface SessionHost {
    */
   artifacts(
     conversationId: number,
-    options?: { signal?: AbortSignal },
   ): Promise<readonly ArtifactFile[] | undefined>;
 
   /**
@@ -517,7 +515,6 @@ export interface SessionHost {
    */
   comments(
     conversationId: number,
-    options?: { signal?: AbortSignal },
   ): Promise<readonly CommentView[] | undefined>;
 
   /**
@@ -535,7 +532,6 @@ export interface SessionHost {
   addComment(
     conversationId: number,
     input: CommentInput,
-    options?: { signal?: AbortSignal },
   ): Promise<{ comment: CommentView } | { error: string }>;
 
   /** Resolve, or reopen, one comment. True when something changed. */
@@ -543,7 +539,6 @@ export interface SessionHost {
     conversationId: number,
     commentId: string,
     resolved: boolean,
-    options?: { signal?: AbortSignal },
   ): Promise<boolean>;
 
   /**
@@ -558,7 +553,6 @@ export interface SessionHost {
     conversationId: number,
     commentId: string,
     submissionId: number,
-    options?: { signal?: AbortSignal },
   ): Promise<void>;
 
   /**
@@ -571,7 +565,6 @@ export interface SessionHost {
   commentThread(
     conversationId: number,
     commentId: string,
-    options?: { signal?: AbortSignal },
   ): Promise<readonly CommentReply[] | undefined>;
 
   /**
@@ -584,7 +577,6 @@ export interface SessionHost {
   submit(
     conversationId: number,
     request: SubmitRequest,
-    options?: { signal?: AbortSignal },
   ): Promise<SubmitResult>;
 
   // --- Settings and naming -------------------------------------------------
@@ -595,10 +587,10 @@ export interface SessionHost {
   // card and the running turn disagree.
 
   /** Everything a `/status` card needs. `undefined` when the conversation is gone. */
-  state(conversationId: number, options?: { signal?: AbortSignal }): Promise<ConversationState | undefined>;
+  state(conversationId: number): Promise<ConversationState | undefined>;
 
   /** Models a picker may offer, with their supported thinking levels. */
-  models(options?: { signal?: AbortSignal }): Promise<readonly ModelInfo[]>;
+  models(): Promise<readonly ModelInfo[]>;
 
   /**
    * Change the model (and thinking level) a named conversation runs with.
@@ -609,17 +601,16 @@ export interface SessionHost {
   setModel(
     name: string,
     change: { provider: string; modelId: string; thinkingLevel?: string },
-    options?: { signal?: AbortSignal },
   ): Promise<{ model: string; thinkingLevel?: string }>;
 
   /** Start `name` on a fresh conversation, leaving the old transcript in storage. */
-  create(name: string, agent: AgentConfig, options?: { signal?: AbortSignal }): Promise<NamedConversation>;
+  create(name: string, agent: AgentConfig): Promise<NamedConversation>;
 
   /** Point `name` at an existing conversation, keeping the previous label. */
-  bind(name: string, conversationId: number, options?: { signal?: AbortSignal }): Promise<NamedConversation | undefined>;
+  bind(name: string, conversationId: number): Promise<NamedConversation | undefined>;
 
   /** Set a conversation's display label. Adapter-facing text only. */
-  label(name: string, label: string, options?: { signal?: AbortSignal }): Promise<boolean>;
+  label(name: string, label: string): Promise<boolean>;
 
   /**
    * Wait for a submission to settle.
@@ -628,7 +619,7 @@ export interface SessionHost {
    * answer this (the turn resumes). That is why the seam returns an id rather
    * than a handle — a handle would only exist in the process that submitted.
    */
-  awaitSubmission(submissionId: number, options?: { signal?: AbortSignal }): Promise<Settled>;
+  awaitSubmission(submissionId: number): Promise<Settled>;
 
   /**
    * Where a submission stands, without waiting for it to settle.
@@ -636,10 +627,10 @@ export interface SessionHost {
    * `awaitSubmission` is the right call when the answer is the point; this is the one for "is it
    * still going", which is what a bounded HTTP question and a retry decision actually ask.
    */
-  submission(submissionId: number, options?: { signal?: AbortSignal }): Promise<SubmissionState>;
+  submission(submissionId: number): Promise<SubmissionState>;
 
   /** Write an adapter-authored entry into a conversation. Returns its id. */
-  write(conversationId: number, entry: AdapterEntry, options?: { signal?: AbortSignal }): Promise<number>;
+  write(conversationId: number, entry: AdapterEntry): Promise<number>;
 
   // --- Adapter-owned durable state ----------------------------------------
   //
@@ -651,10 +642,10 @@ export interface SessionHost {
   // are the semantics, which is the property that matters.
 
   /** Record an adapter's verdict about a conversation (notification validation). */
-  recordVerdict(name: string, verdict: AdapterVerdict, options?: { signal?: AbortSignal }): Promise<void>;
+  recordVerdict(name: string, verdict: AdapterVerdict): Promise<void>;
 
   /** The last verdict recorded for a name. */
-  verdict(name: string, options?: { signal?: AbortSignal }): Promise<AdapterVerdict | undefined>;
+  verdict(name: string): Promise<AdapterVerdict | undefined>;
 
   /**
    * The first user/assistant exchange of a conversation, for a title.
@@ -664,11 +655,10 @@ export interface SessionHost {
    */
   firstTurn(
     conversationId: number,
-    options?: { signal?: AbortSignal },
   ): Promise<{ userText: string; assistantText: string } | undefined>;
 
   /** Compact the conversation's context now. Instructions are free text. */
-  compact(conversationId: number, instructions?: string, options?: { signal?: AbortSignal }): Promise<void>;
+  compact(conversationId: number, instructions?: string): Promise<void>;
 
   /**
    * Stop whatever the conversation is doing.
@@ -678,7 +668,7 @@ export interface SessionHost {
    * something was running (`snapshot().busy`) when the answer needs to say so — which is what the
    * Chat adapter does, and what `/abort` had to be taught.
    */
-  abort(conversationId: number, options?: { signal?: AbortSignal }): Promise<boolean>;
+  abort(conversationId: number): Promise<boolean>;
 
   /**
    * The names in the deployment's secret store. Never the values.
@@ -686,7 +676,7 @@ export interface SessionHost {
    * Host work because the store is a file beside the database, and the same file seeds the redaction
    * registry — so the host is the thing that can read it and the thing that must not leak it.
    */
-  secrets(options?: { signal?: AbortSignal }): Promise<readonly { name: string; addedBy?: string }[]>;
+  secrets(): Promise<readonly { name: string; addedBy?: string }[]>;
 
   /**
    * Store a secret.
@@ -698,11 +688,10 @@ export interface SessionHost {
     name: string,
     value: string,
     addedBy: string,
-    options?: { signal?: AbortSignal },
   ): Promise<{ ok: true } | { error: string }>;
 
   /** Delete a secret by name. True when something was removed. */
-  removeSecret(name: string, options?: { signal?: AbortSignal }): Promise<boolean>;
+  removeSecret(name: string): Promise<boolean>;
 
   /**
    * Provider quotas, for `/quota`.
@@ -712,7 +701,7 @@ export interface SessionHost {
    * do either, and a check that failed to reach the network must still be reported per provider —
    * `note` is where that goes.
    */
-  quota(options?: { signal?: AbortSignal }): Promise<readonly ProviderQuota[]>;
+  quota(): Promise<readonly ProviderQuota[]>;
 
   /**
    * Provider failures the bridge has seen, newest first, cleared by a success.
@@ -722,6 +711,6 @@ export interface SessionHost {
    * the provider being unreachable. `/status` reads it; a surface can show it to
    * explain why every turn is failing without waiting for `/quota`.
    */
-  modelFailures(options?: { signal?: AbortSignal }): Promise<readonly ProviderFailure[]>;
+  modelFailures(): Promise<readonly ProviderFailure[]>;
 
 }

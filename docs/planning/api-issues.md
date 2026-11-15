@@ -268,7 +268,9 @@ below, because it is the same code and the same review.
 - **Done when:** no adapter passes `unknown` into `write()`.
 
 ### 6.3 `signal?: AbortSignal` on 33 methods, honoured by none
-- **Status:** pending
+- **Status:** done — removed rather than implemented. The seam is one box, nothing called with a
+  signal, and a cancel that silently does nothing is worse than no parameter: the caller believes a
+  long read can be abandoned. Operations that can take a while say so in their own comment.
 - **Where:** `src/session-host/api.ts`, `src/session-host/inprocess.ts` (says so explicitly),
   `src/session-host/link.ts`
 - **Issue:** a caller believes a long `history` can be cancelled. It cannot.
