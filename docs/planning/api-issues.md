@@ -555,10 +555,11 @@ needs no server work. Cron is the third surface, and five changes is the answer.
 
 ## 10. Where the work stopped
 
-Everything that could be done **inside this repository, with a consumer already in it**, is done: 26
-items closed, 6 marked `wontfix` with the reason (three of those because checking the code showed the
-*finding* was wrong), 7 left open. `npm run test:all` is green at 826 tests, and every commit in the
-sequence typechecks on its own.
+Everything that could be done **inside this repository, with a consumer already in it**, is done:
+**24 closed and 8 `wontfix`** out of 39, with **7 open**. Three of the `wontfix` ones are the *finding*
+being wrong rather than the code (4.3, 4.6, 8.3) — checked against the source before changing anything,
+and recorded that way. `npm run test:all` is green at 826 tests, `tsc --noEmit` is clean against all
+three tsconfigs, and every commit in the sequence stands on its own.
 
 What is open, and why:
 
