@@ -13,6 +13,7 @@ import type { AddressInfo } from "node:net";
 import test from "node:test";
 
 import { apiPath, handleWebRequest, isWebSearchKey, webPath } from "../src/web/routes.js";
+import { WEBUI_ORIGIN, WEBUI_SEARCH_ORIGIN } from "../src/web/sink.js";
 import { MAX_WEB_IMAGES } from "../src/web/sink.js";
 import type { NamedConversation, SessionHost } from "../src/session-host/api.js";
 import type { ProjectedView } from "../src/session-host/projection.js";
@@ -652,11 +653,21 @@ test("a search is tagged in the chat key, and a plain new chat is not", async ()
     assert.equal(isWebSearchKey(search), true);
     assert.equal(isWebSearchKey(plain), false);
     assert.equal(isWebSearchKey(blank), false, "an empty query is not a search");
-    // Tagged as a *kind of conversation*, never as a fourth surface: the Chat painter
-    // compares the origin against its own name to decide what is already on the wire,
-    // and a search started from Chat would still have to stamp `gchat`.
+    // Two labels, saying two different things. The key says the *conversation* is a
+    // search; the origin says the *opening message* was the one that started it.
     // The blank query submitted nothing, so it stamped nothing.
-    assert.deepEqual(origins, ["webui"], "the origin still names the process, not the kind");
+    assert.deepEqual(origins, [WEBUI_SEARCH_ORIGIN], "the opening message carries the search label");
+
+    // And a later message in the same conversation is plain `webui`: the search is how
+    // the thread began, not what every word in it is. The conversation id is the same
+    // because the fixture returns one, which is the point — same thread, different label.
+    origins.length = 0;
+    await fetch(`${served.base}/api/c/1/message`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "what did it say about OFX?" }),
+    });
+    assert.deepEqual(origins, [WEBUI_ORIGIN], "a follow-up is an ordinary web message");
   } finally {
     await served.close();
   }

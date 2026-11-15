@@ -209,12 +209,37 @@ export const MAX_WEB_IMAGE_BYTES = 8 * 1024 * 1024;
  */
 export const MAX_WEB_IMAGES = 10;
 
+/**
+ * The origin stamped on a browser submission.
+ *
+ * A *message* label, not a conversation one: it says which surface produced this
+ * entry, on the entry. The conversation's own "this was a search" fact is in its chat
+ * key (`web:search:<uuid>`), because that is what outlives a restart — see
+ * `origins-doc.ts` for why the stamp is not the place to keep it.
+ */
+export const WEBUI_ORIGIN = "webui";
+
+/**
+ * The origin for the one message that *opens* a search conversation.
+ *
+ * Answers "was this message the start of a search?" per message, which is what a
+ * reader can ask of any single entry. Later messages in the same conversation are
+ * plain `webui`: the search is how the thread began, not what every word in it is.
+ *
+ * Deliberately not a fourth *surface*. The Chat painter compares an entry's origin
+ * against its own name to decide what is already on the wire, so this still names the
+ * browser — it is `webui` with a qualifier, and anything reading it as a surface sees
+ * a name it does not own, which is the same decision it makes for `webui`.
+ */
+export const WEBUI_SEARCH_ORIGIN = "webui-search";
+
 export async function webSubmit(
   options: WebOptions,
   conversationId: number,
   text: string,
   whenBusy: WhenBusy = "steer",
   images: readonly PastedImage[] = [],
+  origin: string = WEBUI_ORIGIN,
 ): Promise<{ ok: true; submissionId: number; html: string } | { ok: false; error: string }> {
   // Content parts, as Chat sends them: the model sees an image, the transcript
   // stores one, and the pane can render it from the entry.
@@ -227,7 +252,7 @@ export async function webSubmit(
         ];
   // Stamped so a surface painting this conversation can tell a web message from one
   // its own transport already holds.
-  const result = await options.seam.submit(conversationId, { content, whenBusy, origin: "webui" });
+  const result = await options.seam.submit(conversationId, { content, whenBusy, origin });
   return "error" in result
     ? { ok: false, error: result.error }
     : // Rendered here so the pane can show your message the moment it is sent,

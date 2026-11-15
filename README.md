@@ -247,8 +247,9 @@ step) at `/web` — or under whatever prefix a reverse proxy gives it.
   makes it a **search**, which is the same thing with the query submitted as the conversation's
   first message. The chat key says which kind: `web:search:<uuid>` for a search, `web:<uuid>`
   otherwise — legible in `bridge-cli list`, and distinguishable before the conversation has a
-  title. The *origin* stamp stays `webui`; the two say different things (how it began vs. which
-  process submitted it)
+  title. The *origin* stamp stays `webui` — except on the opening message, which is stamped
+  `webui-search`, so "was this message the one that started a search?" is answerable per
+  entry; the two say different things (how it began vs. which process submitted it)
 - **`GET /web/api/c/:id/history?before=`** — a page of transcript, **anchored**: `before` is
   the oldest entry id held and `before=0` is the first paint. Markdown is rendered
   server-side here, because this origin can submit messages and a client-side renderer

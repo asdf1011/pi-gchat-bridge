@@ -38,6 +38,7 @@ import {
   MAX_WEB_IMAGES,
   WEB_ICON,
   WEB_RENDER_OPTIONS,
+  WEBUI_SEARCH_ORIGIN,
   webPage,
   webPageVersion,
   webSubmit,
@@ -537,7 +538,20 @@ export async function handleWebRequest(
     // The conversation is made first and stays made even if the message is refused: an
     // empty one in the index is recoverable, a search that silently did nothing is not.
     // The page navigates to it either way, so the refusal shows where the answer would.
-    const sent = query === "" ? undefined : await webSubmit(handleOptions, created.conversationId, searchPrompt(query));
+    // The opening message carries the search label as well as the key, so both ways of
+    // asking are answerable: "is this conversation a search" (key) and "was this
+    // message the one that started it" (origin).
+    const sent =
+      query === ""
+        ? undefined
+        : await webSubmit(
+            handleOptions,
+            created.conversationId,
+            searchPrompt(query),
+            "steer",
+            [],
+            WEBUI_SEARCH_ORIGIN,
+          );
     res.writeHead(201, { "Content-Type": "application/json" });
     res.end(
       JSON.stringify({
