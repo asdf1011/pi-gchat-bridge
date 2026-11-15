@@ -120,6 +120,88 @@ test("an empty selection takes the button away again", async () => {
   dom.window.close();
 });
 
+/* --- pressing `c` does what the button does ------------------------------------------ */
+
+/** A keydown the way a browser delivers one. */
+function pressC(dom: JSDOM, init: KeyboardEventInit = {}): KeyboardEvent {
+  const event = new dom.window.KeyboardEvent("keydown", { key: "c", bubbles: true, cancelable: true, ...init });
+  dom.window.document.dispatchEvent(event);
+  return event;
+}
+
+/** The last message of a given type, or undefined. */
+function lastOf(posted: unknown[], type: string): Record<string, unknown> | undefined {
+  for (let i = posted.length - 1; i >= 0; i -= 1) {
+    const message = posted[i] as { t?: string };
+    if (message?.t === type) return posted[i] as Record<string, unknown>;
+  }
+  return undefined;
+}
+
+test("pressing `c` on a settled selection opens the composer, focused", async () => {
+  // The affordance is a mouse-shaped offer; the key is the same offer for someone whose
+  // hands are already on the keyboard. `intent: "comment"` is what makes the pane focus
+  // the field, and it is the same intent the button sends — one meaning, two gestures.
+  const dom = render("<p>selectable prose</p>", []);
+  const posted: unknown[] = [];
+  dom.window.parent.postMessage = (data: unknown) => posted.push(data);
+
+  await selectText(dom, "p");
+  const event = pressC(dom);
+
+  const opened = lastOf(posted, "pi-artifact-select");
+  assert.ok(opened, "the key asks for the composer");
+  assert.equal(opened!.intent, "comment", "and says the reader meant to write");
+  assert.equal(event.defaultPrevented, true, "and claims the keystroke");
+
+  // Re-read under the key, not reused from the button: a selection that moved since the
+  // affordance was drawn would otherwise comment on the wrong lines.
+  assert.equal(typeof opened!.quote, "string");
+  assert.equal(dom.window.document.querySelector("button.cm-add"), null, "the offer goes once taken");
+  dom.window.close();
+});
+
+test("`c` does nothing until a selection has settled", async () => {
+  // The affordance is what says a selection is settled and complete. Without it there is
+  // nothing to comment on, and an idle `c` must not open a box.
+  const dom = render("<p>selectable prose</p>", []);
+  const posted: unknown[] = [];
+  dom.window.parent.postMessage = (data: unknown) => posted.push(data);
+
+  const event = pressC(dom);
+  assert.equal(posted.some((m) => (m as { t: string }).t === "pi-artifact-select"), false);
+  assert.equal(event.defaultPrevented, false, "and the keystroke is left alone");
+  dom.window.close();
+});
+
+test("`c` with a modifier is copy, and is left alone", async () => {
+  const dom = render("<p>selectable prose</p>", []);
+  const posted: unknown[] = [];
+  dom.window.parent.postMessage = (data: unknown) => posted.push(data);
+
+  await selectText(dom, "p");
+  for (const modifier of ["ctrlKey", "metaKey", "altKey"] as const) {
+    const event = pressC(dom, { [modifier]: true });
+    assert.equal(event.defaultPrevented, false, `${modifier}+c is not ours`);
+  }
+  assert.equal(posted.some((m) => (m as { t: string }).t === "pi-artifact-select"), false);
+  assert.ok(dom.window.document.querySelector("button.cm-add"), "and the offer is still there");
+  dom.window.close();
+});
+
+test("on a touch device `c` is not bound, because there is no keyboard", async () => {
+  const dom = renderTouch("<p>selectable prose</p>");
+  const posted: unknown[] = [];
+  dom.window.parent.postMessage = (data: unknown) => posted.push(data);
+
+  await selectIn(dom, "p", () => posted.some((m) => (m as { t: string }).t === "pi-artifact-select-touch"));
+  const event = pressC(dom);
+
+  assert.equal(event.defaultPrevented, false, "the key is not claimed");
+  assert.equal(lastOf(posted, "pi-artifact-select"), undefined, "and no composer is asked for");
+  dom.window.close();
+});
+
 /* --- the affordance on a touch device ------------------------------------------------ */
 
 /**

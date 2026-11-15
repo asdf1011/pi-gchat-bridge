@@ -163,13 +163,27 @@ const IMAGE_CSP = "default-src 'none'";
  * that the bytes are not decoded on the way through.
  */
 async function readImageAtRevision(
-  repo: string | undefined,
+  options: ArtifactsServerOptions,
+  repo: string,
   revision: string,
   file: ArtifactFile,
 ): Promise<{ bytes: Buffer; size: number }> {
-  if (!repo) throw new Error("artifacts are not version controlled here");
-  const bytes = await showFileBytes(repo, revision, repoRelativePath(repo, file.key));
+  const bytes = await showFileBytes(repo, revision, await repoPathOrThrow(repo, file.path, file.key));
   return { bytes, size: bytes.length };
+}
+
+/**
+ * The path a file has *inside the repository*, for a jj read.
+ *
+ * The file's absolute path is what the host derived, and the repository is wherever
+ * `jj root` says — which is not always the conversation directory: the artifacts
+ * directory usually lives inside a checkout, so its repo is that checkout. Asking jj
+ * is the only way to get this right for both.
+ */
+async function repoPathOrThrow(repo: string, absolute: string, key: string): Promise<string> {
+  const relative = await repoRelativePath(repo, absolute);
+  if (relative === undefined) throw new Error(`${key} is not a file in this repository`);
+  return relative;
 }
 
 /** Each path segment encoded, slashes kept: a key is a path, not an opaque string. */
@@ -563,6 +577,19 @@ const COMMENT_SCRIPT = `
   document.addEventListener("keydown", function (event) {
     if (event.key === "Escape") hideAffordance();
   });
+  // The key that does what the affordance does. Both scripts install the same handler;
+  // the collaborators are what differ (this one reports line numbers, the rendered one
+  // reports text and an occurrence).
+  document.addEventListener(
+    "keydown",
+    ${commentKeyHandler.toString()}({
+      isTouch: isTouch,
+      ready: function () { return !!affordance; },
+      hide: hideAffordance,
+      describe: describe,
+      post: function (message) { parent.postMessage(message, "*"); }
+    })
+  );
 
   document.addEventListener("click", function (event) {
     var target = event.target;
@@ -648,6 +675,62 @@ function sourceLine(number: number, text: string, comments: readonly ViewComment
   }
 
   return `<div class="ln" id="L${number}" data-line="${number}"><a class="no" href="#L${number}">${number}</a><span class="tx">${body}</span></div>`;
+}
+
+/**
+ * A `c` press turns the settled selection into a comment.
+ *
+ * The affordance beside the selection is a mouse-shaped offer, and reaching for it is
+ * a trip to a button for someone who has just selected the text they want to comment
+ * on. So the key does what the button does — and sends the same `intent: "comment"`, so
+ * the pane focuses the field. Anything else would be a second meaning for the same act.
+ *
+ * Deliberately narrow, because a stray `c` must never open a comment box or swallow a
+ * keystroke meant for something else. Every condition here is a reason *not* to act:
+ *
+ *   - **not on a touch device** — there is no keyboard, and the platform's own menus are
+ *     what a phone uses. This is the same `isTouch()` that decides whether the
+ *     affordance is drawn, so no device gets half of the behaviour.
+ *   - **only while a selection is settled** — `ready()` is what says so. It is exactly
+ *     the state in which the reader is looking at the offer.
+ *   - **no modifiers** — `Cmd/Ctrl+C` is copy, and stealing it would be a real bug.
+ *   - **not while typing** — inside an `input`, `textarea`, `select` or a
+ *     `contenteditable`, `c` is a letter. The frame has none of those today, but the
+ *     check costs nothing and the failure would be silent.
+ *   - **the selection is re-read under the key**, because the reader may have moved it
+ *     since the affordance was drawn; a stale message would comment on the wrong lines.
+ *
+ * Returned rather than installed, and given its collaborators, so both scripts — source
+ * and rendered — share one implementation without either owning a copy of the rules.
+ */
+function commentKeyHandler(deps: {
+  isTouch: () => boolean;
+  ready: () => boolean;
+  hide: () => void;
+  describe: () => { message: Record<string, unknown> } | null;
+  post: (message: unknown) => void;
+}): (event: KeyboardEvent) => void {
+  return function (event: KeyboardEvent): void {
+    if (event.key !== "c" && event.key !== "C") return;
+    if (event.metaKey || event.ctrlKey || event.altKey) return;
+    if (event.defaultPrevented) return;
+    if (deps.isTouch()) return;
+    if (!deps.ready()) return;
+    // The target is an `EventTarget` in TypeScript and an element at runtime, which is
+    // it: a keydown in a document always lands on a node. Narrowed rather than cast, so
+    // a same-named property elsewhere cannot be mistaken for a tag name.
+    var node = event.target as (EventTarget & { nodeName?: string; isContentEditable?: boolean; closest?: (selector: string) => Element | null }) | null;
+    var name = node && node.nodeName ? String(node.nodeName).toLowerCase() : "";
+    if (name === "input" || name === "textarea" || name === "select") return;
+    if (node && (node.isContentEditable || (node.closest && node.closest("[contenteditable]")))) return;
+    var built = deps.describe();
+    if (!built) return;
+    event.preventDefault();
+    deps.hide();
+    var message = built.message;
+    message.intent = "comment";
+    deps.post(message);
+  };
 }
 
 /**
@@ -893,6 +976,19 @@ export const RENDER_SCRIPT = `
   document.addEventListener("keydown", function (event) {
     if (event.key === "Escape") hideAffordance();
   });
+  // The key that does what the affordance does. Both scripts install the same handler;
+  // the collaborators are what differ (this one reports line numbers, the rendered one
+  // reports text and an occurrence).
+  document.addEventListener(
+    "keydown",
+    ${commentKeyHandler.toString()}({
+      isTouch: isTouch,
+      ready: function () { return !!affordance; },
+      hide: hideAffordance,
+      describe: describe,
+      post: function (message) { parent.postMessage(message, "*"); }
+    })
+  );
 
   document.addEventListener("click", function (event) {
     var target = event.target;
@@ -1179,9 +1275,12 @@ async function handle(
   if (imageType !== undefined) {
     let image;
     try {
-      image = revision !== "" && revision !== "latest"
-        ? await readImageAtRevision(repo, revision, file)
-        : readArtifactBytes(file);
+      if (revision !== "" && revision !== "latest") {
+        if (!repo) throw new Error("artifacts are not version controlled here");
+        image = await readImageAtRevision(options, repo, revision, file);
+      } else {
+        image = readArtifactBytes(file);
+      }
     } catch (error) {
       logger.error(`[artifacts] ${key}: ${(error as Error).message}`);
       send(res, 404, "text/html; charset=utf-8", documentCsp, unreadableDocument(key));
@@ -1228,7 +1327,7 @@ async function handle(
         send(res, 400, "text/plain; charset=utf-8", TEXT_CSP, "artifacts are not version controlled here");
         return;
       }
-      const content = await showFile(repo, revision, repoRelativePath(repo, file.key));
+      const content = await showFile(repo, revision, await repoPathOrThrow(repo, file.path, file.key));
       const redacted = options.redact ? options.redact(content) : content;
       read = {
         content: redacted,
