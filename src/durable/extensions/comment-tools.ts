@@ -17,7 +17,7 @@
  * an agent that goes looking for other people's open notes is an agent inventing
  * work.
  */
-import { defineExtension, defineTool } from "@earendil-works/pi-durable";
+import { defineExtension, defineTool, hook, ToolTask } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
 
 /** What the tool needs from the host: one write, scoped to a conversation. */
@@ -27,11 +27,44 @@ export interface CommentReplyTarget {
     commentId: string,
     text: string,
   ): Promise<{ id: string } | { error: string }>;
+  /**
+   * Commit the conversation's artifact working copy, so a comment has a revision
+   * to be written against.
+   *
+   * Called before the reply is written, because that is the only order that works:
+   * a comment anchors to lines that exist in a *revision*, and the harness's
+   * end-of-turn commit has not happened yet while the turn is still running.
+   */
+  commitArtifacts?(conversationId: number): Promise<string | undefined>;
 }
 
 export function createCommentTools(target: CommentReplyTarget) {
   return defineExtension({
     name: "comment-tools",
+    hooks: [
+      // "Commit as you go", enforced rather than advised.
+      //
+      // The artifact guidance section tells a conversation to commit its scratch
+      // change before asking for a review of it, and the end-of-turn commit catches
+      // anything left over. Neither helps the case that actually bites: writing a
+      // file and commenting on it in the *same* turn — which is exactly what a
+      // review subagent does, and what a conversation does when it produces a
+      // document and discusses it. Without this, the line being commented on has no
+      // revision, and the comment is either refused or anchored to yesterday's tree.
+      //
+      // A hook, not a tool the model must remember to call: the one thing that has
+      // to be true before an anchor is written is not something to leave to a
+      // prompt. A failure here is swallowed — a reply that could not be committed
+      // for is still better than a reply that was lost.
+      hook(ToolTask, {
+        beforeTool: async (call, api) => {
+          if (call.name !== "comment_reply") return undefined;
+          if (target.commitArtifacts === undefined) return undefined;
+          await target.commitArtifacts(api.conversationId as unknown as number).catch(() => undefined);
+          return undefined;
+        },
+      }),
+    ],
     tools: [
       defineTool({
         name: "comment_reply",

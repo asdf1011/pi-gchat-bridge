@@ -72,11 +72,24 @@ export interface ReviewAgentTarget {
   lastAnswer(conversationId: number, context: Parameters<Harness["inspect"]>[0]): Promise<string | undefined>;
   /** Write a reply into a comment thread, on the child's behalf. */
   reply(conversationId: number, commentId: string, text: string): Promise<{ id: string } | { error: string }>;
+  /**
+   * Commit the *reviewed* conversation's artifact working copy.
+   *
+   * A review comments on files the asking conversation wrote, and it may run while
+   * that change is still only in the working copy — the end-of-turn commit happens
+   * when the *asking* turn ends, which is after the review finishes. So the reviewer
+   * has to be able to commit for itself, or its anchors point at a revision that
+   * does not contain the code it is talking about.
+   */
+  commitArtifacts?(conversationId: number): Promise<string | undefined>;
 }
 
 /** The child's extra extension, built once and selected by name in each child. */
 function commentExtensions(target: ReviewAgentTarget): Extension {
-  return createCommentTools({ reply: target.reply });
+  return createCommentTools({
+    reply: target.reply,
+    ...(target.commitArtifacts === undefined ? {} : { commitArtifacts: target.commitArtifacts }),
+  });
 }
 
 /**
