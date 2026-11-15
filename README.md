@@ -243,6 +243,12 @@ step) at `/web` — or under whatever prefix a reverse proxy gives it.
 
 - **`GET /web`** — the page, served by the web adapter
 - **`GET /web/api/conversations`** — the index, newest first
+- **`POST /web/api/conversations`** — start one. No body is a plain new chat; `{ "query": "…" }`
+  makes it a **search**, which is the same thing with the query submitted as the conversation's
+  first message. The chat key says which kind: `web:search:<uuid>` for a search, `web:<uuid>`
+  otherwise — legible in `bridge-cli list`, and distinguishable before the conversation has a
+  title. The *origin* stamp stays `webui`; the two say different things (how it began vs. which
+  process submitted it)
 - **`GET /web/api/c/:id/history?before=`** — a page of transcript, **anchored**: `before` is
   the oldest entry id held and `before=0` is the first paint. Markdown is rendered
   server-side here, because this origin can submit messages and a client-side renderer
@@ -256,6 +262,14 @@ step) at `/web` — or under whatever prefix a reverse proxy gives it.
   thinking levels follow the model you pick
 - **`GET /web/api/c/:id/artifacts`**, **`…/comments`** — the artifact drawer and the review
   comments
+
+**Search.** A magnifier beside the conversation's name opens a box; submitting a query
+starts a *new conversation* whose first message asks the agent to use the `transcript-search`
+skill (`npm run transcript -- search …`) and report what it found. There is no search
+endpoint and no results screen: the answer is an ordinary turn in an ordinary conversation,
+so it streams, cites and scrolls like everything else, and a follow-up question is just a
+message. The prompt is composed server-side — the skill remains the only description of the
+query grammar.
 
 **Images.** Three ways in, one place to land: paste a screenshot, press 📎 to
 pick files, or drop them on the pane. They become thumbnails above the composer

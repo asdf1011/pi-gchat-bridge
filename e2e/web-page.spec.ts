@@ -66,16 +66,19 @@ async function stubApi(
     commandResponse?: unknown;
     /** Told about every command post, so a test can read what was applied. */
     onCommand?: (body: { text?: string; values?: Record<string, string> }) => void;
+    /** Told about every conversation created, so a test can read the query that started it. */
+    onNewConversation?: (body: unknown) => void;
   } = {},
 ): Promise<void> {
   const conversations = options.conversations ?? CONVERSATIONS;
 
   await page.route("**/api/conversations*", (route) => {
     if (route.request().method() === "POST") {
+      options.onNewConversation?.(route.request().postDataJSON());
       return route.fulfill({
         status: 201,
         contentType: "application/json",
-        body: JSON.stringify({ conversationId: 99, chatKey: "web:new", model: "m", createdAt: Date.now() }),
+        body: JSON.stringify({ conversationId: 99, chatKey: "web:new", model: "m", createdAt: Date.now(), submitted: true }),
       });
     }
     return route.fulfill({
@@ -367,7 +370,9 @@ test("layout: a grown composer pushes the conversation up instead of overflowing
   await page.goto("/7/");
 
   const log = page.locator("#log");
-  const form = page.locator("form");
+  // By id, because the search box is a `<form>` too (and is hidden, so a bare
+  // `form` selector now matches two elements). The composer is the one meant here.
+  const form = page.locator("#send");
   const logBefore = (await log.boundingBox())!;
 
   await page.locator("#text").fill(Array.from({ length: 8 }, (_, i) => `line ${i + 1}`).join("\n"));
@@ -383,6 +388,53 @@ test("layout: a grown composer pushes the conversation up instead of overflowing
   expect(logAfter.height).toBeLessThan(logBefore.height - 40);
   // …and is still usable.
   expect(logAfter.height).toBeGreaterThan(80);
+});
+
+test("layout: a long unbreakable line scrolls inside its bubble instead of widening it", async ({ page }) => {
+  // The bug: the bubble and the rendered body were blocks inside a flex column, whose
+  // `min-width` is `auto` — so a fenced block with a long line made them size to content
+  // rather than to the column. A 337px message got a 779px bubble that overhung the pane
+  // to the *left*, which on a phone read as a message wider than the screen.
+  await stubApi(page, {
+    history: [
+      {
+        role: "user",
+        text: "a long command",
+        html:
+          "<pre><code>cd /workspace/pi-chat-bridge && npm run transcript -- search Ledger --conversation 37134 --limit 40 --by-conv</code></pre>" +
+          "<p>and a normal paragraph after it, which must still be readable</p>",
+        at: Date.now(),
+      },
+    ],
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/7/");
+
+  const m = await page.evaluate(() => {
+    const log = document.getElementById("log") as HTMLElement;
+    const bubble = document.querySelector("#log .bubble") as HTMLElement;
+    const pre = document.querySelector("#log .body pre") as HTMLElement;
+    const viewport = window.innerWidth;
+    return {
+      viewport,
+      docScroll: document.documentElement.scrollWidth,
+      bubbleLeft: bubble.getBoundingClientRect().left,
+      bubbleRight: bubble.getBoundingClientRect().right,
+      bubbleWidth: bubble.getBoundingClientRect().width,
+      preWidth: pre.getBoundingClientRect().width,
+      preScrolls: pre.scrollWidth > pre.clientWidth,
+      logClient: log.clientWidth,
+    };
+  });
+
+  // Nothing sticks out of the window …
+  expect(m.docScroll).toBeLessThanOrEqual(m.viewport);
+  // … the bubble stays inside the pane on both sides …
+  expect(m.bubbleLeft).toBeGreaterThanOrEqual(0);
+  expect(m.bubbleRight).toBeLessThanOrEqual(m.viewport);
+  expect(m.bubbleWidth).toBeLessThanOrEqual(m.logClient);
+  // … and the long line is what scrolls, not the page.
+  expect(m.preScrolls).toBe(true);
 });
 
 test("layout: growing the composer keeps the newest message whole", async ({ page }) => {
@@ -739,6 +791,60 @@ test("the index pages: Older asks for the next slice, and shows the range", asyn
   await page.locator("#index-newer").click();
   await expect(items).toHaveCount(30);
   expect(errors).toEqual([]);
+});
+
+test("the magnifier on a conversation starts a search in a conversation of its own", async ({ page }) => {
+  const created: unknown[] = [];
+  await stubApi(page, { onNewConversation: (body) => created.push(body) });
+  await page.goto("/7/");
+
+  // Beside the conversation's own name, and closed until asked for.
+  await expect(page.locator("#search-toggle")).toBeVisible();
+  const bar = page.locator("#search-bar");
+  await expect(bar).toBeHidden();
+
+  await page.locator("#search-toggle").click();
+  await expect(bar).toBeVisible();
+  await expect(page.locator("#search-text")).toBeFocused();
+
+  await page.locator("#search-text").fill("quantiz gpu");
+  await page.locator("#search-go").click();
+
+  // A brand-new conversation, with the query as the message that opened it.
+  await expect.poll(() => new URL(page.url()).pathname).toBe("/99/");
+  expect(created).toEqual([{ query: "quantiz gpu" }]);
+
+  // And it lands on an ordinary conversation page: the header, the way back and the
+  // composer, with no sign that this one was started by a search. (`#log` is asserted
+  // to exist rather than to be visible: a conversation with no entries has no height,
+  // which is the empty conversation's own case and not this test's.)
+  await expect(page.locator("#conv-title")).not.toBeEmpty();
+  await expect(page.locator("#back")).toBeVisible();
+  await expect(page.locator("#send")).toBeVisible();
+  // No zero-console-errors assertion here: the page navigates to a conversation the
+  // fixture index does not contain, and this suite's catch-all route answers that 404.
+  // What the *page* did is asserted above; the console is the fixture's noise.
+});
+
+test("the index's magnifier opens a conversation with its search box already showing", async ({ page }) => {
+  const created: unknown[] = [];
+  await stubApi(page, { onNewConversation: (body) => created.push(body) });
+  await page.goto("/");
+
+  await page.locator("#index-search").click();
+
+  // The box lives on the conversation page, so the index opens one and asks it to show
+  // the form — and the flag does not stay in the address bar.
+  await expect.poll(() => new URL(page.url()).pathname).toBe("/99/");
+  await expect(page.locator("#search-bar")).toBeVisible();
+  await expect(page.locator("#search-text")).toBeFocused();
+  expect(new URL(page.url()).search).toBe("");
+  // Created with no body at all: the query is typed on the page it opens, not on the
+  // index, so there is only one search form to keep right.
+  expect(created).toEqual([null]);
+  // No zero-console-errors assertion here: the page navigates to a conversation the
+  // fixture index does not contain, and this suite's catch-all route answers that 404.
+  // What the *page* did is asserted above; the console is the fixture's noise.
 });
 
 test("the new chat button creates a conversation and opens it", async ({ page }) => {

@@ -91,6 +91,10 @@ async function loadPage(
     format?: { model: string; thinking?: string; levels?: string[] };
     /** The models the fake offers a picker. */
     models?: { provider: string; id: string; label: string; levels?: string[] }[];
+    /** The id `POST api/conversations` reports for the conversation it made. */
+    createdId?: number;
+    /** Anything else that POST answers with, such as a refusal. */
+    createdExtra?: Record<string, unknown>;
   } = {},
 ): Promise<Harness> {
   // Conversation mode: the URL carries the conversation id.
@@ -158,6 +162,19 @@ async function loadPage(
         const url = String(input);
         requests.push({ url, method: init?.method ?? "GET", ...(init?.body ? { body: init.body } : {}) });
         if (url.includes("api/conversations")) {
+          // Creating one is the other half of the same URL — the index's ＋, and search.
+          if (init?.method === "POST") {
+            return {
+              ok: true,
+              status: 201,
+              json: async () => ({
+                conversationId: options.createdId ?? 99,
+                chatKey: "web:new",
+                model: "m",
+                ...(options.createdExtra ?? {}),
+              }),
+            };
+          }
           // The paged shape, which is what the index and the sidebar read.
           return { ok: true, status: 200, json: async () => ({ items: conversations, more: options.more ?? false }) };
         }
@@ -516,6 +533,128 @@ test("a stream error says reconnecting rather than going blank", async () => {
     const tool = h.dom.window.document.getElementById("tool")!;
     h.sources[0]!.triggerError();
     assert.equal(tool.textContent, "reconnecting…");
+  } finally {
+    h?.close();
+  }
+});
+
+// --- Search -------------------------------------------------------------------
+
+test("the magnifier beside the title opens a box, and only takes the space when it is open", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    const doc = h.dom.window.document;
+    const bar = doc.getElementById("search-bar") as HTMLElement;
+    const toggle = doc.getElementById("search-toggle") as HTMLButtonElement;
+    assert.equal(bar.hidden, true, "closed until asked for");
+    assert.equal(toggle.getAttribute("aria-expanded"), "false");
+
+    toggle.click();
+    assert.equal(bar.hidden, false);
+    assert.equal(toggle.getAttribute("aria-expanded"), "true");
+    // Focused, so the keyboard is up on a phone and typing needs no second tap.
+    assert.equal(doc.activeElement, doc.getElementById("search-text"));
+
+    // Escape closes it, and puts focus back where it came from.
+    doc.getElementById("search-text")!.dispatchEvent(
+      new h.dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    assert.equal(bar.hidden, true);
+    assert.equal(doc.activeElement, toggle);
+  } finally {
+    h?.close();
+  }
+});
+
+test("submitting a search starts a conversation and goes to it", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+      createdId: 99,
+    });
+    const doc = h.dom.window.document;
+    // jsdom does not navigate, so the request is what this test can check; the browser
+    // test follows the navigation itself.
+    (doc.getElementById("search-text") as HTMLInputElement).value = "  quantiz gpu  ";
+    doc.getElementById("search-bar")!.dispatchEvent(new h.dom.window.Event("submit", { cancelable: true }));
+    await h.settle();
+
+    const post = h.requests.find((r) => r.method === "POST");
+    assert.ok(post, "expected a POST");
+    assert.match(post.url, /api\/conversations$/);
+    // The query travels alone. The prompt that tells the agent to use the skill is
+    // composed on the server, so there is only one copy of it to keep in step.
+    assert.deepEqual(JSON.parse(post.body!), { query: "quantiz gpu" });
+  } finally {
+    h?.close();
+  }
+});
+
+test("a search that could not start says so, and leaves the box usable", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+      // A refusal with no conversation id, which is what the route answers when the
+      // host will not make one.
+      createdId: undefined,
+      createdExtra: { conversationId: undefined },
+    });
+    const doc = h.dom.window.document;
+    doc.getElementById("search-toggle")!.click();
+    (doc.getElementById("search-text") as HTMLInputElement).value = "nothing";
+    doc.getElementById("search-bar")!.dispatchEvent(new h.dom.window.Event("submit", { cancelable: true }));
+    await h.settle();
+
+    const notice = doc.getElementById("attach-notice") as HTMLElement;
+    assert.equal(notice.hidden, false, "the reader is told the search did not start");
+    // And the button comes back: one failure must not leave it looking busy forever.
+    assert.equal((doc.getElementById("search-go") as HTMLButtonElement).disabled, false);
+  } finally {
+    h?.close();
+  }
+});
+
+test("the index can search too, through a conversation page's own box", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ pathname: "/", conversations: [] });
+    const doc = h.dom.window.document;
+    (doc.getElementById("index-search") as HTMLButtonElement).click();
+    await h.settle();
+
+    const post = h.requests.find((r) => r.method === "POST");
+    assert.ok(post, "the index made a conversation to search in");
+    assert.match(post.url, /api\/conversations$/);
+    // No query: the box is opened on the new page (`?search=1`), which is the only
+    // place the form exists.
+    assert.equal(post.body, undefined);
+  } finally {
+    h?.close();
+  }
+});
+
+test("arriving with ?search=1 opens the box, and does not keep it in the address", async () => {
+  let h: Harness | undefined;
+  try {
+    // The index's magnifier lands here: it made the conversation, and this is the page
+    // whose form does the searching.
+    h = await loadPage({
+      pathname: "/7/?search=1",
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+    });
+    const doc = h.dom.window.document;
+    assert.equal((doc.getElementById("search-bar") as HTMLElement).hidden, false);
+    assert.equal(doc.getElementById("search-toggle")!.getAttribute("aria-expanded"), "true");
+    // The flag is transient: a reload should not reopen a box nobody asked for.
+    assert.equal(h.dom.window.location.search, "");
+
+    // And a conversation opened the ordinary way has no box.
+    h.close();
+    h = await loadPage({ pathname: "/7/", conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    assert.equal((h.dom.window.document.getElementById("search-bar") as HTMLElement).hidden, true);
   } finally {
     h?.close();
   }

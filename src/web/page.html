@@ -92,6 +92,35 @@
      sit on top of the Send button, which is exactly where a thumb lands. */
   #artifacts-toggle { padding: .35rem .55rem; border-radius: .5rem; font-size: 1rem;
     border: 1px solid #8886; background: #8883; cursor: pointer; }
+  /* Search beside the title: the same size and weight as the artifacts toggle, because
+     it is the same kind of thing — a button that acts on this conversation's history. */
+  #search-toggle { padding: .35rem .55rem; border-radius: .5rem; font-size: 1rem;
+    border: 1px solid #8886; background: #8883; cursor: pointer; line-height: 1; }
+  #search-toggle:hover { background: #8884; }
+  /* The box the toggle opens, directly under the header and above the log: it belongs
+     to the conversation's chrome, not to the transcript, so painting the log never
+     touches it. */
+  #search-bar { flex: none; display: flex; gap: .5rem; align-items: center;
+    padding: .4rem max(.6rem, calc((100% - var(--content)) / 2));
+    border-bottom: 1px solid #8884; background: #8881; }
+  #search-bar[hidden] { display: none; }
+  /* The field and its two buttons are one row, so they are one height: `--search-h`
+     is set once here and both read it, rather than each computing a height from its
+     own padding and font size and landing a few pixels apart. */
+  #search-bar { --search-h: 2.25rem; }
+  #search-bar input { flex: 1; min-width: 0; height: var(--search-h); box-sizing: border-box;
+    font: inherit; font-size: .92em; padding: 0 .6rem;
+    border: 1px solid #8886; border-radius: .5rem; background: Canvas; color: inherit; }
+  #search-bar button { height: var(--search-h); box-sizing: border-box; padding: 0 .8rem;
+    font: inherit; font-size: .9em; line-height: 1;
+    border-radius: .5rem; border: 1px solid #8886; background: #8883; color: inherit;
+    cursor: pointer; }
+  #search-bar button[type=submit] { background: var(--accent); color: var(--accent-ink);
+    border-color: transparent; }
+  /* The close glyph is text, so it needs a size of its own: at the button's inherited
+     size it read as a stray character next to the word "Search". */
+  #search-bar #search-close { font-size: 1rem; padding: 0 .7rem; }
+  #search-bar button:disabled { opacity: .5; cursor: default; }
   /* `min-height: 0` on both the pane and the log is what lets the conversation
      give up space when the composer grows. Without it a flex item refuses to
      shrink below its content, so the composer is pushed past the window instead
@@ -183,6 +212,13 @@
   #log .body p, #log .body ul, #log .body ol { margin: .5rem 0; }
   #log .body h1, #log .body h2, #log .body h3, #log .body h4 { margin: .9rem 0 .4rem; line-height: 1.25; }
   #log .body h1 { font-size: 1.25em; } #log .body h2 { font-size: 1.15em; } #log .body h3 { font-size: 1.05em; }
+  /* The bubble and the rendered body are blocks inside a flex column. A flex item's
+     `min-width` is `auto`, so an unbreakable line — a long `pre` in a fence, a URL, a
+     table — made them size to *content* rather than to the column: a 337px message with
+     a 779px bubble that overhung the pane to the left. `min-width: 0` is what lets them
+     shrink, and `overflow-x: auto` is what makes the overflow scroll inside the bubble
+     instead of being clipped by it. */
+  #log .bubble, #log .body { min-width: 0; max-width: 100%; }
   #log .body code { font-family: var(--mono); font-size: .9em;
     background: #8881; padding: .1em .3em; border-radius: 3px; }
   #log .body pre { background: #8881; padding: .6rem .75rem; border-radius: 6px; overflow-x: auto; margin: .6rem 0; }
@@ -258,6 +294,16 @@
      stopping mid-screen on a desktop. */
   #index > * { max-width: 46rem; margin-inline: auto; }
   #index h1 { font-size: 1.1rem; margin: 0 auto 1rem; font-weight: 600; }
+  /* The heading and a magnifier on one line: the index has no conversation header to
+     put the search beside, and searching the archive is the other thing this page is
+     for besides opening a recent thread. */
+  #index-bar { display: flex; align-items: center; gap: .5rem; margin: 0 auto 1rem; }
+  #index-bar h1 { flex: 1; min-width: 0; margin: 0; }
+  #index-search { padding: .35rem .55rem; border-radius: .5rem; font-size: 1rem;
+    line-height: 1; border: 1px solid #8886; background: #8883; color: inherit;
+    cursor: pointer; }
+  #index-search:hover { background: #8884; }
+  #index-search svg { display: block; }
   #index-list { list-style: none; margin: 0 auto; padding: 0; }
   #index-list li { padding: .6rem .75rem; border-bottom: 1px solid #8882; cursor: pointer;
     display: flex; gap: .75rem; align-items: baseline; }
@@ -696,7 +742,17 @@
 </head>
 <body>
 <section id="index" hidden>
-  <h1>Conversations</h1>
+  <div id="index-bar">
+    <h1>Conversations</h1>
+    <button id="index-search" type="button" title="Search past conversations"
+            aria-label="Search past conversations">
+      <svg viewBox="0 0 24 24" width="1em" height="1em" aria-hidden="true" focusable="false">
+        <circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/>
+        <line x1="15.4" y1="15.4" x2="21" y2="21" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round"/>
+      </svg>
+    </button>
+  </div>
   <ul id="index-list"></ul>
   <nav id="index-pager" hidden>
     <button id="index-newer" type="button">Newer</button>
@@ -709,8 +765,25 @@
   <header id="conv-header">
     <a id="back" href="./" title="All conversations" aria-label="All conversations">←</a>
     <span id="conv-title"></span>
+    <button id="search-toggle" type="button" title="Search past conversations"
+            aria-label="Search past conversations" aria-expanded="false" aria-controls="search-bar">
+      <!-- Drawn rather than an emoji: a magnifier is one of the few glyphs every platform
+           renders as the same shape, and an emoji would arrive in colour and at the
+           wrong weight next to the title. -->
+      <svg viewBox="0 0 24 24" width="1em" height="1em" aria-hidden="true" focusable="false">
+        <circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/>
+        <line x1="15.4" y1="15.4" x2="21" y2="21" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round"/>
+      </svg>
+    </button>
     <button id="artifacts-toggle" title="Files this conversation wrote" hidden aria-label="Artifacts">🗂</button>
   </header>
+  <form id="search-bar" hidden role="search">
+    <input id="search-text" type="search" placeholder="Search past conversations…"
+           aria-label="Search past conversations" autocomplete="off">
+    <button type="submit" id="search-go">Search</button>
+    <button type="button" id="search-close" title="Close" aria-label="Close search">✕</button>
+  </form>
   <div id="sign-in" hidden role="status">
     <span>Your session has expired.</span>
     <a id="sign-in-link" href="./">Sign in again</a>
@@ -3302,6 +3375,128 @@ async function loadIndex(offset) {
 document.getElementById('index-newer').onclick = () => void loadIndex(indexOffset - PAGE_SIZE);
 document.getElementById('index-older').onclick = () => void loadIndex(indexOffset + PAGE_SIZE);
 
+// --- Search ---
+//
+// Searching the archive is not an endpoint: it is a **conversation**, opened with the
+// query as its first message and told to use the `transcript-search` skill. The answer
+// then arrives the ordinary way — a turn, a stream, a transcript — so there is nothing
+// here to render and nothing to keep in step with the pane. `/api/conversations` takes
+// the query and starts it, and this page only has to navigate to the conversation it made.
+//
+// Named functions rather than inline handlers, because the same search is offered from
+// two places: the header of a conversation, and the index (which has no header to put a
+// magnifier in, and so opens the box *through* a conversation page's own control).
+
+/** True between submitting and arriving at the new conversation, so a second tap cannot
+ *  open a second one. Cleared when the request comes back without navigating. */
+let searching = false;
+
+function searchBar_() {
+  return document.getElementById('search-bar');
+}
+
+/** Open the search box and put the caret in it, so a tap is enough to start typing. */
+function openSearch_() {
+  const bar = searchBar_();
+  const box = document.getElementById('search-text');
+  const toggle = document.getElementById('search-toggle');
+  if (!bar || !box) return;
+  bar.hidden = false;
+  if (toggle) toggle.setAttribute('aria-expanded', 'true');
+  box.focus();
+}
+
+function closeSearch_() {
+  const bar = searchBar_();
+  const toggle = document.getElementById('search-toggle');
+  if (!bar) return;
+  bar.hidden = true;
+  if (toggle) toggle.setAttribute('aria-expanded', 'false');
+}
+
+/**
+ * Start a search conversation, and go to it.
+ *
+ * The conversation is created by the host, which also submits the query as its first
+ * message (see `searchPrompt` in `routes.ts` for what the agent is told). This side
+ * never composes a prompt: that is the protocol's business, and a second copy of it
+ * here would be a second thing to keep in step with the skill.
+ */
+async function startSearch_(query) {
+  const searched = String(query || '').trim();
+  if (searched === '' || searching) return;
+  searching = true;
+  const go = document.getElementById('search-go');
+  if (go) go.disabled = true;
+  try {
+    const response = await apiFetch(rel('api/conversations'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: searched }),
+    });
+    const created = await response.json().catch(() => null);
+    if (created && created.conversationId) {
+      // The query stays in the box deliberately: a reader who comes back with the back
+      // button should not have to retype it, and the navigation replaces the document
+      // anyway.
+      location.href = mountRoot() + created.conversationId + '/';
+      return;
+    }
+    // No conversation came back, so say so instead of navigating nowhere. The host's
+    // message is used when there is one — "no such model" is more use than "failed".
+    attachNotice_(created && created.error ? String(created.error) : 'Search could not be started.');
+  } catch {
+    attachNotice_('Search could not be started — the connection failed.');
+  }
+  // Only reached when nothing navigated: the navigation path leaves the document, so
+  // there is no timer to clear. Here the button has to come back, or one failure would
+  // leave the box looking permanently busy.
+  searching = false;
+  if (go) go.disabled = false;
+}
+
+document.getElementById('search-toggle').onclick = () => {
+  if (searchBar_().hidden) openSearch_();
+  else closeSearch_();
+};
+document.getElementById('search-close').onclick = () => {
+  closeSearch_();
+  document.getElementById('search-toggle').focus();
+};
+
+// The index has no search bar of its own: it creates a conversation and opens *that*
+// page with the box already showing. One search box in one document, rather than a
+// second copy of the form here that would have to be kept identical to it.
+document.getElementById('index-search').onclick = async () => {
+  if (searching) return;
+  searching = true;
+  try {
+    const created = await (await apiFetch(rel('api/conversations'), { method: 'POST' })).json();
+    if (created && created.conversationId) {
+      location.href = mountRoot() + created.conversationId + '/?search=1';
+      return;
+    }
+    attachNotice_('Could not open a conversation to search in.');
+  } catch {
+    attachNotice_('Could not open a conversation to search in — the connection failed.');
+  }
+  searching = false;
+};
+
+// Escape closes the box, but only when the caret is in it: a key pressed elsewhere keeps
+// meaning whatever it already meant.
+document.getElementById('search-text').addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  event.preventDefault();
+  closeSearch_();
+  document.getElementById('search-toggle').focus();
+});
+
+document.getElementById('search-bar').onsubmit = (event) => {
+  event.preventDefault();
+  void startSearch_(document.getElementById('search-text').value);
+};
+
 document.getElementById('new-chat').onclick = async () => {
   try {
     const response = await apiFetch(rel('api/conversations'), { method: 'POST' });
@@ -3337,6 +3532,14 @@ if (openId === undefined) {
   // and a list this size costs nothing to have ready.
   void loadModels();
   open(openId);
+  // The index's magnifier arrives here with `?search=1`: the search box belongs to this
+  // page, so the gesture that started on the index is finished on it.
+  if (new URLSearchParams(location.search).get('search') === '1') {
+    openSearch_();
+    // The query is transient, and leaving it in the address bar would make a reload
+    // reopen the box for no reason.
+    history.replaceState({}, '', location.pathname);
+  }
   // A reload lands here with the fragment still naming the file that was open.
   void restoreArtifact(artifactKeyFromHash());
 }

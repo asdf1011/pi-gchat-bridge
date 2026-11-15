@@ -57,6 +57,75 @@ function clamp(value: number, low: number, high: number): number {
   return Math.min(high, Math.max(low, value));
 }
 
+/**
+ * How long a search query may be.
+ *
+ * A query is a line or two, not a document: the cap exists so a stray paste cannot
+ * push a megabyte into a model's context as its opening instruction.
+ */
+const MAX_QUERY_BYTES = 8_192;
+
+/**
+ * The chat-key prefix every conversation this adapter creates carries.
+ *
+ * A key, not an origin: it outlives the process that made it, shows up in the index,
+ * and is legible in `bridge-cli list`. `web:` alone is a browser conversation.
+ */
+export const WEB_CHAT_KEY_PREFIX = "web:";
+
+/**
+ * The tag marking a browser conversation as one the **search box** started.
+ *
+ * `web:search:<uuid>` versus `web:<uuid>` — one segment, appended before the id so the
+ * key still sorts as a `web:` key and anything that parses the prefix keeps working.
+ *
+ * Chosen over a fourth origin name (`webui-search`): the origin is read by the Chat
+ * painter to decide whose words are already on the transport, so a name no painter
+ * declares would make a search started from Chat look like a third surface's. The
+ * kind of conversation and the surface that submitted it are different facts, and a
+ * key is where the durable one belongs.
+ */
+export const WEB_SEARCH_TAG = "search";
+
+/** Whether a chat key names a conversation the browser's search box started. */
+export function isWebSearchKey(name: string): boolean {
+  return name.startsWith(`${WEB_CHAT_KEY_PREFIX}${WEB_SEARCH_TAG}:`);
+}
+
+/**
+ * What a search conversation is told to do.
+ *
+ * It names the skill rather than describing the CLI, because the skill *is* the
+ * description — the query grammar, which kinds are indexed, and the "tool results are
+ * excluded by default" trap all live there and would go stale if copied here. Naming
+ * it also means the model sees its `available_skills` entry and the two agree.
+ *
+ * The query is fenced rather than bare: it is whatever someone typed into a text box,
+ * and a line of it that reads like an instruction must stay a search term.
+ */
+export function searchPrompt(query: string): string {
+  // A fence inside the query would end the block early; a longer one cannot.
+  const fence = "`".repeat(Math.max(3, longestBacktickRun(query) + 1));
+  return [
+    "Search my past conversations for the following, using the `transcript-search` skill.",
+    "",
+    fence,
+    query,
+    fence,
+    "",
+    "Start with `search`, then read the conversations that look right with `read` before",
+    "answering. Report what you found with the conversation each answer came from, and link each",
+    "one as `https://pi.hl.id.au/<id>/` on its own line; say so plainly if nothing matches.",
+  ].join("\n");
+}
+
+/** The longest run of backticks in `text`, so a fence can be chosen that it cannot close. */
+function longestBacktickRun(text: string): number {
+  let longest = 0;
+  for (const run of text.match(/`+/g) ?? []) longest = Math.max(longest, run.length);
+  return longest;
+}
+
 /** The shape the page renders for one conversation. */
 function toJson(conversation: {
   conversationId: number;
@@ -430,11 +499,53 @@ export async function handleWebRequest(
 
   // "New chat": a conversation nobody has named yet, created from the default
   // model. The client navigates to /<id>/ afterwards.
+  //
+  // An optional `{ query }` body turns it into a **search**: the same conversation,
+  // with the query as its first message, phrased so the agent reaches for the
+  // `transcript-search` skill. The search is not an endpoint of its own because it
+  // is not a thing of its own — it is a conversation, and the pane that reads
+  // conversations is the one that shows the answer (§plan: agentic search).
+  //
+  // The chat key says which: `web:search:<uuid>` for a search, `web:<uuid>` for a
+  // plain new chat. The key is the one durable, listable field a conversation
+  // carries before it has a title, so it is where a surface records *how* a
+  // conversation began — the same job `spaces/<space>/<threadKey>` does for a
+  // thread a cron job opened. It is deliberately not the origin stamp: that names
+  // the process that submitted (`webui`, and the Chat painter compares against it),
+  // while this names the kind of conversation, and a search started from Chat
+  // would have to say both.
   if (req.method === "POST" && api === "/api/conversations") {
-    const name = `web:${randomUUID()}`;
+    let query = "";
+    if (req.headers["content-length"] !== undefined || req.headers["transfer-encoding"] !== undefined) {
+      const body = await readBody(req, MAX_QUERY_BYTES);
+      if (body === null) {
+        res.writeHead(413, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: "request body too large" }));
+        return true;
+      }
+      try {
+        const parsed = body.trim() === "" ? {} : (JSON.parse(body) as { query?: unknown });
+        query = typeof parsed.query === "string" ? parsed.query.trim() : "";
+      } catch {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: "invalid JSON body" }));
+        return true;
+      }
+    }
+    const name = `${WEB_CHAT_KEY_PREFIX}${query === "" ? "" : `${WEB_SEARCH_TAG}:`}${randomUUID()}`;
     const created = await seam.create(name, { model });
+    // The conversation is made first and stays made even if the message is refused: an
+    // empty one in the index is recoverable, a search that silently did nothing is not.
+    // The page navigates to it either way, so the refusal shows where the answer would.
+    const sent = query === "" ? undefined : await webSubmit(handleOptions, created.conversationId, searchPrompt(query));
     res.writeHead(201, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(toJson(created)));
+    res.end(
+      JSON.stringify({
+        ...toJson(created),
+        ...(sent === undefined ? {} : { submitted: sent.ok }),
+        ...(sent !== undefined && !sent.ok ? { error: sent.error } : {}),
+      }),
+    );
     return true;
   }
 

@@ -12,7 +12,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import test from "node:test";
 
-import { apiPath, handleWebRequest, webPath } from "../src/web/routes.js";
+import { apiPath, handleWebRequest, isWebSearchKey, webPath } from "../src/web/routes.js";
 import { MAX_WEB_IMAGES } from "../src/web/sink.js";
 import type { NamedConversation, SessionHost } from "../src/session-host/api.js";
 import type { ProjectedView } from "../src/session-host/projection.js";
@@ -20,6 +20,10 @@ import type { ProjectedView } from "../src/session-host/projection.js";
 const view: ProjectedView = { liveText: "", turnText: "", busy: false, lastAssistantText: "", tools: [] };
 
 const submitted: unknown[] = [];
+/** The chat key of each conversation the fixture was asked to create, in order. */
+const created: string[] = [];
+/** The origin stamped on each submission, in order — `webui` unless a case says otherwise. */
+const origins: (string | undefined)[] = [];
 
 /**
  * The seam calls these routes make, with the fixture's overrides.
@@ -56,6 +60,12 @@ function fakeSeam(options: FakeSeamOptions = {}): SessionHost {
         ? { mimeType: "image/png", data: Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString("base64") }
         : undefined,
     list: async () => options.conversations ?? [],
+    // "New chat" and "search" both create a conversation first. The key is recorded
+    // rather than fixed, because which key is issued is exactly what a test checks.
+    create: async (name: string) => {
+      created.push(name);
+      return { conversationId: 1, name, model: "p/m", createdAt: 1 };
+    },
     resolve: async () => undefined,
     snapshot: async () => view,
     attach: async (_id: number, onFrame: (v: ProjectedView) => void) => {
@@ -65,6 +75,7 @@ function fakeSeam(options: FakeSeamOptions = {}): SessionHost {
     artifacts: async (id: number) => (id === 1 ? (options.artifacts ?? []) : undefined),
     submit: async (id: number, request: { content: unknown; origin?: string }) => {
       submitted.push(request.content);
+      origins.push(request.origin);
       return id === 1 ? { submissionId: 7 } : { error: `no such conversation: ${id}` };
     },
     comments: async (id: number) => (id === 1 ? (options.comments ?? []) : undefined),
@@ -539,6 +550,113 @@ test("the conversation list and a submit still answer as before", async () => {
 
     const badJson = await fetch(`${served.base}/web/api/c/1/message`, { method: "POST", body: "not json" });
     assert.equal(badJson.status, 400);
+  } finally {
+    await served.close();
+  }
+});
+
+test("a new conversation is plain, and a search is that conversation with a question in it", async () => {
+  const served = await serve(fakeSeam());
+  try {
+    // No body at all: "New chat" as the index's ＋ sends it. Nothing is submitted.
+    submitted.length = 0;
+    const plain = await fetch(`${served.base}/api/conversations`, { method: "POST" });
+    assert.equal(plain.status, 201);
+    // Named apart from the module-level `created` array, which records the chat keys.
+    const body = (await plain.json()) as { conversationId: number; submitted?: boolean };
+    assert.equal(body.conversationId, 1);
+    assert.equal(body.submitted, undefined, "a new chat has nothing to say yet");
+    assert.equal(submitted.length, 0);
+
+    // A search is the same route with a query: one conversation, and the query as its
+    // first message. The prompt names the skill rather than describing the CLI, because
+    // the skill is the description and a copy here would go stale separately.
+    const searched = await fetch(`${served.base}/api/conversations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: "  quantiz gpu  " }),
+    });
+    assert.equal(searched.status, 201);
+    assert.equal(((await searched.json()) as { submitted?: boolean }).submitted, true);
+    assert.equal(submitted.length, 1);
+    const prompt = String(submitted[0]);
+    assert.match(prompt, /transcript-search/, "the agent is told which skill to use");
+    // Exactly one fenced block, opened and closed once. Asserting the fence *appears*
+    // was not enough: a second ` ``` ` line above it still satisfied that, and the
+    // result was a prompt whose first block was empty and whose tail was swallowed
+    // into the code block — which then would not wrap in the pane.
+    assert.equal((prompt.match(/^```$/gm) ?? []).length, 2, "one fence, opened once and closed once");
+    assert.match(prompt, /^```\nquantiz gpu\n```$/m, "the query is trimmed and fenced, not reworded");
+    assert.doesNotMatch(prompt, /```\n```/, "no empty nested block above the query");
+
+    // A query that tries to close the fence gets a longer one, so it stays a search term.
+    submitted.length = 0;
+    await fetch(`${served.base}/api/conversations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: "a ``` b" }),
+    });
+    const fenced = String(submitted[0]);
+    assert.match(fenced, /^````\na ``` b\n````$/m, "a fence inside the query cannot end the block");
+    assert.equal((fenced.match(/^````$/gm) ?? []).length, 2, "the longer fence is what opens and closes it");
+
+    // An empty query is a plain new chat, not an empty turn.
+    submitted.length = 0;
+    await fetch(`${served.base}/api/conversations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: "   " }),
+    });
+    assert.equal(submitted.length, 0);
+
+    const badJson = await fetch(`${served.base}/api/conversations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{not json",
+    });
+    assert.equal(badJson.status, 400);
+  } finally {
+    await served.close();
+  }
+});
+
+test("a search is tagged in the chat key, and a plain new chat is not", async () => {
+  const served = await serve(fakeSeam());
+  try {
+    created.length = 0;
+    origins.length = 0;
+    await (await fetch(`${served.base}/api/conversations`, { method: "POST" })).text();
+    await (
+      await fetch(`${served.base}/api/conversations`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: "the finance tools" }),
+      })
+    ).text();
+    // A whitespace-only query is a plain chat, so it must not be tagged as a search:
+    // the tag is a claim about how the conversation began, not about the request.
+    await (
+      await fetch(`${served.base}/api/conversations`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: "   " }),
+      })
+    ).text();
+
+    assert.equal(created.length, 3);
+    const [plain, search, blank] = created as [string, string, string];
+    // The key is what survives in the index and in `bridge-cli list`, so the tag has to
+    // be in the key rather than in a field that only this process remembers.
+    assert.match(plain, /^web:[0-9a-f-]{36}$/);
+    assert.match(search, /^web:search:[0-9a-f-]{36}$/);
+    assert.equal(isWebSearchKey(search), true);
+    assert.equal(isWebSearchKey(plain), false);
+    assert.equal(isWebSearchKey(blank), false, "an empty query is not a search");
+    // Tagged as a *kind of conversation*, never as a fourth surface: the Chat painter
+    // compares the origin against its own name to decide what is already on the wire,
+    // and a search started from Chat would still have to stamp `gchat`.
+    // The blank query submitted nothing, so it stamped nothing.
+    assert.deepEqual(origins, ["webui"], "the origin still names the process, not the kind");
   } finally {
     await served.close();
   }
