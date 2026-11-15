@@ -221,11 +221,30 @@ export async function handleV1(
     return true;
   }
 
-  // `GET /v1/submissions/{id}` was here, and it never had a consumer: a bridge learns what an
-  // answer said from the entries, and the painter has never asked. The one thing it added over the
-  // log was the failure *reason* (aborted vs a provider error), and the honest fix for that is to
-  // put the reason where the rest of the facts live — in the log — rather than keeping an
-  // unconsumed endpoint with a fiddly contract (long-poll, cap, 202) that nobody exercises.
+  // --- One submission, once ----------------------------------------------------
+  //
+  // This route was deleted for having no consumer, with the note that it would come back with one.
+  // It has one now: `bridge-cli ask --await` decides whether a cron job retries next run or marks an
+  // email seen, and that decision turns on *why* a turn produced nothing — a question the log cannot
+  // answer, because the log holds no failed turn at all.
+  //
+  // Bounded by construction: `wait` caps how long this may be held, and the default is zero. The
+  // alternative — blocking until the turn settles — is a request that can outlive its client, which
+  // is why the answer is a *state* with two running values rather than an await.
+  const submission = /^\/v1\/submissions\/(\d+)$/.exec(url.pathname);
+  if (submission && req.method === "GET") {
+    const submissionId = Number(submission[1]);
+    const waitSeconds = Math.min(60, Math.max(0, Number(url.searchParams.get("wait") ?? 0) || 0));
+    const deadline = Date.now() + waitSeconds * 1000;
+    let state = await deps.seam.submission(submissionId);
+    while (waitSeconds > 0 && (state.status === "queued" || state.status === "placed") && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      state = await deps.seam.submission(submissionId);
+    }
+    json(res, 200, { submissionId, ...state });
+    return true;
+  }
+
 
   const entries = /^\/v1\/conversations\/(\d+)\/entries$/.exec(url.pathname);
   if (entries && req.method === "GET") {

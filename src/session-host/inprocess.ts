@@ -71,6 +71,7 @@ import type {
   ConversationState,
   ModelInfo,
   Settled,
+  SubmissionState,
   TranscriptMessage,
   MessageContent,
   NamedConversation,
@@ -596,6 +597,10 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
 
     async awaitSubmission(submissionId: number): Promise<Settled> {
       return host.awaitSubmission(submissionId);
+    },
+
+    async submission(submissionId: number): Promise<SubmissionState> {
+      return host.submissionState(submissionId);
     },
 
     async write(conversationId: number, entry: AdapterEntry): Promise<number> {

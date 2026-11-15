@@ -59,6 +59,7 @@ import type {
   ProviderQuota,
   SessionHost,
   Settled,
+  SubmissionState,
   SubmitRequest,
   SubmitResult,
   ViewHandle,
@@ -113,6 +114,7 @@ export function serveSessionHost(seam: SessionHost): Host {
     removeSecret: ({ name }: { name: string }) => seam.removeSecret(name),
     info: () => seam.info(),
     awaitSubmission: ({ submissionId }: { submissionId: number }) => seam.awaitSubmission(submissionId),
+    submission: ({ submissionId }: { submissionId: number }) => seam.submission(submissionId),
     recordVerdict: async ({ name, verdict }: { name: string; verdict: AdapterVerdict }) => {
       await seam.recordVerdict(name, verdict);
       return null;
@@ -543,6 +545,10 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
     awaitSubmission: async (submissionId: number) => {
       const root = await session();
       return (await host.root((ctx) => root.awaitSubmission({ submissionId }, ctx))) as Settled;
+    },
+    submission: async (submissionId: number) => {
+      const root = await session();
+      return (await host.root((ctx) => root.submission({ submissionId }, ctx))) as SubmissionState;
     },
     write: async (conversationId: number, entry: AdapterEntry) => {
       const ref = await conversationRef(host, conversationId, session);

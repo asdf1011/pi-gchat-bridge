@@ -45,6 +45,7 @@ import type {
   ConversationState,
   ModelInfo,
   Settled,
+  SubmissionState,
   TranscriptMessage,
   UsageTotals,
 } from "../session-host/api.js";
@@ -734,6 +735,21 @@ export class BridgeHost {
     await this.recordAnswerOrigin(conversationId, answerId, submissionId).catch(() => {});
     const text = await this.answerText(conversationId, answerId);
     return { status: "done", answerId, text };
+  }
+
+  /**
+   * Where a submission stands, without waiting for it.
+   *
+   * A settled one delegates to `awaitSubmission`, which is where the answer's text and the origin
+   * hand-off live; the only thing this adds is not blocking on the ones still running.
+   */
+  async submissionState(submissionId: number): Promise<SubmissionState> {
+    const submission = await this.harness.submission(submissionId as never, this.context);
+    if (!submission) return { status: "unanswered", reason: "unknown submission" };
+    const record = await submission.status(this.context);
+    if (record.status === "queued" || record.status === "placed") return { status: record.status };
+    // Settled already, so this resolves at once rather than waiting.
+    return this.awaitSubmission(submissionId);
   }
 
   /** The text of one assistant entry, concatenated from its content blocks. */

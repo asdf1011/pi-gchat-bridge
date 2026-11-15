@@ -452,7 +452,8 @@ needs no server work. Cron is the third surface, and five changes is the answer.
 - **Done when:** a note is posted to the surface once, verbatim, with no model call.
 
 ### 9.6 `GET /v1/submissions/{id}` comes back, with its consumer named
-- **Status:** pending
+- **Status:** done — with `?wait=<seconds>` (default 0, capped at 60) and a non-blocking seam op
+  `submission()` beside `awaitSubmission`, so a request cannot be held open for a whole turn.
 - **Where:** `src/session-host/v1-routes.ts`
 - **Issue:** deleted for having no consumer, with the note *"the extracted handler is its consumer — it
   words the failure notice from the settle reason — so it comes back with the extraction, not before."*

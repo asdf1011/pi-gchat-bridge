@@ -334,6 +334,16 @@ export type Settled =
   | { status: "unanswered"; reason?: string; detail?: unknown };
 
 /**
+ * Where a submission stands *now*, without waiting for it.
+ *
+ * The pair of pi-durable's own words for "admitted but not yet in the transcript" and "in the
+ * transcript, owned by a run", plus the settled shape. Separate from `awaitSubmission` because a
+ * caller that is deciding whether to give up — a scheduled job, a status line — must not be able to
+ * hold a request open for the length of a turn.
+ */
+export type SubmissionState = { status: "queued" | "placed" } | Settled;
+
+/**
  * A verdict an adapter records about a conversation — the notification
  * validator's "did this notification deserve to be sent".
  */
@@ -600,6 +610,14 @@ export interface SessionHost {
    * than a handle — a handle would only exist in the process that submitted.
    */
   awaitSubmission(submissionId: number, options?: { signal?: AbortSignal }): Promise<Settled>;
+
+  /**
+   * Where a submission stands, without waiting for it to settle.
+   *
+   * `awaitSubmission` is the right call when the answer is the point; this is the one for "is it
+   * still going", which is what a bounded HTTP question and a retry decision actually ask.
+   */
+  submission(submissionId: number, options?: { signal?: AbortSignal }): Promise<SubmissionState>;
 
   /** Write an adapter-authored entry into a conversation. Returns its id. */
   write(conversationId: number, entry: AdapterEntry, options?: { signal?: AbortSignal }): Promise<number>;

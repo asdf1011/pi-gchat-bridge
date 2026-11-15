@@ -681,3 +681,49 @@ test("an address becomes a conversation, once", async () => {
     await served.close();
   }
 });
+
+test("a submission's state is a question, and the wait is bounded", async () => {
+  // Re-added for a consumer: `bridge-cli ask --await` decides whether a cron job retries or marks an
+  // email seen, and that turns on *why* a turn produced nothing — which the log cannot answer, because
+  // a failed turn leaves no entry.
+  const states = ["queued", "placed", "done"] as const;
+  let calls = 0;
+  const seam = {
+    submission: async (submissionId: number) => {
+      const status = states[Math.min(calls++, states.length - 1)] as (typeof states)[number];
+      return status === "done"
+        ? { status, answerId: 7, text: "the answer" }
+        : { status };
+    },
+  } as unknown as SessionHost;
+  const served = await serve(seam);
+  try {
+    const once = (await (await fetch(`${served.baseUrl}/v1/submissions/5`)).json()) as { status: string };
+    assert.equal(once.status, "queued", "no wait means one question, answered now");
+
+    calls = 0;
+    const waited = (await (await fetch(`${served.baseUrl}/v1/submissions/5?wait=5`)).json()) as {
+      status: string;
+      text?: string;
+    };
+    assert.equal(waited.status, "done", "a wait follows the state until it settles");
+    assert.equal(waited.text, "the answer");
+  } finally {
+    await served.close();
+  }
+});
+
+test("a submission that never settles returns its last state rather than hanging", async () => {
+  const seam = {
+    submission: async () => ({ status: "placed" as const }),
+  } as unknown as SessionHost;
+  const served = await serve(seam);
+  try {
+    const started = Date.now();
+    const body = (await (await fetch(`${served.baseUrl}/v1/submissions/9?wait=1`)).json()) as { status: string };
+    assert.equal(body.status, "placed", "still running is an answer");
+    assert.ok(Date.now() - started < 5_000, "the wait is a cap, not a promise");
+  } finally {
+    await served.close();
+  }
+});

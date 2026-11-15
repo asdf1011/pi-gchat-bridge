@@ -105,6 +105,25 @@ export const SettledSchema = Type.Object({
   detail: Type.Optional(Type.Unknown()),
 });
 
+/**
+ * Where a submission stands, as the seam reports it.
+ *
+ * `queued`/`placed` are still running; the settled pair carry the answer or the reason. Loose for the
+ * same reason `SettledSchema` is: `status` is the discriminator both ends already switch on.
+ */
+export const SubmissionStateSchema = Type.Object({
+  status: Type.Union([
+    Type.Literal("queued"),
+    Type.Literal("placed"),
+    Type.Literal("done"),
+    Type.Literal("unanswered"),
+  ]),
+  answerId: Type.Optional(Type.Number()),
+  text: Type.Optional(Type.String()),
+  reason: Type.Optional(Type.String()),
+  detail: Type.Optional(Type.Unknown()),
+});
+
 /** One provider's quota, as `/quota` shows it. Mirrors `ProviderQuota` at the seam. */
 export const ProviderQuotaSchema = Type.Object({
   provider: Type.String(),
@@ -464,6 +483,14 @@ export const SessionContract = remote("pi-bridge.session", {
          * an adapter that cannot wait cannot say why a turn produced nothing.
          */
         awaitSubmission: method(Type.Object({ submissionId: Type.Number() }), SettledSchema),
+        /**
+         * The same submission, answered now instead of when it settles.
+         *
+         * Beside `awaitSubmission` rather than replacing it: one caller needs the answer and can wait
+         * (the Chat handler words its failure notice from it), the other needs to know whether to keep
+         * waiting at all (a scheduled job, a status line) and must not hold a request open for a turn.
+         */
+        submission: method(Type.Object({ submissionId: Type.Number() }), SubmissionStateSchema),
         /**
          * The notification validator's record for a name.
          *
