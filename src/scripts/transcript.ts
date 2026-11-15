@@ -37,14 +37,19 @@ export const ENTRY_KINDS = [
 export const DEFAULT_EXCLUDED_KINDS: readonly string[] = ["pi.tool-result"];
 
 /** Bumped when the flattened text or the schema changes, so an old index rebuilds itself. */
-export const INDEX_VERSION = 1;
+export const INDEX_VERSION = 2;
 
 export interface Hit {
   entryId: number;
   conversationId: number;
   kind: string;
   at: number;
+  /** Prose from the entry, with the matched terms bracketed. Never tool-call JSON. */
   snippet: string;
+  /** `user` or `assistant`, when the entry says. Absent rather than guessed. */
+  role?: string;
+  /** The surface that produced it — `gchat`, `webui`, `cron`. Absent when never stamped. */
+  origin?: string;
 }
 
 export interface SearchOptions {
@@ -117,7 +122,14 @@ export function defaultIndexPath(storePath: string): string {
   );
 }
 
-const SCHEMA = `
+/**
+ * The index's schema, as one statement set.
+ *
+ * Exported so a test can build an index without copying it: the copy in the test drifted the
+ * moment a column was added here, and failed with "no column named display_text" rather than
+ * with anything about the change.
+ */
+export const SCHEMA = `
   CREATE TABLE meta (key TEXT PRIMARY KEY, value ANY) STRICT;
 
   CREATE VIRTUAL TABLE transcript USING fts5(
@@ -126,6 +138,9 @@ const SCHEMA = `
     conversation_id UNINDEXED,
     kind UNINDEXED,
     at UNINDEXED,
+    display_text UNINDEXED,
+    role UNINDEXED,
+    origin UNINDEXED,
     tokenize = 'unicode61'
   );
 `;
@@ -138,16 +153,33 @@ const SCHEMA = `
  * `{ kind, model: [{ role, content }] }`, where content is a string or an array of blocks.
  */
 export function flattenRecord(record: string): string {
+  return collectParts(record, { prose: false }).parts.join("\n");
+}
+
+/**
+ * Walk an entry's content blocks once, collecting text for matching and for display.
+ *
+ * One walk rather than two, because the two must agree about what an entry *is*: the fields a
+ * hit shows and the text it matched are both properties of the same content, and a second
+ * parser is a second chance to disagree about a `content` shape.
+ *
+ * `prose` selects the strict reading used for snippets — see `displayText`.
+ */
+function collectParts(
+  record: string,
+  options: { prose: boolean },
+): { parts: string[]; toolNames: string[] } {
+  const parts: string[] = [];
+  const toolNames: string[] = [];
   let parsed: unknown;
   try {
     parsed = JSON.parse(record);
   } catch {
-    return "";
+    return { parts, toolNames };
   }
   const model = (parsed as { model?: unknown }).model;
-  if (!Array.isArray(model)) return "";
+  if (!Array.isArray(model)) return { parts, toolNames };
 
-  const parts: string[] = [];
   for (const message of model as { content?: unknown }[]) {
     const content = message?.content;
     if (typeof content === "string") {
@@ -165,7 +197,12 @@ export function flattenRecord(record: string): string {
           if (typeof block.thinking === "string" && block.thinking !== "") parts.push(block.thinking);
           break;
         case "toolCall": {
-          if (typeof block.name === "string") parts.push(block.name);
+          if (typeof block.name !== "string") break;
+          if (options.prose) {
+            toolNames.push(block.name);
+            break;
+          }
+          parts.push(block.name);
           const args = block.arguments;
           if (typeof args === "string") parts.push(args);
           else if (args !== undefined) parts.push(JSON.stringify(args));
@@ -176,7 +213,80 @@ export function flattenRecord(record: string): string {
       }
     }
   }
-  return parts.join("\n");
+  return { parts, toolNames };
+}
+
+/**
+ * The part of an entry a *person* wrote or read, for showing beside a hit.
+ *
+ * `flattenRecord` is for matching: it includes tool names, arguments and outputs, because a
+ * search for `ofxsync` should find the command that ran it. A snippet drawn from that text is
+ * often a wall of JSON — the first search this tool did returned eight lines of
+ * `bash {"command":"cd /workspace/..."}` — so the snippet comes from here instead, while the
+ * match still comes from there.
+ *
+ * Prose is: a string content, `text` blocks, and `thinking` blocks (both are words somebody
+ * said, and a decision often appears in reasoning before it appears in a reply). A tool call
+ * contributes nothing but its name, and only when it has no text beside it — enough for the
+ * snippet to say *what* happened when the entry is nothing but a tool call.
+ */
+export function displayText(record: string): string {
+  const { parts, toolNames } = collectParts(record, { prose: true });
+  if (parts.length > 0) return parts.join("\n");
+  // Nothing was said, so the entry *is* a tool call. Its name alone ("bash") orients nobody —
+  // the first version showed five hits whose entire snippet was the word `bash` — so the
+  // command goes in too, stripped of its JSON envelope. This is the one place tool arguments
+  // are allowed into a snippet, because there is no prose for them to displace.
+  const { commands } = collectCommands(record);
+  return commands.length > 0 ? commands.join("\n") : toolNames.join("\n");
+}
+
+/**
+ * A tool call's own words: the command for `bash`, the path for `read`, and so on.
+ *
+ * Chosen from the arguments by key rather than by dumping them, so the snippet reads as the
+ * action instead of as a serialised object. Unknown tools contribute their name only.
+ */
+export function collectCommands(record: string): { commands: string[] } {
+  const commands: string[] = [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(record);
+  } catch {
+    return { commands };
+  }
+  const model = (parsed as { model?: unknown }).model;
+  if (!Array.isArray(model)) return { commands };
+  for (const message of model as { content?: unknown }[]) {
+    const content = message?.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content as Record<string, unknown>[]) {
+      if (block?.type !== "toolCall") continue;
+      const name = typeof block.name === "string" ? block.name : "";
+      const args = block.arguments as Record<string, unknown> | string | undefined;
+      const object = typeof args === "object" && args !== null ? (args as Record<string, unknown>) : undefined;
+      const pick = (key: string): string | undefined =>
+        typeof object?.[key] === "string" ? (object[key] as string) : undefined;
+      const detail =
+        pick("command") ?? pick("file_path") ?? pick("path") ?? pick("pattern") ?? pick("url");
+      commands.push(detail === undefined ? name : `${name} ${detail}`.trim());
+    }
+  }
+  return { commands };
+}
+
+/** The roles present in an entry, for a hit's `role` field. */
+export function roleOf(record: string): string | undefined {
+  try {
+    const model = (JSON.parse(record) as { model?: unknown }).model;
+    if (!Array.isArray(model)) return undefined;
+    for (const message of model as { role?: unknown }[]) {
+      if (typeof message?.role === "string" && message.role !== "") return message.role;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** The timestamp an entry carries, in ms, or 0 when the record has none. */
@@ -253,8 +363,15 @@ export function catchUp(store: DatabaseSync, index: DatabaseSync): IndexStats {
     .all(watermark) as { id: number; conversation_id: number; record: string }[];
 
   const insert = index.prepare(
-    "INSERT INTO transcript (text, entry_id, conversation_id, kind, at) VALUES (?, ?, ?, ?, ?)",
+    "INSERT INTO transcript (text, entry_id, conversation_id, kind, at, display_text, role, origin) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
   );
+  // The origin stamp is not on the entry: it lives in the durable store's `gchat.origins`
+  // documents, one per conversation, newest revision is a base holding the whole map. Read it
+  // once per catch-up and index the result, so a hit can say which surface said it without a
+  // second database and a join on every query. Absent for anything older than the stamps
+  // themselves or pruned since — `undefined`, never a guess.
+  const origins = readOrigins(store);
 
   let indexed = 0;
   let highWaterMark = watermark;
@@ -265,7 +382,16 @@ export function catchUp(store: DatabaseSync, index: DatabaseSync): IndexStats {
       const text = flattenRecord(row.record);
       if (text === "") continue;
       const kind = kindOf(row.record) ?? "";
-      insert.run(text, row.id, row.conversation_id, kind, timestampOf(row.record));
+      insert.run(
+        text,
+        row.id,
+        row.conversation_id,
+        kind,
+        timestampOf(row.record),
+        displayText(row.record),
+        roleOf(row.record) ?? "",
+        origins.get(`${row.conversation_id}:${row.id}`) ?? "",
+      );
       indexed += 1;
     }
     index
@@ -285,6 +411,53 @@ export function catchUp(store: DatabaseSync, index: DatabaseSync): IndexStats {
   return { indexed, examined: rows.length, highWaterMark, stale: false, ms: Date.now() - started };
 }
 
+/**
+ * Every origin stamp in the store, keyed `"<conversationId>:<entryId>"`.
+ *
+ * One document per conversation (`gchat.origins`, conversation scope), each holding the whole
+ * map for its owner — so there is no newest-revision-per-entry work, just the latest revision of
+ * each document. A store written before the split has no such documents and this returns
+ * nothing; a conversation whose document is missing reads as unknown, which is what a reader
+ * must assume anyway.
+ *
+ * Best-effort: this is a convenience for a hit's label, and a store it cannot read must not
+ * stop an index being built.
+ */
+export function readOrigins(store: DatabaseSync): Map<string, string> {
+  const origins = new Map<string, string>();
+  let docs: { id: number; owner_id: number }[];
+  try {
+    docs = store
+      .prepare(
+        `SELECT id, owner_id FROM documents
+          WHERE kind = ? AND scope_kind = 'conversation' AND retired_at IS NULL`,
+      )
+      .all('"gchat.origins"') as { id: number; owner_id: number }[];
+  } catch {
+    return origins;
+  }
+  const latest = store.prepare(
+    "SELECT content FROM document_revisions WHERE document_id = ? ORDER BY seq DESC LIMIT 1",
+  );
+  for (const doc of docs) {
+    try {
+      const row = latest.get(doc.id) as { content?: string } | undefined;
+      if (row?.content === undefined) continue;
+      const byEntry = (JSON.parse(row.content) as { byEntry?: Record<string, { origin?: unknown }> })
+        .byEntry;
+      if (byEntry === undefined || byEntry === null) continue;
+      for (const [entryId, stamp] of Object.entries(byEntry)) {
+        const origin = stamp?.origin;
+        if (typeof origin !== "string" || origin === "") continue;
+        origins.set(`${doc.owner_id}:${entryId}`, origin);
+      }
+    } catch {
+      continue;
+    }
+  }
+  return origins;
+}
+
 function kindOf(record: string): string | undefined {
   try {
     const kind = (JSON.parse(record) as { kind?: unknown }).kind;
@@ -294,13 +467,64 @@ function kindOf(record: string): string | undefined {
   }
 }
 
+/**
+ * A snippet of prose, with the query's words bracketed.
+ *
+ * The words come from the query rather than from the index, because the index's own
+ * highlighter runs on the column that matched — which is the tool-arguments one. Splitting the
+ * query on whitespace and matching case-insensitively is coarser than FTS tokenisation (it does
+ * not stem, so `quantiz` highlights `quantiz` but not `quantization`), and that is the right
+ * trade: the snippet exists to orient a reader, and the search itself already decided the row
+ * matched.
+ *
+ * No match in the prose is a normal outcome — the term was in a tool call — and the snippet then
+ * shows the entry's first words unmarked. That is more honest than pretending the entry is
+ * about the term.
+ */
+export function proseSnippet(displayText: string, query: string, width = 220): string {
+  const flat = displayText.replace(/\s+/g, " ").trim();
+  if (flat === "") return "";
+  // Words of one or two characters are dropped: the query is split on whitespace, so "a" in a
+  // phrase brackets every `a` in the entry — the first version produced
+  // `[Testing] [a] [web] [message]` — and FTS would not have matched them as words anyway.
+  const terms = query
+    .toLowerCase()
+    .split(/\s+/)
+    .map((term) => term.replace(/^["']|["']$/g, "").replace(/\*$/, ""))
+    .filter((term) => term.length >= 3);
+
+  // Centre the window on the first match, so a hit in a long entry is not a snippet of its
+  // opening paragraph.
+  const lower = flat.toLowerCase();
+  let at = -1;
+  for (const term of terms) {
+    const found = lower.indexOf(term);
+    if (found !== -1 && (at === -1 || found < at)) at = found;
+  }
+  const start = at <= width / 3 ? 0 : Math.max(0, at - Math.floor(width / 3));
+  const window = flat.slice(start, start + width);
+  const body = `${start > 0 ? "…" : ""}${window}${start + width < flat.length ? "…" : ""}`;
+
+  // Brackets around the terms, assembled from matches rather than by replacing in place, so a
+  // term that appears inside an earlier replacement cannot be bracketed twice.
+  const pattern = terms
+    .filter((term) => term !== "")
+    .sort((a, b) => b.length - a.length)
+    .map((term) => term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("|");
+  if (pattern === "") return body;
+  return body.replace(new RegExp(`(${pattern})`, "gi"), "[$1]");
+}
+
 /** One row as the index hands it back. */
 interface HitRow {
   entry_id: number;
   conversation_id: number;
   kind: string;
   at: number;
-  snippet: string;
+  display_text: string;
+  role: string;
+  origin: string;
 }
 
 /** One row of a per-conversation count. */
@@ -485,8 +709,12 @@ export function search(deps: SearchDeps, options: SearchOptions): { hits: Hit[];
     });
     const withLimit = [...params, Math.max(1, options.limit ?? 20)];
 
-    const select = `SELECT entry_id, conversation_id, kind, at,
-                           snippet(transcript, 0, '[', ']', '…', 12) AS snippet
+    // `snippet()` only reads an FTS column, and the column it would read (`text`) is the one
+    // full of tool arguments. So the matched row is selected whole and the snippet is drawn
+    // from `display_text` afterwards — see `proseSnippet`. `text` still decides *which* rows
+    // match, which is the whole point: a hit for `ofxsync` finds the command even though the
+    // snippet shows prose.
+    const select = `SELECT entry_id, conversation_id, kind, at, display_text, role, origin
                     FROM transcript
                     WHERE `;
     const tail = " ORDER BY bm25(transcript), entry_id DESC LIMIT ?";
@@ -504,7 +732,9 @@ export function search(deps: SearchDeps, options: SearchOptions): { hits: Hit[];
         conversationId: row.conversation_id,
         kind: row.kind,
         at: row.at,
-        snippet: row.snippet.replace(/\s+/g, " ").trim(),
+        snippet: proseSnippet(row.display_text, options.query),
+        ...(row.role === "" ? {} : { role: row.role }),
+        ...(row.origin === "" ? {} : { origin: row.origin }),
       })),
       stats,
     };
@@ -821,9 +1051,13 @@ function searchVerb(args: SearchVerbArgs): number {
   }
 
   for (const hit of hits) {
+    // Role and origin when the entry has them: `user:webui` says a browser asked, which is a
+    // different fact from `assistant:gchat` and one a reader often needs to tell a prompt from
+    // an answer. Absent rather than guessed, so the column is blank rather than wrong.
+    const who = hit.role === undefined ? "" : hit.origin === undefined ? hit.role : `${hit.role}:${hit.origin}`;
     out(
       `${String(hit.conversationId).padStart(6)}  ${formatAt(hit.at)}  ` +
-        `${hit.kind.replace(/^pi\./, "").padEnd(11)}  ${hit.snippet}`,
+        `${hit.kind.replace(/^pi\./, "").padEnd(11)}  ${who.padEnd(18)}  ${hit.snippet}`,
     );
   }
   if (wantStats) err(statsLine(stats));

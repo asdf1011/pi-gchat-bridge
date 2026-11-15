@@ -19,8 +19,13 @@ import {
   catchUp,
   countByConversation,
   defaultIndexPath,
+  displayText,
   flattenRecord,
+  proseSnippet,
+  readOrigins,
+  roleOf,
   runCli,
+  SCHEMA,
   search,
   toFtsQuery,
 } from "../src/scripts/transcript.js";
@@ -162,13 +167,9 @@ test("catchUp indexes only what is new, and advances the watermark even over uns
   const db = new DatabaseSync(store.storePath, { readOnly: true });
   // A fresh index, not one `search` has already caught up.
   const index = new DatabaseSync(defaultIndexPath(store.storePath));
-  index.exec(`
-    CREATE TABLE meta (key TEXT PRIMARY KEY, value ANY) STRICT;
-    CREATE VIRTUAL TABLE transcript USING fts5(
-      text, entry_id UNINDEXED, conversation_id UNINDEXED, kind UNINDEXED, at UNINDEXED,
-      tokenize = 'unicode61'
-    );
-  `);
+  // The real schema, not a copy: a second declaration in a test goes stale the first time a
+  // column is added to the index.
+  index.exec(SCHEMA);
 
   const first = catchUp(db, index);
   assert.deepEqual([first.indexed, first.examined], [1, 2], "the empty entry is examined once");
@@ -548,4 +549,118 @@ test("read rejects the search-only flags rather than ignoring them", () => {
   const { err, deps } = lines();
   assert.equal(runCli(["read", "--conversation", "1", "--max-stale", "5"], { storePath: store.storePath, ...deps }), 2);
   assert.match(err.join("\n"), /unknown option --max-stale/);
+});
+
+// --- display text: the snippet a person reads ------------------------------------------------
+
+test("displayText keeps prose and drops a tool call's arguments", () => {
+  // The whole reason this exists: matching wants the command, the snippet wants the prose.
+  // Searching `ofxsync` must find the entry, but `bash {"command":"cd /workspace/..."}` is not
+  // a snippet anybody can read.
+  const entry = JSON.stringify({
+    kind: "pi.assistant",
+    model: [
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Let me build the system." },
+          { type: "toolCall", name: "bash", arguments: { command: "cd /workspace && mkdir -p ofxsync" } },
+        ],
+      },
+    ],
+  });
+  assert.match(displayText(entry), /Let me build the system\./);
+  assert.ok(!displayText(entry).includes("mkdir"), "the command is not in the prose");
+  // …but it is still matchable.
+  assert.match(flattenRecord(entry), /mkdir -p ofxsync/);
+});
+
+test("displayText falls back to the command when the entry is nothing but a tool call", () => {
+  // "bash" alone orients nobody — five hits whose entire snippet was `bash` is what prompted
+  // this. With no prose to displace, the command is the only thing worth showing.
+  const call = (name: string, args: unknown) =>
+    JSON.stringify({
+      kind: "pi.assistant",
+      model: [{ role: "assistant", content: [{ type: "toolCall", name, arguments: args }] }],
+    });
+  assert.equal(displayText(call("bash", { command: "ls -la" })), "bash ls -la");
+  assert.equal(displayText(call("read", { file_path: "/tmp/x.ts" })), "read /tmp/x.ts");
+  assert.equal(displayText(call("grep", { pattern: "ledger" })), "grep ledger");
+  // A tool whose arguments name nothing recognisable contributes its name, not a JSON dump.
+  assert.equal(displayText(call("mystery", { beta: 1 })), "mystery");
+});
+
+test("roleOf reports the role an entry carries, and nothing when it has none", () => {
+  // The role is the model message's, not the entry kind's: a `pi.user` entry can hold any role,
+  // and this reads what is there rather than inferring from the kind.
+  const withRole = (role: string) =>
+    JSON.stringify({ kind: "pi.user", model: [{ role, content: "hello" }] });
+  assert.equal(roleOf(withRole("user")), "user");
+  assert.equal(roleOf(withRole("assistant")), "assistant");
+  assert.equal(roleOf(JSON.stringify({ kind: "pi.user" })), undefined);
+  assert.equal(roleOf(JSON.stringify({ kind: "pi.user", model: [{ content: "x" }] })), undefined);
+  assert.equal(roleOf("{not json"), undefined);
+});
+
+test("a hit whose term appears only in a tool call still matches, and shows prose", () => {
+  const store = makeStore([
+    [
+      "pi.assistant",
+      [
+        { type: "text", text: "Running the check now." },
+        { type: "toolCall", name: "bash", arguments: { command: "bean-check staging.beancount" } },
+      ],
+    ],
+  ]);
+  const { hits } = search({ storePath: store.storePath }, { query: "bean-check" });
+  assert.equal(hits.length, 1);
+  assert.match(hits[0]!.snippet, /Running the check now\./, "the snippet is prose");
+  assert.ok(!hits[0]!.snippet.includes("staging.beancount"), "not the command");
+  assert.equal(hits[0]!.role, "assistant");
+});
+
+test("proseSnippet brackets the terms and centres on the first match", () => {
+  const text = `${"filler ".repeat(60)}the ofxsync run failed ${"trailing ".repeat(60)}`;
+  const snippet = proseSnippet(text, "ofxsync");
+  assert.match(snippet, /\[ofxsync\]/);
+  assert.ok(snippet.startsWith("…"), "a match in the middle is not shown from the start");
+  assert.ok(snippet.length < 240, snippet.length);
+  // Short words are not bracketed: splitting a phrase on whitespace would mark every `a`.
+  // Case-insensitively, and the text keeps its own casing... except that the replacement
+  // writes the *matched substring* back, so `Testing` against `testing` yields `[testing]`.
+  assert.equal(proseSnippet("a testing a web message", "Testing a web message"), "a [testing] a [web] [message]");
+});
+
+test("proseSnippet shows the opening words when the term was only in a tool call", () => {
+  // No bracketed term is a normal outcome, not a failure: the entry matched, the prose did not
+  // contain the word. Showing the first words is more honest than pretending otherwise.
+  const snippet = proseSnippet("Looking at the build output.", "bean-check");
+  assert.equal(snippet, "Looking at the build output.");
+  assert.ok(!snippet.includes("["), snippet);
+});
+
+test("readOrigins reads each conversation's stamps and ignores what it cannot parse", () => {
+  const store = makeStore([["pi.user", "hello"], ["pi.assistant", [{ type: "text", text: "hi" }]]]);
+  const db = new DatabaseSync(store.storePath);
+  db.exec(`
+    CREATE TABLE documents (id INTEGER PRIMARY KEY, kind TEXT, scope_kind TEXT, owner_id INTEGER, retired_at INTEGER);
+    CREATE TABLE document_revisions (document_id INTEGER, seq INTEGER, content TEXT);
+    INSERT INTO documents VALUES (1, '"gchat.origins"', 'conversation', 7, NULL);
+    INSERT INTO documents VALUES (2, '"gchat.origins"', 'conversation', 8, NULL);
+    INSERT INTO document_revisions VALUES (1, 1, '{"byEntry":{"11":{"origin":"webui"}}}');
+    INSERT INTO document_revisions VALUES (2, 1, 'not json');
+  `);
+  const origins = readOrigins(db);
+  db.close();
+  assert.equal(origins.get("7:11"), "webui");
+  // The bad document contributes nothing rather than throwing.
+  assert.equal(origins.size, 1);
+});
+
+test("readOrigins on a store with no origins table is empty, not an error", () => {
+  // A store written before the stamps existed, or one this tool does not own.
+  const store = makeStore([["pi.user", "hello"]]);
+  const db = new DatabaseSync(store.storePath, { readOnly: true });
+  assert.equal(readOrigins(db).size, 0);
+  db.close();
 });
