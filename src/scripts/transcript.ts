@@ -884,19 +884,23 @@ export function readConversationNames(store: DatabaseSync): Map<number, string> 
       .prepare("SELECT content FROM document_revisions WHERE document_id = ? ORDER BY seq DESC LIMIT 1")
       .get(doc.id) as { content?: string } | undefined;
     if (row?.content === undefined) return names;
+    // The stored field is `name`; `label` is only the *adapter-facing* name for it
+    // (`NamedConversation.label` is built from `binding.name` in inprocess.ts). Reading `label`
+    // here read a field the document does not have, so every titled conversation came back
+    // nameless while its title sat one property away.
     const byChatKey = (JSON.parse(row.content) as {
-      byChatKey?: Record<string, { conversationId?: unknown; label?: unknown; preview?: unknown }>;
+      byChatKey?: Record<string, { conversationId?: unknown; name?: unknown; preview?: unknown }>;
     }).byChatKey;
     if (byChatKey === undefined || byChatKey === null) return names;
     for (const binding of Object.values(byChatKey)) {
       const id = binding?.conversationId;
       if (typeof id !== "number") continue;
-      // The title first: a label is what somebody (or the titler) decided the thread is about,
+      // The title first: a name is what somebody (or the titler) decided the thread is about,
       // and the preview is only its opening words. Fall back in that order, never both.
-      const label = typeof binding.label === "string" && binding.label.trim() !== "" ? binding.label : undefined;
+      const title = typeof binding.name === "string" && binding.name.trim() !== "" ? binding.name : undefined;
       const preview =
         typeof binding.preview === "string" && binding.preview.trim() !== "" ? binding.preview : undefined;
-      const name = label ?? preview;
+      const name = title ?? preview;
       if (name !== undefined) names.set(id, shorten(name.replace(/\s+/g, " ").trim()));
     }
   } catch {
@@ -914,6 +918,10 @@ export function readConversationNames(store: DatabaseSync): Map<number, string> 
  * rather than mid-word, because a truncated name should still read as a phrase.
  */
 export function shorten(name: string, limit = 48): string {
+  // A stored "title" is sometimes the opening heading of the first reply — six of 165 in the live
+  // store are `## Short answer`, `## The setup`. The hashes are Markdown, not part of the name, and
+  // inside a link label they read as a mistake.
+  name = name.replace(/^#{1,6}\s+/, "").trim();
   if (name.length <= limit) return name;
   const cut = name.slice(0, limit);
   const space = cut.lastIndexOf(" ");
@@ -992,14 +1000,14 @@ export function linkLabel(
 ): string {
   const name = described?.name?.trim();
   const when = entryId === undefined || described?.at === undefined ? "" : describeTime(described.at, now);
+  // A name and a time, and no ids. The id is in the URL, which is the whole point of a link: a
+  // reader copying it gets the exact conversation and message, so repeating the numbers in the
+  // text only makes the label harder to read — and these labels are read far more than typed.
   if (name !== undefined && name !== "") {
-    const parts = [name];
-    if (when !== "") parts.push(when);
-    // The id is kept even when named: two threads can share a title, and the id is what a reader
-    // types when the link is not enough.
-    parts.push(`(${conversationId}${entryId === undefined ? "" : `, message ${entryId}`})`);
-    return parts.join(" — ");
+    return when === "" ? name : `${name} — ${when}`;
   }
+  // Unnamed: the id stays, because a bare time says nothing about *which* conversation, and this
+  // is the case where the reader has no other handle on it.
   const base = entryId === undefined ? `conversation ${conversationId}` : `conversation ${conversationId}, message ${entryId}`;
   return when === "" ? base : `${base} — ${when}`;
 }

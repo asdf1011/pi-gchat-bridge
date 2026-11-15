@@ -763,6 +763,9 @@ test("describeTime says yesterday, days ago, or a date — and stops converting 
 
 test("shorten cuts at a word boundary, and leaves a short name alone", () => {
   assert.equal(shorten("Ledger sync"), "Ledger sync");
+  // Some stored "titles" are the opening heading of the first reply, not a title.
+  assert.equal(shorten("## Short answer"), "Short answer");
+  assert.equal(shorten("##"), "##", "something with no heading text is left as it was");
   const long = "I have accounts at several institutions. Chase, Schwab, Capital One, Wells Fargo";
   const cut = shorten(long);
   assert.ok(cut.length <= 49, cut);
@@ -774,17 +777,45 @@ test("shorten cuts at a word boundary, and leaves a short name alone", () => {
 test("a link label names the conversation and when, keeping the id to disambiguate", () => {
   const now = Date.UTC(2026, 10, 15, 9, 0);
   const at = Date.UTC(2026, 10, 14, 18, 5);
-  assert.equal(
-    linkLabel(27202, 34779, { name: "Ledger sync", at }, now),
-    "Ledger sync — yesterday at 6:05pm — (27202, message 34779)",
-  );
-  // No name: the id leads, because a bare time says nothing about which conversation.
+  // A name and a time, no ids: the URL carries them, and a label is read far more than typed.
+  assert.equal(linkLabel(27202, 34779, { name: "Ledger sync", at }, now), "Ledger sync — yesterday at 6:05pm");
+  // Named, and a conversation-level link rather than a message one.
+  assert.equal(linkLabel(27202, undefined, { name: "Ledger sync", at }, now), "Ledger sync");
+  // No name: the id stays, because a bare time says nothing about which conversation.
   assert.equal(
     linkLabel(6317, 6780, { at }, now),
     "conversation 6317, message 6780 — yesterday at 6:05pm",
   );
   // No time either: still a usable label.
   assert.equal(linkLabel(7, undefined, {}), "conversation 7");
+});
+
+test("readConversationNames reads the stored `name`, not the adapter's `label`", () => {
+  // The document stores `name`; `NamedConversation.label` is built from it in inprocess.ts. The
+  // fixture here used to say `label`, which is a key the document does not have — so this test
+  // passed while every real titled conversation came back nameless. A fixture that invents a
+  // field cannot catch a reader that looks for the wrong one.
+  const store = makeStore([["pi.user", "hello"]]);
+  const db = new DatabaseSync(store.storePath);
+  db.exec(`
+    CREATE TABLE documents (id INTEGER PRIMARY KEY, kind TEXT, scope_kind TEXT, owner_id INTEGER, retired_at INTEGER);
+    CREATE TABLE document_revisions (document_id INTEGER, seq INTEGER, content TEXT);
+    INSERT INTO documents VALUES (1, '"gchat.bindings"', 'session', 0, NULL);
+  `);
+  db.prepare("INSERT INTO document_revisions VALUES (1, 1, ?)").run(
+    JSON.stringify({
+      byChatKey: {
+        "spaces/a/threads/t1": { conversationId: 4027, name: "Steering  and Relocation" },
+        // `label` is not the stored field, so a document carrying only it yields nothing: the
+        // reader must not quietly accept both spellings.
+        "spaces/a/threads/t2": { conversationId: 9, label: "not the stored field" },
+      },
+    }),
+  );
+  const names = readConversationNames(db);
+  db.close();
+  assert.equal(names.get(4027), "Steering and Relocation");
+  assert.equal(names.has(9), false);
 });
 
 test("readConversationNames prefers a title over a preview, and cleans both", () => {
@@ -798,7 +829,7 @@ test("readConversationNames prefers a title over a preview, and cleans both", ()
   db.prepare("INSERT INTO document_revisions VALUES (1, 1, ?)").run(
     JSON.stringify({
       byChatKey: {
-        "spaces/a/threads/t1": { conversationId: 27202, label: "Ledger  sync", preview: "opening words" },
+        "spaces/a/threads/t1": { conversationId: 27202, name: "Ledger  sync", preview: "opening words" },
         "spaces/a/threads/t2": { conversationId: 8508, preview: "I don't see any names yet" },
         // A binding with neither is absent rather than an empty name.
         "spaces/a/threads/t3": { conversationId: 9 },
