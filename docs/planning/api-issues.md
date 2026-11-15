@@ -153,7 +153,11 @@ below, because it is the same code and the same review.
 - **Done when:** each command has one implementation and a per-surface renderer.
 
 ### 3.3 Two thinking-level policies
-- **Status:** pending
+- **Status:** done — one rule (`settings.ts`'s `clampToSupported`, which is pi's), one lookup
+  (`levelsForModel`), used by both surfaces. `chat/queries.ts`'s downward-only clamp is deleted; it
+  disagreed with pi for a request below the model's lowest supported level. Found and fixed on the way:
+  a bare `/model <id>` was silently resetting the thinking level to the lowest, because the surface
+  filled in `levels[0]` for "no level asked for".
 - **Where:** `src/chat/queries.ts` (`clampThinkingLevel`), `src/commands/command-surface.ts` (`/model`)
 - **Issue:** Chat clamps a requested level down to the nearest supported one; the web refuses it with
   the list of real ones — the same question answered two ways, by a host that already knows the levels.

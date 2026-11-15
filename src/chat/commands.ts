@@ -62,8 +62,8 @@ import {
   listModels,
   rebind,
   renameConversation,
+  levelsForModel,
   startConversation,
-  supportedThinkingLevels,
   switchModel,
 } from "./queries.js";
 
@@ -239,7 +239,7 @@ const SLASH_COMMANDS: SlashCommand[] = [
       const defaults = await defaultSettings(seam);
       const supportedLevels =
         defaults.provider && defaults.modelId
-          ? supportedThinkingLevels(await listModels(seam), defaults.provider, defaults.modelId)
+          ? levelsForModel(await listModels(seam), defaults.provider, defaults.modelId)
           : undefined;
       await client.createCardMessage(spaceName, settingsCard(models, defaults, { supportedLevels }), "Settings for new conversations.");
       logger.info(`[chat] ${display}: posted settings card (${models.length} models)`);
@@ -564,7 +564,7 @@ export async function runDurableCommand(ctx: DurableCommandContext): Promise<Han
         return "ok";
       }
       const [provider = "", modelId = ""] = picked.split("|");
-      const supportedLevels = supportedThinkingLevels(await listModels(seam), provider, modelId);
+      const supportedLevels = levelsForModel(await listModels(seam), provider, modelId);
       const models = await listModels(seam);
       const label = models.find((m) => m.provider === provider && m.id === modelId)?.label ?? modelId;
 

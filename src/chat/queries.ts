@@ -16,35 +16,26 @@
  *     coding-agent JSONL, not durable conversations; importing them is the
  *     one-shot M7 tool, not a runtime query.
  */
-import type { ConversationSettingsResult } from "../settings.js";
+import { clampToSupported, type ConversationSettingsResult } from "../settings.js";
 import { THINKING_KEEP } from "../constants.js";
 import type { ConversationState, ModelInfo, NamedConversation, SessionHost } from "../session-host/api.js";
 
 export type { ModelInfo };
 
-/** The thinking levels a model supports, as the host reported them. */
-export function supportedThinkingLevels(
+/**
+ * The thinking levels one model in this list supports, as the host reported them.
+ *
+ * A lookup, not a rule: the rule is pi's, and it lives in `settings.ts` (`supportedThinkingLevels`
+ * over the model's own `reasoning`/`thinkingLevelMap`) so both surfaces — and the harness that
+ * applies it — agree about which levels exist. Named for what it does, because two functions with
+ * one name in one call graph is how a clamp gets applied twice.
+ */
+export function levelsForModel(
   models: readonly ModelInfo[],
   provider: string,
   modelId: string,
 ): string[] | undefined {
   return models.find((model) => model.provider === provider && model.id === modelId)?.thinkingLevels;
-}
-
-/** Clamp a requested level to one the model has, like pi does when it applies it. */
-export function clampThinkingLevel(levels: readonly string[], requested: string | undefined): string | undefined {
-  if (requested === undefined) return levels[0];
-  if (levels.includes(requested)) return requested;
-  // pi clamps to the nearest supported level at or below the request; falling
-  // back to the lowest keeps the card honest instead of showing a level that
-  // cannot happen.
-  const order = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
-  const wanted = order.indexOf(requested);
-  if (wanted < 0) return levels[0];
-  for (let index = wanted; index >= 0; index -= 1) {
-    if (levels.includes(order[index])) return order[index];
-  }
-  return levels[0];
 }
 
 export interface ConversationStatus {
@@ -104,8 +95,8 @@ export async function switchModel(
 ): Promise<{ model: string; thinkingLevel?: string }> {
   const binding = await seam.resolve(chatKey);
   if (!binding) throw new Error(`no conversation for ${chatKey}`);
-  const levels = supportedThinkingLevels(await listModels(seam), provider, modelId);
-  const level = levels ? clampThinkingLevel(levels, thinkingLevel) : undefined;
+  const levels = levelsForModel(await listModels(seam), provider, modelId);
+  const level = levels ? (clampToSupported(levels, thinkingLevel) ?? levels[0]) : undefined;
   return seam.setModel(chatKey, {
     provider,
     modelId,
@@ -171,9 +162,9 @@ export async function applyModelPick(
   }
   const label = `${model.label}${request.provider ? ` (${request.provider})` : ""}`;
   const requested = request.thinkingLevel === THINKING_KEEP ? undefined : request.thinkingLevel;
-  const levels = supportedThinkingLevels(models, request.provider, request.modelId);
+  const levels = levelsForModel(models, request.provider, request.modelId);
   // pi clamps to a level the model has; report what it will actually run.
-  const clamped = levels ? clampThinkingLevel(levels, requested) : requested;
+  const clamped = levels ? clampToSupported(levels, requested) ?? levels[0] : requested;
 
   try {
     const existing = await seam.resolve(chatKey);

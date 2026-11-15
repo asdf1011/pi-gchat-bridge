@@ -14,19 +14,19 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import type { Model } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { clampToSupported } from "../src/settings.js";
 
 import { BridgeHost, totalUsage } from "../src/durable/host.js";
 import { inProcessSessionHost } from "../src/session-host/inprocess.js";
 import type { SessionHost } from "../src/session-host/api.js";
 import {
   applyModelPick,
-  clampThinkingLevel,
   conversationStatus,
   listConversations,
   rebind,
   renameConversation,
   startConversation,
-  supportedThinkingLevels,
+  levelsForModel,
   switchModel,
 } from "../src/chat/queries.js";
 
@@ -65,20 +65,27 @@ function seamOf(host: BridgeHost): SessionHost {
 
 test("a non-reasoning model supports only 'off'", () => {
   const models = [{ provider: "llama-local", id: "small", label: "small", thinkingLevels: ["off"] }];
-  assert.deepEqual(supportedThinkingLevels(models, "llama-local", "small"), ["off"]);
+  assert.deepEqual(levelsForModel(models, "llama-local", "small"), ["off"]);
 });
 
 test("an unknown model has no level list at all", () => {
-  assert.equal(supportedThinkingLevels([], "x", "y"), undefined);
+  assert.equal(levelsForModel([], "x", "y"), undefined);
 });
 
-test("clampThinkingLevel keeps a supported level and falls back to the lowest otherwise", () => {
-  assert.equal(clampThinkingLevel(["off", "low", "high"], "low"), "low");
-  assert.equal(clampThinkingLevel(["off", "low", "high"], "high"), "high");
-  assert.equal(clampThinkingLevel(["off", "low"], "max"), "low");
-  assert.equal(clampThinkingLevel(["off"], "high"), "off");
-  assert.equal(clampThinkingLevel(["off", "high"], undefined), "off");
-  assert.equal(clampThinkingLevel(["off", "high"], "nonsense"), "off");
+test("a requested level is clamped by pi's rule, which the surface shares with the host", () => {
+  // The clamp used to live here as a second implementation that walked *downwards* only, while pi
+  // clamps to the nearest level above the request first. Chat therefore showed "low" for a model
+  // where pi would apply "high" — a card that disagreed with the thing it was describing. There is
+  // one rule now (`settings.ts`), and this pins the behaviour both surfaces get.
+  const clamp = (levels: string[], level: string | undefined) => clampToSupported(levels, level) ?? levels[0];
+  assert.equal(clamp(["off", "low", "high"], "low"), "low");
+  assert.equal(clamp(["off", "low", "high"], "high"), "high");
+  assert.equal(clamp(["off", "low"], "max"), "low");
+  assert.equal(clamp(["off"], "high"), "off");
+  assert.equal(clamp(["off", "high"], undefined), "off");
+  assert.equal(clamp(["off", "high"], "nonsense"), "off");
+  // The case the old implementation got wrong: nothing at or below the request, so pi goes up.
+  assert.equal(clamp(["low", "high"], "medium"), "high");
 });
 
 test("totalUsage sums every model a conversation has used", () => {

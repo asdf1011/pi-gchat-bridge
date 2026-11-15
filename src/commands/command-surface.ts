@@ -14,6 +14,7 @@
  * time. What it must never do is believe its caller: a value that arrived from a form is validated
  * here, not trusted because a surface offered it in a dropdown.
  */
+import { clampToSupported } from "../settings.js";
 import type { ModelInfo, SessionHost } from "../session-host/api.js";
 
 /** A row in a list. `command` makes the row clickable: it is the command the click sends. */
@@ -196,7 +197,7 @@ function modelForm(
         kind: "select",
         ...(current.thinking === undefined ? {} : { value: current.thinking }),
         options: offered.map((level) => ({ id: level, label: level, selected: level === current.thinking })),
-        hint: "A level the model does not have is refused, with the ones it does.",
+        hint: "A level the model does not have is clamped to the nearest one it does, and the answer says which.",
       },
     ],
   };
@@ -301,19 +302,25 @@ export async function runCommand(
           : levels[0];
       return modelForm(models, { model: modelKey(chosen), ...(thinking === undefined ? {} : { thinking }) }, levels);
     }
-    const thinking = values.thinking ?? (rest.length > 1 ? rest.slice(1).join(" ") : undefined);
+    const wantedLevel = values.thinking ?? (rest.length > 1 ? rest.slice(1).join(" ") : undefined);
     const levels = chosen.thinkingLevels ?? [];
-    if (thinking !== undefined && levels.length > 0 && !levels.includes(thinking)) {
-      return text(
-        `${chosen.label} does not support thinking level "${thinking}". It supports: ${levels.join(", ")}.`,
-      );
-    }
+    // **The same rule the host applies**, not a refusal of our own: pi clamps to the nearest level the
+    // model has, and `clampToSupported` is that rule. This used to refuse instead, so the same request
+    // was clamped in Chat and rejected here — two answers to one question, from the surface that has
+    // the least information. What the level *became* is reported, which is the fact a person needs.
+    // No level asked for means "leave it as it is": the host clamps the current one against the new
+    // model, and sending `levels[0]` here would silently reset a person's choice to the lowest.
+    const thinking = levels.length > 0 ? clampToSupported(levels, wantedLevel) : wantedLevel;
     const applied = await seam.setModel(subject.name, {
       provider: chosen.provider,
       modelId: chosen.id,
       ...(thinking === undefined ? {} : { thinkingLevel: thinking }),
     });
-    return text(`Model: ${applied.model}${applied.thinkingLevel ? ` (thinking ${applied.thinkingLevel})` : ""}`);
+    const clamped = wantedLevel !== undefined && applied.thinkingLevel !== wantedLevel;
+    return text(
+      `Model: ${applied.model}${applied.thinkingLevel ? ` (thinking ${applied.thinkingLevel})` : ""}` +
+        (clamped ? ` — "${wantedLevel}" is not one of ${levels.join(", ")}, so it was clamped.` : ""),
+    );
   }
 
   if (command === "/quota") {

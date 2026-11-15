@@ -144,9 +144,10 @@ test("submitting the form applies both answers in one call", async () => {
   assert.match(response.kind === "text" ? response.text : "", /claude-sonnet-4.*thinking high/);
 });
 
-test("a thinking level the chosen model does not have is refused with the ones it does", async () => {
-  // A dropdown offered "high"; deepseek-chat has no such level. The refusal is data — a text response
-  // the surface already knows how to render — and it lists the alternatives.
+test("a thinking level the chosen model does not have is clamped, and the answer says so", async () => {
+  // A dropdown offered "high"; deepseek-chat tops out at "medium". This used to be *refused* here while
+  // Chat clamped the same request, which is two answers to one question from the surface that knows
+  // least. The rule is pi's, the host applies it, and the surface reports what took effect.
   const { seam, calls } = fakeSeam();
   const response = await runCommand(seam, subject, {
     text: "/model",
@@ -154,9 +155,15 @@ test("a thinking level the chosen model does not have is refused with the ones i
   });
   assert.equal(response.kind, "text");
   const text = response.kind === "text" ? response.text : "";
-  assert.match(text, /does not support thinking level "high"/);
-  assert.match(text, /off, low, medium/);
-  assert.equal(calls.setModel.length, 0, "nothing was applied");
+  assert.equal((calls.setModel[0] as unknown[])[1] instanceof Object, true);
+  assert.deepEqual(
+    (calls.setModel[0] as unknown[])[1],
+    { provider: "deepseek", modelId: "deepseek-chat", thinkingLevel: "medium" },
+    "the nearest level the model has is what gets applied",
+  );
+  // The answer reports what the *host* returned (this fixture always says high), because that is the
+  // level that will actually run — the surface's job is the request, not the confirmation.
+  assert.match(text, /^Model: /);
 });
 
 test("a typed model name is matched, and an ambiguous or unknown one gets a clickable list", async () => {
