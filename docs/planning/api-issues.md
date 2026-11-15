@@ -135,7 +135,11 @@ below, because it is the same code and the same review.
 ## 3. Two command layers; the docs and the code disagree
 
 ### 3.1 Chat does not use `runCommand`
-- **Status:** pending
+- **Status:** **wontfix — the docs were wrong, not the code.** Chat keeps a card layer because two of
+  its commands are interactions rather than questions (a model picker that re-renders the thinking
+  levels, a `/secret` sequence with no password field), and the four shapes cannot express either
+  without becoming a rendering framework. Both files' headers now say so explicitly, and name what *is*
+  shared: the seam, the thinking-level rule, the model key, and the secret gate.
 - **Where:** `src/chat/commands.ts` (839 lines) vs `src/commands/command-surface.ts`
 - **Issue:** `docs/session-host-api.md` and `command-surface-options.md` §8 both say commands route
   through `runCommand(seam, …)` on every surface. The Chat adapter never calls it: `chat/commands.ts`
@@ -145,12 +149,12 @@ below, because it is the same code and the same review.
 - **Done when:** `/status`, `/model`, `/abort` exist exactly once.
 
 ### 3.2 Duplicated command implementations
-- **Status:** pending
-- **Where:** `src/chat/commands.ts`, `src/commands/command-surface.ts`, `src/chat/queries.ts`
-- **Issue:** `/status` exists twice (a card and a `text` shape), `/model` twice (`applyModelPick` and
-  the `form`), `/abort` twice (with different "was anything running" answers).
-- **Depends on:** 3.1.
-- **Done when:** each command has one implementation and a per-surface renderer.
+- **Status:** **wontfix — reduced, not removed, and the remainder is deliberate.** `/status` renders as
+  a card in Chat and as text elsewhere; `/model` is a dropdown there and a form here. What *was* a
+  divergence is fixed: the thinking level is decided by one rule (3.3), `/abort`'s "was anything
+  running" is one seam operation (`busy()`, 7.5), and the read models both layers use live in
+  `chat/queries.ts` and `command-surface.ts` rather than being re-derived. Merging the two files would
+  merge two presentation layers to save one function per command.
 
 ### 3.3 Two thinking-level policies
 - **Status:** done — one rule (`settings.ts`'s `clampToSupported`, which is pi's), one lookup
@@ -169,7 +173,10 @@ below, because it is the same code and the same review.
 ## 4. `/v1` is a second protocol with one consumer
 
 ### 4.1 `POST /v1/conversations/{id}/commands` does not exist
-- **Status:** pending
+- **Status:** **wontfix — no consumer.** The pane reaches commands through its own adapter (it cannot
+  call `/v1` at all: different origin, no token in the page), the CLI does not offer commands, and the
+  only remaining candidate — cron — needs *turns*, not commands (§9). Adding the route would be the
+  speculative operation this project's own rule forbids.
 - **Where:** `src/session-host/v1-routes.ts`
 - **Issue:** `command-surface-options.md` §8 records "one `commands` verb" as the decision; the route
   is absent, so a CLI or third surface cannot reach any command, while the web pane can.
@@ -261,7 +268,12 @@ below, because it is the same code and the same review.
 - **Done when:** the storage location has one owner.
 
 ### 6.2 `write()` takes `data: unknown` and `model: readonly unknown[]`
-- **Status:** pending
+- **Status:** **wontfix — the `unknown` is at the right layer.** `kind` and `data` are an adapter's own
+  vocabulary, and the host's job is to carry them: typing them would mean the seam knowing what a
+  notice is. What the two adapters build is already one shape (`chat/router.ts`'s `noticeEntry`), and
+  the host's insert is typed by pi-durable's own schema, where an `unknown` would fail to compile.
+  A typed `notice()` operation becomes worth it the day a third adapter writes one — see §9.5, which is
+  where that is decided.
 - **Where:** `src/session-host/api.ts` (`AdapterEntry`), `src/chat/router.ts` (`noticeEntry`),
   `src/durable/failure-notice.ts`
 - **Issue:** `kind` is a free string "namespaced by convention"; two adapters hand-build the same
@@ -305,7 +317,12 @@ below, because it is the same code and the same review.
 ## 7. Chat path: acking and dedupe
 
 ### 7.1 The handler acks after the whole turn
-- **Status:** pending
+- **Status:** pending — **deliberately not attempted in this pass.** It is the one change here that can
+  *lose messages* rather than show something wrong, and the docs' own note says why it needs care
+  first: "D2 is the one decision worth writing tests for before anything else moves". There is no
+  Pub/Sub test harness in this repo, so the redelivery case cannot be exercised — and acking on
+  acceptance means a message that then fails to become a turn is gone. The order is: a test that
+  drives the receiver with a duplicate `messageId` and a crash between ack and run, then the move.
 - **Where:** `src/chat/handler.ts`, `src/pubsub-receiver.ts`
 - **Issue:** `docs/session-host-api.md` D2 says "accepted means committed, and that is when Pub/Sub is
   acked", because "a four-hour tool hang held four messages unacked". The handler still awaits the
@@ -314,7 +331,11 @@ below, because it is the same code and the same review.
 - **Done when:** the ack happens after the submission is committed and before the answer exists.
 
 ### 7.2 `state.json` is a second dedupe mechanism
-- **Status:** pending
+- **Status:** pending — blocked on 7.1, and for a reason worth stating: while the ack still happens
+  *after* the turn, `processed[]` is not redundant. It is what stops a redelivery of a message whose
+  turn already ran from running it again, because `requestId` dedupe only helps once the submission is
+  committed — which is precisely what ack-on-acceptance would guarantee. Delete them together or not
+  at all.
 - **Where:** `src/state.ts` (`processed`, `MAX_PROCESSED_PER_SPACE`), `src/pubsub-receiver.ts`
 - **Issue:** a rolling 1,000-entry per-space list, rewritten to disk on every message, duplicating what
   `requestId` already dedupes durably in the store.
@@ -457,7 +478,11 @@ needs no server work. Cron is the third surface, and five changes is the answer.
   model to do so.
 
 ### 9.4 `prompt: "hidden"` on a submission
-- **Status:** pending
+- **Status:** pending — **the next step of §9, and the reason the rest of it is not done in this pass.**
+  It is the one item in §9 whose only consumer is the cron migration (§9.5–§9.8, which also needs the
+  CLI and a second repository). Per this project's own rule — a contract method with no consumer is
+  speculation — it should land with the job that calls it, not before. Nothing else in §9 is blocked on
+  it.
 - **Where:** `src/session-host/api.ts` (`SubmitRequest`), `src/durable/painter.ts:568` (`promptFor`),
   `src/session-host/link-contract.ts` (`submit`)
 - **Issue:** the painter quotes any prompt whose origin is not its own surface — `promptFor` resolves
@@ -472,7 +497,8 @@ needs no server work. Cron is the third surface, and five changes is the answer.
 - **Done when:** a hidden prompt is in the transcript and absent from the posted answer.
 
 ### 9.5 `POST /v1/conversations/{id}/notes` and an `app.post` entry kind
-- **Status:** pending
+- **Status:** pending — same reasoning as 9.4: the consumer is `/workspace/cron`, and the shape should
+  be decided against a job that uses it.
 - **Where:** `src/session-host/v1-routes.ts`, `src/session-host/api.ts` (`write`),
   `src/durable/painter.ts` (`consume`)
 - **Issue:** four cron jobs only need to *say* something — "your balance is USD 5.16", "nameservers
@@ -499,7 +525,8 @@ needs no server work. Cron is the third surface, and five changes is the answer.
 - **Done when:** a client can distinguish a failed turn from a slow one, and a shell can branch on it.
 
 ### 9.7 `bridge-cli`: `post`, `notify`, `ask`
-- **Status:** pending
+- **Status:** pending — the client half of 9.4/9.5, and worth doing *with* the first job it moves, so the
+  exit-code contract is written against a shell that depends on it.
 - **Where:** `src/scripts/bridge-cli.ts`
 - **Issue:** `say` requires `--conversation <id>`, so every caller must first find or create one. The
   three shapes cron asks for are not expressible: post text verbatim, post it only if a model agrees,
@@ -511,7 +538,9 @@ needs no server work. Cron is the third surface, and five changes is the answer.
 - **Done when:** `weekly-email-summary` is one `ask --address … --tools … --prompt-file …` call.
 
 ### 9.8 Delete `/notify`
-- **Status:** pending
+- **Status:** pending — last, by construction: it is only safe once every job has moved, which is the
+  step after 9.7. Until then `/notify` stays, and 9.1–9.3 and 9.6 make it a *working* endpoint rather
+  than the only one.
 - **Where:** `src/durable/notify.ts` (356 lines), `src/chat-host.ts`, `src/durable/host-routes.ts`
   (the tombstone), `src/config.ts` (`notifyToken`), `/workspace/cron/chat-notify-lib.mjs`
 - **Issue:** once 9.1–9.7 land, `/notify` is a second write path with its own vocabulary
@@ -524,18 +553,39 @@ needs no server work. Cron is the third surface, and five changes is the answer.
 
 ---
 
-## 10. Suggested landing order
+## 10. Where the work stopped
 
-1. **9.1** — painter honours `threadKey`. A correctness bug, small, and nothing cron-side can be tested
-   before it.
-2. **1.1 + 1.2 + 1.3** — paged `history`, cheap `has`/`busy` (largest win, no schema change)
-3. **2** — `withRef` in `link.ts`
-4. **3.1 → 3.2 → 3.3** — one command layer (largest correctness risk)
-5. **7.1 → 7.2 → 7.3** — ack on acceptance, dedupe on `requestId`
-6. **9.2, 9.3, 9.6** — tools on `AgentConfig`, create-by-address, submissions back. Small, and each has
-   a named consumer, which is this project's own bar for adding an operation.
-7. **9.4, 9.5, 9.7 → 9.8** — the cron migration, then delete `/notify`
-8. **5.1, 5.2, 5.3, 8.1, 8.2, 8.3, 8.4, 8.5, 6.4, 6.5** — the tidy pass
-9. **4.1–4.6** — the remaining `/v1` gaps (4.1's `commands` route is *not* on the cron path; the pane
-   already reaches commands through its own adapter)
-10. **6.1, 6.2, 6.3** — the remaining seam-shape decisions
+Everything that could be done **inside this repository, with a consumer already in it**, is done: 26
+items closed, 6 marked `wontfix` with the reason (three of those because checking the code showed the
+*finding* was wrong), 7 left open. `npm run test:all` is green at 826 tests, and every commit in the
+sequence typechecks on its own.
+
+What is open, and why:
+
+- **7.1 / 7.2 (ack on acceptance, drop `state.json`'s dedupe)** — the one pair that can *lose messages*
+  instead of showing something wrong, and the repository has no Pub/Sub harness to exercise a
+  redelivery. The order is written into the items: a test that drives a duplicate `messageId` and a
+  crash between ack and run, *then* the move. Deliberately not attempted blind.
+- **9.4 / 9.5 / 9.7 / 9.8 (the cron migration)** — the only consumer is `/workspace/cron`, a separate
+  repository, and the shapes involved (`prompt: "hidden"`, an `app.post` entry, three CLI verbs) should
+  be decided against the first job that uses them. This project's rule is that an operation is
+  published the day a running adapter calls it; publishing them early is the mistake the rule exists
+  to prevent. The server-side prerequisites — the painter's `threadKey`, `AgentConfig.tools`,
+  create-by-address, `GET /v1/submissions/{id}` — are **done**, so the cron work is unblocked.
+- **1.3 (round trips per history read)** — partly addressed; the two full-view reads underneath it are
+  gone. The remaining round trip cannot go without the wire shapes distinguishing "gone" from "empty",
+  which is a contract change with no current symptom.
+- **3.1 / 3.2 / 4.1 / 5.3 / 6.2 / 8.3** — `wontfix`. See each: three of them were the plan being wrong
+  rather than the code.
+
+## 11. If someone picks this up
+
+The order below assumes the remaining work is the cron migration plus the ack change, and it is the
+order the reasons above imply:
+
+1. **7.1, with its test first.** Everything else that touches dedupe depends on knowing whether it is
+   safe.
+2. **9.4 + 9.5 + 9.7 against `weekly-email-summary`**, because that job is dead *and* unsandboxed today
+   and it is the only one whose fix needs all three.
+3. **9.8 last**, once every job has moved and nothing holds a Chat credential.
+4. **1.3** when the wire shapes next change for another reason — that is when it is free.

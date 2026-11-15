@@ -1,15 +1,19 @@
 /**
- * Bridge commands on the durable harness: slash commands and card actions.
+ * Chat's command layer: slash commands and card actions, answered with cards.
  *
- * A near 1:1 replacement for `commands.ts`, with the router calls swapped for
- * `queries.ts` and the durable router. The Chat side is unchanged on purpose —
- * the same cards, the same action ids, the same notification behaviour — because
- * what the user sees should not change with the harness underneath.
+ * **This file is Chat's on purpose, and `commands/command-surface.ts` is the web pane's and the
+ * CLI's.** The four shapes that layer returns (`text`, `list`, `choice`, `form`) render a command as
+ * one question; Chat sometimes wants an *interaction* — a model picker whose dropdown re-renders the
+ * thinking levels from the newly chosen model, a `/secret` flow that is a sequence of cards and has no
+ * password field to type into. Flattening those into shapes would either grow the vocabulary into a
+ * rendering framework or lose the interaction, so the card layer stays.
  *
- * Two commands are new because the harness makes them cheap: `/new` (start a
- * fresh conversation on this thread) and `/compact` (summarise history now,
- * while the conversation keeps working). `/session` reports durable numbers
- * instead of a JSONL file's.
+ * What is *not* duplicated is the part where being wrong costs something. The store is the seam, the
+ * thinking-level rule is `settings.ts` (one rule, pi's, shared with the surface — it used to be
+ * reimplemented here, clamping downwards, and disagreeing with the engine), the model key is
+ * `shared/model-key.ts`, and the `/secret` allow-list is decided where identity is known.
+ *
+ * The read models live in `queries.ts` so this file holds policy and card construction and no storage.
  */
 import path from "node:path";
 

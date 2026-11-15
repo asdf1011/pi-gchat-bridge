@@ -3,16 +3,22 @@
  *
  * A command is answered with a **shape**, not with a card and not with a sentence: `text` for a
  * result, `list` for a set of things with something to click, `choice` for one question with a few
- * answers, `form` for several answers at once. A surface renders those four and needs to know
- * nothing about `/model` or `/quota` — which is the whole point, because there are three surfaces
- * (Chat cards, the web pane, the CLI) and eleven commands, and eleven times three is how a command
- * set rots the moment one of them is skipped.
+ * answers, `form` for several answers at once. A surface renders those four and needs to know nothing
+ * about `/model` or `/quota`, so adding a command touches this file and no surface at all.
+ *
+ * **This is the surface for the web pane and the CLI.** Chat has its own layer (`chat/commands.ts`)
+ * and keeps it, deliberately: a Chat reply is a *card* when a card says it better — a model picker with
+ * a dropdown that re-renders the thinking levels, a secret panel that is a sequence rather than one
+ * question — and squeezing those into four shapes would either grow the vocabulary into a rendering
+ * framework or lose the interaction. What the two layers share is the part where being wrong costs
+ * something: the store (through the seam), the thinking-level rule (`settings.ts`), the model key
+ * (`shared/model-key.ts`), and `/secret`'s gate. What they do not share is wording, and that is where
+ * a difference is a difference in taste rather than a bug.
  *
  * This module deliberately has no HTTP, no cards and no wording shared with any transport. It takes
- * the seam and plain input, and returns plain data. `commands.ts` still holds the Chat card
- * construction; the two will converge on this module as the bridge is extracted, one command at a
- * time. What it must never do is believe its caller: a value that arrived from a form is validated
- * here, not trusted because a surface offered it in a dropdown.
+ * the seam and plain input, and returns plain data. What it must never do is believe its caller: a
+ * value that arrived from a form is validated here, not trusted because a surface offered it in a
+ * dropdown.
  */
 import { clampToSupported } from "../settings.js";
 import { modelKey } from "../shared/model-key.js";
