@@ -16,7 +16,8 @@ import test from "node:test";
 
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { memoryLinkPair } from "@earendil-works/chord";
-import { Harness, MemoryStorage, createRegistry } from "@earendil-works/pi-durable";
+import { Harness, MemoryStorage, createRegistry, defineExtension, defineTool } from "@earendil-works/pi-durable";
+import { Type } from "typebox";
 import { createModels } from "@earendil-works/pi-ai/models";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
@@ -338,3 +339,67 @@ test("awaitSubmission crosses the link, and a settled turn comes back as data", 
   assert.equal(settled.status, "unanswered");
 });
 
+
+test("a tool allowlist rides the wire and reaches `configure`", async () => {
+  // The seam gained `tools` because a deployment needs a conversation that *cannot* run shell
+  // commands (a cron job reading an inbox). The alternative was the side-channel this replaces: a
+  // `tool_policy` entry written into a session file the durable engine never opens, which is why the
+  // weekly email summary has been dead since the cutover — and, had its import been fixed alone,
+  // would have run unsandboxed.
+  //
+  // The fixture registry has two tools, so the filter can actually be observed: with an empty one
+  // this test would pass whether or not `tools` reached `configure`.
+  const registry = createRegistry();
+  registry.install(
+    defineExtension({
+      name: "fixture-tools",
+      tools: ["gmail_search", "bash"].map((name) =>
+        defineTool({
+          name,
+          description: `fixture ${name}`,
+          parameters: Type.Object({}),
+          execute: async () => ({ content: [] }),
+        } as never),
+      ),
+    }),
+  );
+  const harness = await Harness.open(
+    new MemoryStorage(),
+    { models: createModels(), registry },
+    BACKGROUND_CONTEXT,
+  );
+  harness.resume();
+  const host = Object.create(BridgeHost.prototype) as BridgeHost;
+  Object.assign(host, {
+    harness,
+    context: BACKGROUND_CONTEXT,
+    modelRuntime: { getModel: () => undefined, getModels: () => [], getAllAvailable: async () => [] } as unknown as ModelRuntime,
+    cwd: "/tmp",
+    dbPath: ":memory:",
+    pending: new Map(),
+  });
+
+  const inProcess = inProcessSessionHost({ host, roots: [] });
+  const server = serveSessionHost(inProcess);
+  const [down, up] = memoryLinkPair();
+  server.accept(down, { principal: "owner", kind: "client" });
+  const linked = linkSessionHost({
+    host: createHost({ self: "client", name: "client", kind: "client", upstream: { link: up, principal: "server" } }),
+  });
+
+  // Through the link, so the schema is what carries it: a field missing from `AgentConfigSchema` would
+  // be dropped silently and the conversation would be unrestricted.
+  const created = await linked.getOrCreate("cron/inbox", {
+    model: { provider: "deepseek", modelId: "flash" },
+    tools: ["gmail_search"],
+  });
+
+  const conversation = await host.harness.conversation(created.conversationId as never, host.context);
+  assert.ok(conversation);
+  const agent = await conversation.agent(host.context);
+  assert.deepEqual(
+    agent.tools.map((tool) => tool.name),
+    ["gmail_search"],
+    "the allowlist narrows the offered tools, rather than being stored and ignored",
+  );
+});

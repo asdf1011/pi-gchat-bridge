@@ -133,6 +133,15 @@ export const AgentConfigSchema = Type.Object({
   model: Type.Object({ provider: Type.String(), modelId: Type.String() }),
   thinkingLevel: Type.Optional(Type.String()),
   cwd: Type.Optional(Type.String()),
+  /**
+   * Tool names this conversation may use; absent means every tool.
+   *
+   * Carried because a deployment needs conversations that *cannot* run shell commands — a cron job
+   * reading an inbox, a validator reading an email — and the alternative was a side-channel that
+   * bypassed the seam entirely (a `tool_policy` entry written into a session file the durable engine
+   * never opens).
+   */
+  tools: Type.Optional(Type.Array(Type.String())),
 });
 
 export const ContentPartSchema = Type.Union([

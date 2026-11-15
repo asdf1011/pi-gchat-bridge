@@ -393,7 +393,8 @@ needs no server work. Cron is the third surface, and five changes is the answer.
   overflow included.
 
 ### 9.2 `AgentConfig.tools`: the seam cannot express a sandboxed conversation
-- **Status:** pending
+- **Status:** done — `AgentConfig.tools` (names) → `CreateAgent` → `configure({ tools })`, with
+  `toolNames()` where the two shapes meet; carried on the wire by `AgentConfigSchema`.
 - **Where:** `src/session-host/api.ts` (`AgentConfig`), `src/session-host/inprocess.ts`
   (`create`, `getOrCreate`), `src/durable/host.ts` (`create`)
 - **Issue:** `AgentChange.tools` exists in pi-durable and `configure()` applies it — the host's own

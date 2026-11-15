@@ -120,6 +120,15 @@ export interface AgentConfig {
   thinkingLevel?: string;
   /** Working directory for tools. Defaults to the host's. */
   cwd?: string;
+  /**
+   * The tools this conversation may use, by name. Absent means every tool.
+   *
+   * A narrow set, not a wide one: the agent can be steered by what it reads, so a conversation whose
+   * job is to read one inbox should not be able to run `bash`. Today that policy needs a route from
+   * the adapter that asks for it to the engine that enforces it, and this is that route — the
+   * sandboxed conversation a cron job wants is `create(name, { tools: ["gmail_search"] })`.
+   */
+  tools?: readonly string[];
 }
 
 /**

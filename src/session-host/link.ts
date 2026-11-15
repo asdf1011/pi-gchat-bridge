@@ -290,7 +290,7 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
 
     getOrCreate: async (name: string, agent: AgentConfig) => {
       const ref = await session();
-      return host.root((ctx) => ref.getOrCreate({ name, agent }, ctx));
+      return host.root((ctx) => ref.getOrCreate({ name, agent: wireAgent(agent) }, ctx));
     },
 
     snapshot: async (conversationId: number) => {
@@ -483,7 +483,7 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
     },
     create: async (name: string, agent: AgentConfig) => {
       const root = await session();
-      return host.root((ctx) => root.create({ name, agent }, ctx));
+      return host.root((ctx) => root.create({ name, agent: wireAgent(agent) }, ctx));
     },
     bind: async (name: string, conversationId: number) => {
       const root = await session();
@@ -599,6 +599,27 @@ async function conversationRef(host: Host, conversationId: number, session: () =
   } catch {
     return undefined;
   }
+}
+
+/**
+ * The seam's `AgentConfig` as the wire shape wants it.
+ *
+ * The only difference is `readonly` versus mutable arrays, which TypeBox's `Static` produces as
+ * mutable. Normalising here rather than loosening the seam keeps "an adapter cannot mutate what it
+ * passed" true on the side that owns the value.
+ */
+function wireAgent(agent: AgentConfig): {
+  model: { provider: string; modelId: string };
+  thinkingLevel?: string;
+  cwd?: string;
+  tools?: string[];
+} {
+  return {
+    model: agent.model,
+    ...(agent.thinkingLevel === undefined ? {} : { thinkingLevel: agent.thinkingLevel }),
+    ...(agent.cwd === undefined ? {} : { cwd: agent.cwd }),
+    ...(agent.tools === undefined ? {} : { tools: [...agent.tools] }),
+  };
 }
 
 /** Resolve once, then reuse: the session object is a singleton per client host. */

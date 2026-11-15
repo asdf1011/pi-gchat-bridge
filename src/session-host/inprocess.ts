@@ -55,7 +55,7 @@ import { armSteerWatch } from "../durable/steer-watch.js";
 import { classifyModelFailure } from "../durable/model-failure.js";
 import { failureNotice } from "../durable/failure-notice.js";
 import { providerOf } from "../durable/model-failures-doc.js";
-import type { BridgeHost } from "../durable/host.js";
+import type { BridgeHost, CreateAgent } from "../durable/host.js";
 import { logger } from "../logger.js";
 import { checkProviderQuotas } from "../quota.js";
 import type { SecretStore } from "../secret-store.js";
@@ -173,6 +173,22 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
     createdAt: binding.createdAt,
     lastActivityAt: binding.updatedAt ?? binding.createdAt,
     ...(binding.preview === undefined ? {} : { preview: binding.preview }),
+  });
+
+  /**
+   * The seam's `AgentConfig` as the host's `AgentChange`.
+   *
+   * One place, because `create` and `getOrCreate` must build the *same* config or a conversation
+   * created by one and re-asked by the other would differ in ways nobody would think to check — the
+   * thinking-level cast in particular, which is the seam's `string` meeting pi's union.
+   */
+  const agentChange = (agent: AgentConfig): CreateAgent => ({
+    model: agent.model,
+    ...(agent.thinkingLevel === undefined
+      ? {}
+      : { thinkingLevel: agent.thinkingLevel as NonNullable<AgentChange["thinkingLevel"]> }),
+    ...(agent.cwd === undefined ? {} : { cwd: agent.cwd }),
+    ...(agent.tools === undefined ? {} : { tools: agent.tools }),
   });
 
   /**
@@ -306,13 +322,7 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
     },
 
     async getOrCreate(name: string, agent: AgentConfig): Promise<NamedConversation> {
-      const bound = await host.conversationFor(name, {
-        model: agent.model,
-        ...(agent.thinkingLevel === undefined
-          ? {}
-          : { thinkingLevel: agent.thinkingLevel as NonNullable<AgentChange["thinkingLevel"]> }),
-        ...(agent.cwd === undefined ? {} : { cwd: agent.cwd }),
-      });
+      const bound = await host.conversationFor(name, agentChange(agent));
       return named(name, bound.binding);
     },
 
@@ -571,13 +581,7 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
     },
 
     async create(name: string, agent: AgentConfig): Promise<NamedConversation> {
-      const binding = await host.createNamed(name, {
-        model: agent.model,
-        ...(agent.thinkingLevel === undefined
-          ? {}
-          : { thinkingLevel: agent.thinkingLevel as NonNullable<AgentChange["thinkingLevel"]> }),
-        ...(agent.cwd === undefined ? {} : { cwd: agent.cwd }),
-      });
+      const binding = await host.createNamed(name, agentChange(agent));
       return named(name, binding);
     },
 

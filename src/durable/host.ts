@@ -29,6 +29,7 @@ import {
   type ModelRef,
   type Settings,
   type TaskId,
+  type ToolRegistration,
 } from "@earendil-works/pi-durable";
 
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
@@ -88,6 +89,18 @@ import type { RegisteredSecret } from "./extensions/redact.js";
 import type { SecretStore } from "../secret-store.js";
 import { harnessSettings } from "./settings.js";
 import { acquireBridgeLock, type BridgeLock } from "./lock.js";
+
+/**
+ * What a conversation is created with: the seam's `AgentConfig`, with tool names rather than
+ * pi-durable's tool objects (see `toolNames`).
+ */
+export interface CreateAgent {
+  model: ModelRef;
+  thinkingLevel?: AgentState["thinkingLevel"];
+  cwd?: string;
+  /** Tool names this conversation may use. Absent means every tool. */
+  tools?: readonly string[];
+}
 
 export interface BridgeHostOptions {
   /** SQLite file. One process owns it (pi-durable has no cross-process locking). */
@@ -485,10 +498,7 @@ export class BridgeHost {
    * binding and the conversation are written in one commit, so a crash cannot
    * leave a conversation no thread points at (or a binding pointing nowhere).
    */
-  async conversationFor(
-    chatKey: string,
-    agent: AgentChange & { model: ModelRef },
-  ): Promise<BoundConversation> {
+  async conversationFor(chatKey: string, agent: CreateAgent): Promise<BoundConversation> {
     const existing = await this.bindingFor(chatKey);
     if (existing) {
       const conversation = await this.harness.conversation(
@@ -513,14 +523,18 @@ export class BridgeHost {
 
   private async create(
     chatKey: string,
-    agent: AgentChange & { model: ModelRef },
+    agent: CreateAgent,
   ): Promise<BoundConversation> {
     const cwd = agent.cwd ?? this.cwd;
     const binding = await this.harness.commit(async (tx) => {
       const record = await tx.createConversation({ ownership: { kind: "ownerless" } });
       // configure() in the same commit: the conversation has its agent from the
       // moment it exists, so the first request never runs with defaults.
-      await configure(tx, record.id, { ...agent, cwd });
+      await configure(tx, record.id, {
+        ...agent,
+        tools: agent.tools === undefined ? undefined : toolNames(agent.tools),
+        cwd,
+      });
       const doc = await tx.doc(BindingsDoc);
       const value: ConversationBinding = {
         conversationId: record.id as number,
@@ -645,7 +659,7 @@ export class BridgeHost {
   /** Start a name on a fresh conversation, leaving the old transcript alone. */
   async createNamed(
     chatKey: string,
-    agent: { model: ModelRef; thinkingLevel?: AgentState["thinkingLevel"]; cwd?: string },
+    agent: CreateAgent,
   ): Promise<ConversationBinding> {
     const bound = await this.create(chatKey, agent);
     return bound.binding;
@@ -1289,6 +1303,19 @@ export type VerdictEntry = {
 
 /** Notification verdicts, keyed by conversation name. */
 export type VerdictsValue = { byThreadKey: Record<string, VerdictEntry> };
+
+/**
+ * Tool names as the harness wants them, for `configure({ tools })`.
+ *
+ * `AgentChange.tools` is typed as tool *objects*, but pi-durable reads only `.name` from each
+ * (`names()` in its `agent.js`) and stores the names. The seam deals in names — an adapter cannot
+ * produce a tool object, which is the point of the boundary — so this is where the two shapes meet.
+ * The objects are never executed or inspected, which is what makes the cast honest rather than a
+ * claim that the rest of a tool is present.
+ */
+function toolNames(names: readonly string[]): readonly ToolRegistration[] {
+  return names.map((name) => ({ name }) as unknown as ToolRegistration);
+}
 
 const VerdictsDoc = defineDoc<VerdictsValue>({
   kind: "gchat.verdicts",
