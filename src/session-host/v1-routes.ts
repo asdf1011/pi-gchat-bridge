@@ -59,6 +59,14 @@ export interface V1Deps {
   activity?: {
     subscribe(listener: (event: { conversationId: number; kind: string; at: number }) => void): () => void;
   };
+  /**
+   * What a conversation created through this protocol starts as, when the caller names no agent.
+   *
+   * Host-side rather than in each caller: "the deployment's default model" is a fact about the box,
+   * and the versions of it that lived in adapters had to re-derive it from `settings.json` on every
+   * start. A caller that says nothing gets the default; a caller that cares says so.
+   */
+  defaultAgent?: { model: { provider: string; modelId: string }; thinkingLevel?: string };
 
 }
 
@@ -114,6 +122,75 @@ export async function handleV1(
         ...(conversation.name === undefined ? {} : { name: conversation.name }),
         ...(conversation.lastActivityAt === undefined ? {} : { lastActivityAt: conversation.lastActivityAt }),
       })),
+    });
+    return true;
+  }
+
+  // --- Start, or find, the conversation an address names ------------------------
+  //
+  // The catalogue *returns* an address and could not accept one, which left a caller holding the name
+  // it knows (`spaces/S/<threadKey>`) with no route to act on it: it had to page the whole catalogue
+  // and hope. A cron job knows exactly one thing, the thread it is about, and this is how it turns that
+  // into a conversation it can submit to.
+  //
+  // Idempotent by address, so a caller may always POST and then read `conversationId` off the answer:
+  // 201 when it was created, 200 when it already existed. That is what makes "get or create" safe to
+  // retry, which a job that runs on a schedule needs.
+  if (req.method === "POST" && url.pathname === "/v1/conversations") {
+    if (!authorized(deps, req.headers.authorization)) {
+      json(res, 401, { ok: false, error: "unauthorized" });
+      return true;
+    }
+    const body = await readJson(req, 64 * 1024);
+    if (body === null) {
+      json(res, 413, { ok: false, error: "request body too large or not JSON" });
+      return true;
+    }
+    const address = typeof (body as { address?: unknown }).address === "string"
+      ? (body as { address: string }).address.trim()
+      : "";
+    if (address === "") {
+      json(res, 400, { ok: false, error: "address is required" });
+      return true;
+    }
+    const requested = (body as { agent?: unknown }).agent;
+    const agent =
+      requested === undefined
+        ? deps.defaultAgent
+        : (requested as { model?: { provider?: unknown; modelId?: unknown }; thinkingLevel?: unknown; tools?: unknown });
+    if (agent === undefined || typeof agent.model?.provider !== "string" || typeof agent.model?.modelId !== "string") {
+      json(res, 400, {
+        ok: false,
+        error: deps.defaultAgent === undefined
+          ? "no default agent is configured, so agent.model is required"
+          : "agent.model.provider and agent.model.modelId are required",
+      });
+      return true;
+    }
+    const tools = Array.isArray((agent as { tools?: unknown }).tools)
+      ? ((agent as { tools: unknown[] }).tools.filter((name): name is string => typeof name === "string"))
+      : undefined;
+
+    const existing = await deps.seam.resolve(address);
+    if (existing) {
+      json(res, 200, {
+        conversationId: existing.conversationId,
+        address,
+        ...(existing.label === undefined ? {} : { name: existing.label }),
+      });
+      return true;
+    }
+    const created = await deps.seam.getOrCreate(address, {
+      model: { provider: agent.model.provider, modelId: agent.model.modelId },
+      ...(typeof (agent as { thinkingLevel?: unknown }).thinkingLevel === "string"
+        ? { thinkingLevel: (agent as { thinkingLevel: string }).thinkingLevel }
+        : {}),
+      ...(tools === undefined || tools.length === 0 ? {} : { tools }),
+    });
+    json(res, 201, {
+      conversationId: created.conversationId,
+      address,
+      ...(created.label === undefined ? {} : { name: created.label }),
     });
     return true;
   }

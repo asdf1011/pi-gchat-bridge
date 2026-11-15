@@ -407,7 +407,8 @@ needs no server work. Cron is the third surface, and five changes is the answer.
 - **Done when:** a conversation created with `tools: [...]` offers only those tools, across a restart.
 
 ### 9.3 `POST /v1/conversations` — get-or-create by `address`
-- **Status:** pending
+- **Status:** done — 201 when created, 200 when it existed; `agent` optional and defaulting to
+  `V1Deps.defaultAgent` (supplied by `hostRoutes`), so no caller re-derives the default model.
 - **Where:** `src/session-host/v1-routes.ts`, `src/durable/host-routes.ts` (`conversations()`)
 - **Issue:** `/v1` **returns** `address` (the adapter's name for a conversation) on every row of
   `GET /v1/conversations`, and cannot accept one. A cron job knows `spaces/S/<threadKey>` and not a

@@ -59,7 +59,12 @@ async function serve(
 ): Promise<{ baseUrl: string; close(): Promise<void> }> {
   const server = http.createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
-    void handleV1(req, res, url, { seam, conversations: async () => addresses, ...(token ? { token } : {}) });
+    void handleV1(req, res, url, {
+      seam,
+      conversations: async () => addresses,
+      defaultAgent: { model: { provider: "deepseek", modelId: "flash" } },
+      ...(token ? { token } : {}),
+    });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
@@ -612,6 +617,66 @@ test("an unanchored backward read is the newest page", async () => {
     ).json()) as { entries: { entryId: number }[]; atStart: boolean };
     assert.deepEqual(page.entries.map((entry) => entry.entryId), [7, 8, 9, 10], "the newest four, oldest first");
     assert.equal(page.atStart, false, "there is more before them");
+  } finally {
+    await served.close();
+  }
+});
+
+test("an address becomes a conversation, once", async () => {
+  // A cron job knows its thread and not a conversation id, and the catalogue could only *return* an
+  // address. POST is idempotent by address so a scheduled job can always POST and read the id back:
+  // 201 the first time, 200 after, and one conversation either way.
+  const created: { name: string; agent: unknown }[] = [];
+  const known = new Map<string, number>([["spaces/S/already", 12]]);
+  let next = 40;
+  const seam = {
+    resolve: async (name: string) => {
+      const id = known.get(name);
+      return id === undefined
+        ? undefined
+        : { conversationId: id, name, model: "deepseek/flash", createdAt: 1 };
+    },
+    getOrCreate: async (name: string, agent: unknown) => {
+      created.push({ name, agent });
+      const id = next++;
+      known.set(name, id);
+      return { conversationId: id, name, model: "deepseek/flash", createdAt: 1 };
+    },
+  } as unknown as SessionHost;
+  const served = await serve(seam);
+  const post = (body: unknown) =>
+    fetch(`${served.baseUrl}/v1/conversations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  try {
+    const fresh = await post({ address: "spaces/S/new" });
+    assert.equal(fresh.status, 201);
+    assert.equal(((await fresh.json()) as { conversationId: number }).conversationId, 40);
+
+    const again = await post({ address: "spaces/S/new" });
+    assert.equal(again.status, 200, "a retry finds what the first call made");
+    assert.equal(((await again.json()) as { conversationId: number }).conversationId, 40);
+
+    assert.deepEqual(
+      created.map((entry) => entry.name),
+      ["spaces/S/new"],
+      "one conversation, and the existing one is not re-created",
+    );
+    // The default agent comes from the deployment, so a caller that names none still gets one.
+    assert.deepEqual((created[0]?.agent as { model: unknown }).model, { provider: "deepseek", modelId: "flash" });
+
+    assert.equal((await post({ address: "  " })).status, 400);
+    assert.equal(
+      (await post({ address: "spaces/S/tools", agent: { model: { provider: "p", modelId: "m" }, tools: ["read"] } })).status,
+      201,
+    );
+    assert.deepEqual(
+      (created[1]?.agent as { tools?: string[] }).tools,
+      ["read"],
+      "a sandbox request reaches the seam rather than being dropped",
+    );
   } finally {
     await served.close();
   }

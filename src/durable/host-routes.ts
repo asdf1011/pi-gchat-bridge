@@ -59,6 +59,10 @@ export function hostRoutes(deps: HostRoutesDeps): RouteTable {
             lastActivityAt: binding.updatedAt ?? binding.createdAt,
           }));
         },
+        // The deployment's default model, so a caller that only knows an address can still start a
+        // conversation. `main.ts` already resolved this for the probes above; passing it is what
+        // removes the copy of `defaultSettings()` that was in `chat-host.ts`.
+        defaultAgent: { model: deps.model },
         ...(deps.config.webToken ? { token: deps.config.webToken } : {}),
       })
     ) {
