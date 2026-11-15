@@ -457,6 +457,14 @@ export interface SessionHost {
     options?: { signal?: AbortSignal },
   ): Promise<{ mimeType: string; data: string } | undefined>;
 
+  /**
+   * Whether this conversation exists.
+   *
+   * Separate from `snapshot` because the link needs it before every operation, and a boolean is a much
+   * smaller question than a projection of the whole conversation.
+   */
+  exists(conversationId: number, options?: { signal?: AbortSignal }): Promise<boolean>;
+
   /** What this conversation looks like right now. Small and bounded. */
   snapshot(conversationId: number, options?: { signal?: AbortSignal }): Promise<ProjectedView | undefined>;
 

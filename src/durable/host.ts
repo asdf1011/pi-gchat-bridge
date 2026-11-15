@@ -26,6 +26,8 @@ import {
   type AgentState,
   type Conversation,
   type ConversationId,
+  type Cursor,
+  type EntryRecord,
   type ModelRef,
   type Settings,
   type TaskId,
@@ -1137,12 +1139,29 @@ export class BridgeHost {
   }
 
   /**
+   * Whether a conversation exists, cheaply.
+   *
+   * The link asks this before *every* operation to keep a chord object from springing into existence
+   * for a conversation that is not there, and it used to answer with a full snapshot — a projection of
+   * the whole transcript to return a boolean. This is a lookup.
+   */
+  async exists(conversationId: number): Promise<boolean> {
+    return (await this.harness.conversation(conversationId as ConversationId, this.context)) !== undefined;
+  }
+
+  /**
    * A window of the transcript, newest last. See `SessionHost.history`.
    *
-   * `offset` counts back from the newest message, so "the page before this one"
-   * is `offset: limit`. Sliced with explicit indices rather than `slice(-offset)`
-   * because the message list is built first: computing the window against the
-   * length is what lets a short final page signal the beginning.
+   * `offset` counts back from the newest message, so "the page before this one" is `offset: limit`.
+   * Sliced with explicit indices rather than `slice(-offset)` because the message list is built first:
+   * computing the window against the length is what lets a short final page signal the beginning.
+   *
+   * **Read backwards from the newest entry, in `entries()` pages.** It used to open the conversation's
+   * whole view and slice the result, which made the cheapest question in the system expensive: an
+   * existence probe (`limit: 1`) and a poll over every bound conversation each marshalled the entire
+   * transcript — 1,085 entries and 2.8 MB for the largest conversation here, per call, per reader.
+   * The page walk stops as soon as it has `offset + limit` messages, so the cost is proportional to
+   * what was asked for rather than to how long the conversation is.
    */
   async history(conversationId: number, limit = 20, offset = 0): Promise<TranscriptMessage[] | undefined> {
     const conversation = await this.harness.conversation(
@@ -1150,59 +1169,28 @@ export class BridgeHost {
       this.context,
     );
     if (!conversation) return undefined;
-    const view = await conversation.viewState(this.context);
-    const entries = (view.value as { entries?: readonly unknown[] }).entries ?? [];
-    view.dispose();
 
     const origins = (await this.harness.snapshot(OriginsDoc, conversationId as ConversationId, this.context))
       ?.byEntry;
-    const messages: TranscriptMessage[] = [];
-    for (const raw of entries) {
-      const model = (raw as { model?: readonly { role?: string; content?: unknown }[] }).model ?? [];
-      for (const message of model) {
-        if (message.role !== "user" && message.role !== "assistant") continue;
-        const text = textOf(message);
-        const images = imagesOf(message);
-        // A message with only an image is still a message: dropping it would hide
-        // the photo someone sent from the transcript.
-        if (!text && images.length === 0) continue;
-        const at = (message as { timestamp?: unknown }).timestamp;
-        const entryId = (raw as { id?: unknown }).id;
-        // The surface that produced the entry, when it was stamped at submit time.
-        // Absent for anything older than the stamp, which readers must treat as
-        // unknown rather than as "mine".
-        const stamped =
-          typeof entryId === "number" ? origins?.[originKey(entryId)]?.origin : undefined;
-        // An assistant entry that also carries a tool call is a turn's running
-        // commentary — "Looking at that…", "Now I'll do a focused pass" — said on the
-        // way to a tool. It belongs to how the answer was reached, not to the
-        // conversation, and handing every one of them to the surface stacked a dozen
-        // separate pi bubbles down the page for a single long turn. Chat never showed
-        // this because the painter filters on its origin stamp; history is the one
-        // place every reading surface goes through, and it was not filtering at all.
-        //
-        // The turn's actual answer is the assistant entry with text and no tool call.
-        // That is a property of the entry, so it holds after a restart — unlike the
-        // origin stamp, which is session-scoped and absent for anything older than
-        // the last start. (Filtering on the stamp alone would have erased the answers
-        // of every conversation older than the running process.)
-        // Unless it carries an image: commentary that produced a picture is the only
-        // record of that picture, and hiding it would lose content rather than noise.
-        if (message.role === "assistant" && callsTool(message) && images.length === 0) continue;
-        messages.push({
-          role: message.role,
-          text: text.slice(0, TRANSCRIPT_MESSAGE_CHARS),
-          ...(typeof at === "number" && Number.isFinite(at) ? { at } : {}),
-          ...(typeof entryId === "number" ? { entryId } : {}),
-          ...(stamped === undefined ? {} : { origin: stamped }),
-          ...(images.length === 0 ? {} : { images }),
-        });
+    const want = Math.max(0, offset) + Math.max(0, limit);
+    // Newest first, which is the direction a window is counted in. `want === 0` (a caller asking for
+    // nothing) still costs one page, and answers with an empty list.
+    const collected: TranscriptMessage[] = [];
+    let cursor: Cursor | undefined;
+    do {
+      const page = await conversation.entries({}, Math.max(1, Math.min(50, want)), cursor, this.context);
+      for (const entry of page.items) {
+        for (const message of messagesOfEntry(entry, origins)) collected.push(message);
       }
-    }
-    // The window, counted back from the end. `end` is exclusive.
-    const end = Math.max(0, messages.length - Math.max(0, offset));
-    const start = Math.max(0, end - limit);
-    return messages.slice(start, end);
+      if (collected.length >= want || page.next === undefined) break;
+      cursor = page.next;
+    } while (collected.length <= TRANSCRIPT_WALK_MESSAGES);
+
+    // `collected` is newest-first; the seam's contract is oldest-last.
+    const ordered = collected.reverse();
+    const end = Math.max(0, ordered.length - Math.max(0, offset));
+    const from = Math.max(0, end - limit);
+    return ordered.slice(from, end);
   }
 
   /** One image's bytes from a transcript entry. */
@@ -1354,6 +1342,70 @@ export function firstWords(text: string, count = PREVIEW_WORDS): string {
 
 /** How much of one message the pane shows. Long tool output would swamp it. */
 const TRANSCRIPT_MESSAGE_CHARS = 4000;
+
+/**
+ * How many messages one `history()` call will walk before giving up.
+ *
+ * A page is counted in *messages*, and entries do not map to messages one-to-one — a request for the
+ * 51st message of a conversation has to look at every entry before it. This bounds that: past this
+ * many messages the answer is the window nearest the newest, which is what a surface shows anyway,
+ * rather than an unbounded scan whose size is set by the caller's offset.
+ */
+const TRANSCRIPT_WALK_MESSAGES = 400;
+
+/**
+ * The messages one entry contributes to a transcript, newest-first walking or not.
+ *
+ * Extracted from `history` because the paged read and the entry walk must agree about what a message
+ * *is*: a filter (commentary with tool calls is not the conversation), a truncation, and the origin
+ * stamp. Two copies would drift, and the symptom — an answer that appears in one surface's history and
+ * not another's — is the kind nobody looks for.
+ */
+function messagesOfEntry(
+  entry: EntryRecord,
+  origins: Record<string, { origin?: string }> | undefined,
+): TranscriptMessage[] {
+  const out: TranscriptMessage[] = [];
+  const model = entry.model ?? [];
+  for (const message of model) {
+    if (message.role !== "user" && message.role !== "assistant") continue;
+    const text = textOf(message);
+    const images = imagesOf(message);
+    // A message with only an image is still a message: dropping it would hide
+    // the photo someone sent from the transcript.
+    if (!text && images.length === 0) continue;
+    const at = (message as { timestamp?: unknown }).timestamp;
+    // The surface that produced the entry, when it was stamped at submit time.
+    // Absent for anything older than the stamp, which readers must treat as
+    // unknown rather than as "mine".
+    const stamped = origins?.[originKey(entry.id)]?.origin;
+    // An assistant entry that also carries a tool call is a turn's running
+    // commentary — "Looking at that…", "Now I'll do a focused pass" — said on the
+    // way to a tool. It belongs to how the answer was reached, not to the
+    // conversation, and handing every one of them to the surface stacked a dozen
+    // separate pi bubbles down the page for a single long turn. Chat never showed
+    // this because the painter filters on its origin stamp; history is the one
+    // place every reading surface goes through, and it was not filtering at all.
+    //
+    // The turn's actual answer is the assistant entry with text and no tool call.
+    // That is a property of the entry, so it holds after a restart — unlike the
+    // origin stamp, which is session-scoped and absent for anything older than
+    // the last start. (Filtering on the stamp alone would have erased the answers
+    // of every conversation older than the running process.)
+    // Unless it carries an image: commentary that produced a picture is the only
+    // record of that picture, and hiding it would lose content rather than noise.
+    if (message.role === "assistant" && callsTool(message) && images.length === 0) continue;
+    out.push({
+      role: message.role,
+      text: text.slice(0, TRANSCRIPT_MESSAGE_CHARS),
+      ...(typeof at === "number" && Number.isFinite(at) ? { at } : {}),
+      entryId: entry.id as unknown as number,
+      ...(stamped === undefined ? {} : { origin: stamped }),
+      ...(images.length === 0 ? {} : { images }),
+    });
+  }
+  return out;
+}
 
 /** The first user message and the assistant reply that followed it. */
 function firstTurnOf(entries: readonly unknown[]): { userText: string; assistantText: string } | undefined {

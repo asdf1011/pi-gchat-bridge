@@ -30,6 +30,9 @@ function turnHost() {
 
   const seam = {
     snapshot: async () => view(),
+    // Part of the seam since `has()` stopped answering with a whole projection: the link asks this
+    // before every operation, so a seam without it makes every conversation look absent.
+    exists: async () => true,
     attach: async (_id: number, onFrame: (view: unknown) => void) => {
       frames.add(onFrame);
       return {

@@ -99,6 +99,39 @@ test("offset pages backwards from the newest message, and the last page is short
   await host.harness.close(BACKGROUND_CONTEXT);
 });
 
+test("a window from deep in a long transcript still tiles exactly", async () => {
+  // `history` now walks entries backwards in pages instead of opening the whole view and slicing, so
+  // the risk it introduces is a page boundary: a window that straddles two `entries()` pages, or an
+  // offset larger than one page, is where a tiling bug would hide. 120 messages is 20 pages of six.
+  const host = await memoryHost();
+  const created = await host.createNamed("threads/L", { model: { provider: "p", modelId: "m" } });
+  for (let i = 0; i < 120; i++) {
+    await host.writeEntry(created.conversationId, {
+      kind: "app.notice",
+      data: {},
+      model: [{ role: i % 2 === 0 ? "user" : "assistant", content: "m" + i }],
+    });
+  }
+
+  assert.deepEqual((await host.history(created.conversationId, 3, 0))?.map((m) => m.text), ["m117", "m118", "m119"]);
+  // A window entirely inside the second page, counted from the newest.
+  assert.deepEqual((await host.history(created.conversationId, 3, 100))?.map((m) => m.text), ["m17", "m18", "m19"]);
+  // One that straddles a page boundary (page size here is `min(50, want)`).
+  const straddle = (await host.history(created.conversationId, 10, 45))?.map((m) => m.text);
+  assert.deepEqual(straddle, Array.from({ length: 10 }, (_, index) => "m" + (65 + index)));
+
+  // And every page still tiles the whole transcript, in order, with nothing skipped or repeated.
+  const paged: string[] = [];
+  for (let offset = 0; offset < 120; offset += 7) {
+    paged.unshift(...((await host.history(created.conversationId, 7, offset)) ?? []).map((m) => m.text));
+  }
+  assert.equal(paged.length, 120);
+  assert.deepEqual(paged.slice(0, 3), ["m0", "m1", "m2"]);
+  assert.deepEqual(paged.slice(-3), ["m117", "m118", "m119"]);
+  assert.deepEqual(paged, Array.from({ length: 120 }, (_, index) => "m" + index));
+  await host.harness.close(BACKGROUND_CONTEXT);
+});
+
 test("an image-only message is kept, with its entry id so the bytes can be fetched", async () => {
   const host = await memoryHost();
   const created = await host.createNamed("threads/C", { model: { provider: "p", modelId: "m" } });

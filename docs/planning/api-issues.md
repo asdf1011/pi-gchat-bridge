@@ -76,7 +76,9 @@ below, because it is the same code and the same review.
 
 
 ### 1.1 `history()` is not paged host-side
-- **Status:** pending
+- **Status:** done — walks `conversation.entries()` backwards and stops at `offset + limit` messages,
+  bounded by `TRANSCRIPT_WALK_MESSAGES`; `messagesOfEntry()` is the extracted per-entry rule so the
+  paged read and any future one cannot disagree.
 - **Where:** `src/durable/host.ts` (`history`), consumed by `src/session-host/v1-routes.ts`,
   `src/web/routes.ts`, `src/chat/painter.ts`, `src/durable/entries.ts`
 - **Issue:** `BridgeHost.history()` opens a full `viewState()` and slices in memory. Every
@@ -89,7 +91,8 @@ below, because it is the same code and the same review.
   a history read touches one page of entries rather than the whole view.
 
 ### 1.2 `has(id)` is a full snapshot
-- **Status:** pending
+- **Status:** done — `seam.exists()` / `BridgeHost.exists()` is a conversation lookup, and the link's
+  `has` uses it.
 - **Where:** `src/session-host/link.ts` (`has: async ({ conversation }) => (await seam.snapshot(conversation)) !== undefined`)
 - **Issue:** existence is answered by projecting the entire conversation. `conversationRef` calls it
   before **every** link operation (25 sites), so each web/CLI call pays two full views.
@@ -97,7 +100,10 @@ below, because it is the same code and the same review.
 - **Done when:** `has()` costs O(bindings), not O(transcript).
 
 ### 1.3 Three round trips per web history read
-- **Status:** pending
+- **Status:** pending — *partly* addressed: 1.1 and 1.2 removed the two full-view reads, so a history
+  request now costs a cheap `has`, a `get`, and one paged read. What remains is the round trip itself,
+  which cannot go without the wire shapes distinguishing "gone" from "empty" (only `has` can tell them
+  apart today). Deferred deliberately rather than half-done.
 - **Where:** `src/session-host/link.ts` (`conversationRef`), `src/web/routes.ts` history route
 - **Issue:** `list()` + `snapshot()` (via `has`) + `history()` per request; `web/routes.ts` also calls
   `seam.list().find(...)` for the conversation row.

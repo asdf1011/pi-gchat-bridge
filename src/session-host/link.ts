@@ -96,7 +96,7 @@ export function serveSessionHost(seam: SessionHost): Host {
     create: ({ name, agent }: { name: string; agent: AgentConfig }) => seam.create(name, agent),
     resolve: async ({ name }) => (await seam.resolve(name)) ?? null,
     getOrCreate: async ({ name, agent }) => seam.getOrCreate(name, agent),
-    has: async ({ conversation }) => (await seam.snapshot(conversation)) !== undefined,
+    has: async ({ conversation }) => seam.exists(conversation),
     models: () => seam.models() as Promise<ModelInfo[]>,
     setModel: ({ name, provider, modelId, thinkingLevel }) =>
       seam.setModel(name, {
@@ -293,6 +293,13 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
     getOrCreate: async (name: string, agent: AgentConfig) => {
       const ref = await session();
       return host.root((ctx) => ref.getOrCreate({ name, agent: wireAgent(agent) }, ctx));
+    },
+
+    exists: async (conversationId: number) => {
+      const root = await session();
+      // The session-level `has` rather than a conversation reference: the whole point is not to open
+      // one for a conversation that may not exist.
+      return Boolean(await host.root((ctx) => root.has({ conversation: conversationId }, ctx)));
     },
 
     snapshot: async (conversationId: number) => {

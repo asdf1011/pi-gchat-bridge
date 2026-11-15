@@ -342,6 +342,10 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
       return host.image(conversationId, entryId, index);
     },
 
+    async exists(conversationId: number): Promise<boolean> {
+      return host.exists(conversationId);
+    },
+
     async snapshot(conversationId: number): Promise<ProjectedView | undefined> {
       const conversation = await conversationOf(conversationId);
       if (!conversation) return undefined;
