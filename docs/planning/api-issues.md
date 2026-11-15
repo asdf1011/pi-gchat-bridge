@@ -177,14 +177,16 @@ below, because it is the same code and the same review.
   reversal and why.
 
 ### 4.2 `origin` defaults to the literal string `"unknown"`
-- **Status:** pending
+- **Status:** done — absent stays absent, which is what "unknown" already means to every reader.
 - **Where:** `src/session-host/v1-routes.ts` (`POST …/submissions`)
 - **Issue:** a surface name no painter declares. Absent must mean unknown, not a fake surface.
 - **Fix:** require `origin` (400 without it) or default at the caller (`cli`), not in the route.
 - **Done when:** no route invents an origin value.
 
 ### 4.3 `limit` on `/v1/poll` is silently capped at 50
-- **Status:** pending
+- **Status:** **wontfix — the premise was wrong.** `entriesAfter` walks up to `maxPages` (10) pages of
+  `pageSize`, so `limit=200` does return 200; only the *page* is 50. Checked against the code before
+  changing anything, which is the point of keeping this list checkable.
 - **Where:** `src/session-host/v1-routes.ts` (`read()` → `pageSize: Math.min(50, limit)`)
 - **Issue:** `limit=200` is accepted and returns at most 50 per conversation per poll; the documented
   maximum is 200.
@@ -192,13 +194,13 @@ below, because it is the same code and the same review.
 - **Done when:** what the route accepts is what it can return.
 
 ### 4.4 `/v1/conversations` is unpaged
-- **Status:** pending
+- **Status:** done — `limit`/`offset`/`more`, defaulting to everything so the CLI's catalogue read is unchanged.
 - **Where:** `src/session-host/v1-routes.ts`, `src/durable/host-routes.ts` (`conversations()`)
 - **Issue:** returns every binding (127 today) as one array, although `list()` has `limit`/`offset`.
 - **Done when:** the route pages, or the unpaged shape is a documented decision with a size bound.
 
 ### 4.5 `public, immutable` + `Vary: Authorization`
-- **Status:** pending
+- **Status:** done — `private`. A cache that drops `Vary` would merge two readers' answers; a private cache costs a hop.
 - **Where:** `src/session-host/v1-routes.ts` (`/v1/poll` cache headers)
 - **Issue:** one CDN that drops `Vary` merges two tokens' answers. The deployment is one tunnel and
   one reader.
@@ -206,7 +208,8 @@ below, because it is the same code and the same review.
 - **Done when:** no shared-cache directive is set on a response that can vary by credential.
 
 ### 4.6 `view.tools` is unbounded in a "bounded by construction" route
-- **Status:** pending
+- **Status:** **wontfix — the claim holds.** "Bounded by construction" is about growth with the *conversation*;
+  `tools` is one tool round, bounded by the turn. Truncating it would invent a limit nothing needs.
 - **Where:** `src/session-host/v1-routes.ts` (`GET /v1/conversations/{id}`), `ProjectedView.tools`
 - **Issue:** `arguments` is whatever the model passed (`Type.Unknown()`), passed through unfiltered.
 - **Done when:** the snapshot route bounds or truncates tool arguments, matching the doc's claim.

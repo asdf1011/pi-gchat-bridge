@@ -454,6 +454,11 @@ test("a poll that carried entries is cacheable, an empty one never is", async ()
     const withNews = await fetch(`${served.baseUrl}/v1/poll?since=10&wait=0&conversation=1`);
     assert.match(withNews.headers.get("cache-control") ?? "", /max-age=3600/);
     assert.match(withNews.headers.get("cache-control") ?? "", /immutable/);
+    assert.match(
+      withNews.headers.get("cache-control") ?? "",
+      /private/,
+      "not `public`: one cache that drops Vary would merge two readers' answers",
+    );
     assert.equal(withNews.headers.get("vary"), "Authorization", "scope is not in the URL, so it must vary");
 
     // Observation is live state, so it de-duplicates the cacheable answer above.
@@ -723,6 +728,54 @@ test("a submission that never settles returns its last state rather than hanging
     const body = (await (await fetch(`${served.baseUrl}/v1/submissions/9?wait=1`)).json()) as { status: string };
     assert.equal(body.status, "placed", "still running is an answer");
     assert.ok(Date.now() - started < 5_000, "the wait is a cap, not a promise");
+  } finally {
+    await served.close();
+  }
+});
+
+test("the catalogue pages, and says whether there is more", async () => {
+  // It returned every binding: 178 on this deployment and growing, which is cheap today and a shape
+  // nobody wants to inherit. `more` answers "is there another page" without a second count query.
+  const addresses = Array.from({ length: 5 }, (_, index) => ({
+    conversationId: index + 1,
+    address: `spaces/S/threads/${index + 1}`,
+  }));
+  const seam = { exists: async () => true } as unknown as SessionHost;
+  const served = await serve(seam, addresses);
+  try {
+    const first = (await (await fetch(`${served.baseUrl}/v1/conversations?limit=2`)).json()) as {
+      items: { conversationId: number }[];
+      more: boolean;
+      limit: number;
+      offset: number;
+    };
+    assert.deepEqual(first.items.map((item) => item.conversationId), [1, 2]);
+    assert.equal(first.more, true);
+    assert.equal(first.limit, 2);
+
+    const last = (await (await fetch(`${served.baseUrl}/v1/conversations?limit=2&offset=4`)).json()) as {
+      items: { conversationId: number }[];
+      more: boolean;
+    };
+    assert.deepEqual(last.items.map((item) => item.conversationId), [5]);
+    assert.equal(last.more, false, "a short final page says it is the final page");
+  } finally {
+    await served.close();
+  }
+});
+
+test("a submission with no origin is not stamped with an invented one", async () => {
+  // The route used to substitute the literal "unknown", which no painter declares — so an unstamped
+  // submission looked like a third surface rather than like an omission.
+  const { seam, submitted } = fakeSeam([]);
+  const served = await serve(seam);
+  try {
+    await fetch(`${served.baseUrl}/v1/conversations/1/submissions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "no origin here" }),
+    });
+    assert.deepEqual(submitted, [{ conversationId: 1, text: "no origin here" }], "absent stays absent");
   } finally {
     await served.close();
   }

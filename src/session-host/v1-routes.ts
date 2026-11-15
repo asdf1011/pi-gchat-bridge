@@ -115,8 +115,17 @@ export async function handleV1(
 
   if (req.method === "GET" && url.pathname === "/v1/conversations") {
     const items = await deps.conversations();
+    // Paged like every other list here: this returned every binding (178 on this deployment, and
+    // growing), which is a shape that is cheap now and a problem the day it is not. `more` says
+    // whether another page exists without a second count.
+    const limit = Math.min(200, Math.max(1, Number(url.searchParams.get("limit") ?? items.length) || items.length));
+    const offset = Math.max(0, Number(url.searchParams.get("offset") ?? 0) || 0);
+    const page = items.slice(offset, offset + limit);
     json(res, 200, {
-      items: items.map((conversation) => ({
+      offset,
+      limit,
+      more: offset + page.length < items.length,
+      items: page.map((conversation) => ({
         conversationId: conversation.conversationId,
         address: conversation.address,
         ...(conversation.name === undefined ? {} : { name: conversation.name }),
@@ -451,8 +460,12 @@ export async function handleV1(
             // Immutable prefix: safe to hold, and `must-revalidate` is deliberately absent so a
             // reader does not pay a round trip to be told what it already has. The TTL bounds how
             // stale a *short* prefix can get, which costs hops rather than correctness.
-            "Cache-Control": "public, max-age=3600, immutable",
-            "CDN-Cache-Control": "public, max-age=3600",
+            // `private`, not `public`: the answer is a prefix of the log and cannot go stale, but it is
+            // served on a deployment whose reads *can* become per-token, and `Vary: Authorization` is
+            // only honoured by caches that bother. One dropped `Vary` merges two readers' answers;
+            // a private cache costs a hop and cannot.
+            "Cache-Control": "private, max-age=3600, immutable",
+            "CDN-Cache-Control": "private, max-age=3600",
             "Surrogate-Control": "max-age=3600",
           }
         : {
@@ -499,12 +512,15 @@ export async function handleV1(
       json(res, 400, { ok: false, error: "text is required" });
       return true;
     }
-    const origin =
-      typeof (body as { origin?: unknown }).origin === "string" ? (body as { origin: string }).origin : "unknown";
+    // **Absent means unknown, and unknown is reported as absent.** This used to substitute the literal
+    // string "unknown", which no painter declares: a surface that omitted the field was stamped as a
+    // surface that does not exist, so a reader could never tell "another surface said this" from "the
+    // caller did not say". The seam already treats an absent origin as unknown, correctly.
+    const origin = typeof (body as { origin?: unknown }).origin === "string" ? (body as { origin: string }).origin : undefined;
     const result = await deps.seam.submit(Number(submissions[1]), {
       content: text,
       whenBusy: "steer",
-      origin,
+      ...(origin === undefined ? {} : { origin }),
       ...(typeof (body as { requestId?: unknown }).requestId === "string"
         ? { requestId: (body as { requestId: string }).requestId }
         : {}),
