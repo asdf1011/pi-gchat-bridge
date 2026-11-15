@@ -24,7 +24,6 @@ import { handleWebRequest } from "./web/routes.js";
 import { logger } from "./logger.js";
 import { linkSessionHost } from "./session-host/link.js";
 import { serveRoutes } from "./shared/serve-routes.js";
-import { repoRelativePath } from "./durable/artifact-vcs.js";
 
 const port = Number(process.env.BRIDGE_WEB_PORT ?? 0);
 const bind = process.env.BRIDGE_BIND ?? "127.0.0.1";
@@ -84,12 +83,19 @@ const server = http.createServer(
         ...(artifactsDir === ""
           ? {}
           : {
-              // The comment names its file the way the viewer does
-              // (`conversation/7/a.sh`); the repository is the conversation's directory, so strip
-              // that much before joining.
+              // The comment names its file the way the viewer does — a key relative to
+              // whichever artifact root holds it (`conversation/7/a.sh`, or
+              // `src/durable/host.ts` for a file in the checkout). The artifact directory is
+              // where the first kind is rooted; the second is left to the model to resolve,
+              // because guessing a cwd for it is how a message ends up naming the wrong file.
+              //
+              // A file already named absolutely is taken as it is.
               artifactPath: (conversationId: number, file: string): string => {
-                const dir = path.join(artifactsDir, "conversation", String(conversationId));
-                return path.join(dir, repoRelativePath(dir, file));
+                if (path.isAbsolute(file)) return file;
+                const scope = `conversation/${conversationId}/`;
+                return file.startsWith(scope)
+                  ? path.join(artifactsDir, file)
+                  : file;
               },
             }),
         who,

@@ -14,6 +14,13 @@
  * Deliberately narrow: it says *where*, not *whether*. Ephemeral logs and
  * one-off probes are still fine in `/tmp`; the rule is about files worth keeping
  * long enough to comment on.
+ *
+ * It also says to commit as you go. The end-of-turn commit exists to give a comment
+ * an anchor, not to decide what history looks like: a file written and discussed in
+ * the same message would otherwise have no revision until the turn ends, and the
+ * reviewer would have nothing to reply to. The `comment_reply` path commits before
+ * it writes (see `comment-tools.ts`), so the advice is enforced where it matters and
+ * this is the part the model can act on itself.
  */
 import { defineExtension, section } from "@earendil-works/pi-durable";
 
@@ -36,9 +43,13 @@ export function artifactGuidance(root: string) {
         const dir = conversationArtifactDir(root, input.conversationId as unknown as number);
         return [
           `Files you want the user to be able to review later belong in \`${dir}\`.`,
-          "That directory is a jj repository, committed once per turn, so the user can comment on a specific revision and line.",
+          "That directory is a jj repository. Commit as you go, so there is always a revision to talk about:",
+          "- `jj commit -m \"<what changed>\"` once a change is worth discussing — writing a file and then asking for a review of it happens inside one turn, and without a commit there are no lines to annotate.",
+          "- `jj describe -m \"<what changed>\"` instead, if you would rather keep working in the same change.",
+          "- Read-only `jj` is always fine: `status`, `diff`, `log`, `show`.",
+          "- Never push, and never discard work (`abandon`, `restore`, `op restore`).",
+          "- The harness also commits at the end of each turn, as a backstop for anything left in the working copy; replying to a review comment commits first, automatically.",
           "Write scratch scripts, generated data, and anything worth keeping there; keep throwaway logs and one-off probes in `/tmp`.",
-          "Do not run `jj` in that directory yourself — the harness commits it at the end of each turn.",
         ].join("\n");
       }),
     ],

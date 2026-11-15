@@ -18,6 +18,8 @@
  *   - `content` parts that name a file are read *here*, at submit time, so a
  *     multi-megabyte image never has to travel across the seam as bytes.
  */
+import path from "node:path";
+
 import type { Context } from "@earendil-works/chord";
 import type { AgentChange, ConversationId, UserInput } from "@earendil-works/pi-durable";
 
@@ -145,8 +147,82 @@ function toUserInput(content: MessageContent): UserInput {
   );
 }
 
+/**
+ * Find the file a key names, and say which repository to read it from.
+ *
+ * The artifact list is not a repository list, and a key is not a path. `artifactKeyFor`
+ * names a file relative to the *root that contains it*, and a root need not be a
+ * repository: with `PI_CWD=/workspace`, a file in
+ * `/workspace/pi-gchat-bridge/docs/planning/x.md` keys as
+ * `pi-gchat-bridge/docs/planning/x.md` — relative to `/workspace`, which is not a jj
+ * repo at all, while the repository that holds the file is `/workspace/pi-gchat-bridge`,
+ * one level down. Asking `/workspace` answers "not a repository"; asking the
+ * conversation's own repo answers "no such path". Both are true and both are useless,
+ * which is why the comment was refused with *not a file in any repository this
+ * conversation can see*.
+ *
+ * So the key is turned into absolute paths first — one per root it could have been
+ * written against — and each is resolved by asking jj. That order matters: `jj root` is
+ * what finds the repository, wherever the root happens to sit relative to it.
+ */
+async function locateInHistory(
+  key: string,
+  repo: string,
+  roots: readonly string[],
+): Promise<{ repo: string; path: string } | undefined> {
+  if (key === "") return undefined;
+  // Longest root first: a file under the artifacts directory is inside `PI_CWD` too,
+  // and only the longest root names it the way the viewer did. The conversation
+  // directory and its parent are roots in the same sense — the artifacts directory
+  // roots its own keys (`conversation/7/a.sh`) at `conversation/`.
+  const bases = [...roots].sort((a, b) => b.length - a.length);
+  bases.push(path.dirname(repo), repo);
+  const absolutes = path.isAbsolute(key) ? [key] : [...new Set(bases.map((base) => path.join(base, key)))];
+
+  // The conversation's own repository is tried first: it is the one the viewer meant
+  // when it holds the file, and every other answer is only interesting when it does not.
+  const tried = new Set<string>();
+  for (const dir of [repo, ...absolutes.map((absolute) => path.dirname(absolute))]) {
+    if (tried.has(path.resolve(dir))) continue;
+    tried.add(path.resolve(dir));
+    for (const absolute of absolutes) {
+      const relative = await repoRelativePath(dir, absolute).catch(() => undefined);
+      if (relative !== undefined) return { repo: dir, path: relative };
+    }
+  }
+  return undefined;
+}
+
 export function inProcessSessionHost(options: InProcessOptions): SessionHost {
   const { host } = options;
+
+  /**
+   * One conversation's artifacts, as the viewer lists them.
+   *
+   * A named function rather than a method body because two callers need the same
+   * answer: the seam's `artifacts()`, and the revision pins written after a turn —
+   * a pin's key has to be the key this list would have given, or the pin opens
+   * nothing. Deriving it twice from two root sets is how the two came to disagree.
+   */
+  async function listArtifacts(conversationId: number): Promise<readonly ArtifactFile[] | undefined> {
+    const conversation = await conversationOf(conversationId);
+    if (!conversation) return undefined;
+    const opened = await conversation.viewState(host.context);
+    try {
+      const entries = (opened.value as { entries?: unknown }).entries ?? [];
+      const derived = deriveArtifacts(entries as readonly ArtifactEntryLike[], options.roots);
+      // Plus whatever the filesystem saw change during this conversation's
+      // turns: `bash` edits leave no path in the transcript to derive from.
+      // `presentArtifacts`: a file the transcript names may since have been renamed
+      // or deleted, and offering it is offering a 404.
+      return presentArtifacts(
+        mergeArtifacts(derived, await host.observedFiles(conversationId), options.roots),
+      );
+    } finally {
+      opened.dispose();
+    }
+  }
+
   // 0 = no cap: whoever built the seam decided unbounded tool runs are their
   // problem. The bridge passes `config.steerWaitMs`, so the cap is on there.
   const steerWaitMs = options.steerWaitMs ?? 0;
@@ -235,11 +311,21 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
           // Recorded here rather than derived later: "which revision changed this
           // file" is a diff question, and the answer is free at this moment.
           const files = await changedFiles(repo, revision).catch(() => [] as string[]);
+          // The key has to be *the one the artifact origin serves*, or the pin opens
+          // nothing and a comment on the same text is refused for naming a file the
+          // origin does not have. The origin keys files from this conversation's own
+          // artifact list, so that list — not the root list, which is a different and
+          // narrower question — is what decides. A file the list does not know keeps
+          // its repository path: unservable, but named honestly.
+          const listed = await listArtifacts(conversationId).catch(() => undefined);
+          const keyOf = (file: string): string => {
+            const absolute = path.isAbsolute(file) ? file : path.resolve(repo, file);
+            const match = listed?.find((candidate: ArtifactFile) => candidate.path === absolute);
+            return match?.key ?? artifactKeyForPath(repo, undefined, file);
+          };
           const at = Date.now();
           const pins: ArtifactRevision[] = files.map((file) => ({
-            // Stored as the viewer's key, not the repository's path, so a
-            // "show me the version this conversation produced" link works.
-            file: artifactKeyForPath(repo, file),
+            file: keyOf(file),
             changeId: revision,
             submissionId,
             at,
@@ -391,24 +477,7 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
       };
     },
 
-    async artifacts(conversationId: number): Promise<readonly ArtifactFile[] | undefined> {
-      const conversation = await conversationOf(conversationId);
-      if (!conversation) return undefined;
-      const opened = await conversation.viewState(host.context);
-      try {
-        const entries = (opened.value as { entries?: unknown }).entries ?? [];
-        const derived = deriveArtifacts(entries as readonly ArtifactEntryLike[], options.roots);
-        // Plus whatever the filesystem saw change during this conversation's
-        // turns: `bash` edits leave no path in the transcript to derive from.
-        // `presentArtifacts`: a file the transcript names may since have been renamed
-        // or deleted, and offering it is offering a 404.
-        return presentArtifacts(
-          mergeArtifacts(derived, await host.observedFiles(conversationId), options.roots),
-        );
-      } finally {
-        opened.dispose();
-      }
-    },
+    artifacts: listArtifacts,
 
     async comments(conversationId: number): Promise<readonly CommentView[] | undefined> {
       const conversation = await conversationOf(conversationId);
@@ -420,10 +489,14 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
       // cannot be annotated (deleted, no repository) leaves its comments
       // orphaned rather than failing the request.
       const annotated = new Map<string, readonly AnnotatedLine[]>();
+      const located = new Map<string, { repo: string; path: string }>();
       if (repo !== undefined) {
         for (const file of new Set(stored.map((comment) => comment.file))) {
           try {
-            annotated.set(file, await annotate(repo, "@", repoRelativePath(repo, file)));
+            const found = await locateInHistory(file, repo, options.roots);
+            if (found === undefined) continue; // outside every repository: no position
+            located.set(file, found);
+            annotated.set(file, await annotate(found.repo, "@", found.path));
           } catch {
             // Orphaned: the anchor is still recorded, the position is not.
           }
@@ -433,6 +506,7 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
         repo,
         classifyComments(stored as readonly ArtifactComment[], annotated),
         stored,
+        located,
       );
       return classified.map((comment) => ({
         id: comment.id,
@@ -474,9 +548,18 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
       // The annotation is the authority: the viewer says which lines a person
       // dragged across, and this decides which revisions those lines came from
       // and what they said. A stale viewer gets a refusal.
+      //
+      // The file has to be *in* the repository for any of that to mean anything,
+      // and the key a viewer sends is not the path jj wants, so the conversion can
+      // refuse. That refusal is the comment being wrong, and it says so, rather
+      // than annotating a path that happens to exist somewhere else.
+      const found = await locateInHistory(input.file, repo, options.roots);
+      if (found === undefined) {
+        return { error: `cannot annotate ${input.file}: it is not a file in any repository this conversation can see` };
+      }
       let lines: AnnotatedLine[];
       try {
-        lines = await annotate(repo, "@", repoRelativePath(repo, input.file));
+        lines = await annotate(found.repo, "@", found.path);
       } catch (error) {
         return { error: `cannot annotate ${input.file}: ${(error as Error).message}` };
       }
@@ -770,7 +853,11 @@ async function reanchorAll(
   repo: string | undefined,
   classified: readonly ResolvedComment[],
   stored: readonly { id: string; file: string; atRevision?: string }[],
+  located: ReadonlyMap<string, { repo: string; path: string }>,
 ): Promise<(ResolvedComment & { successor?: CommentSuccessor })[]> {
+  // The conversation's repository is the anchor for "what revision is this conversation
+  // at". Which repository *holds* a given file may be another one, and `located` says
+  // so — but with no version control at all there is nothing to reanchor against.
   if (repo === undefined) return [...classified];
 
   const annotateAt = new Map<string, readonly AnnotatedLine[] | undefined>();
@@ -785,9 +872,14 @@ async function reanchorAll(
     annotate: async (revision: string, file: string) => {
       const key = `${revision}\u0000${file}`;
       if (!annotateAt.has(key)) {
+        // Where the file lives is decided once, when its comment is classified; a file
+        // that was never located has no annotation, which is what `undefined` means.
+        const where = located.get(file);
         annotateAt.set(
           key,
-          await annotate(repo, revision, repoRelativePath(repo, file)).catch(() => undefined),
+          where === undefined
+            ? undefined
+            : await annotate(where.repo, revision, where.path).catch(() => undefined),
         );
       }
       return annotateAt.get(key);

@@ -40,30 +40,207 @@ import path from "node:path";
 /** How long any one jj invocation may take. Generous; jj is fast or broken. */
 const JJ_TIMEOUT_MS = 15_000;
 
-/**
- * The path a key names *inside* the repository.
- *
- * Two spellings are in play and they are not the same string. An artifact key is
- * relative to the artifacts root (`conversation/7/a.sh`), because that is what the
- * viewer serves; the repository is the conversation's own directory, so `jj` wants
- * `a.sh`. Converting in one place keeps every call site honest — and the fallback
- * matters: a repository that happens to be rooted somewhere else must still work,
- * so a key already relative to the root is passed through unchanged.
- */
-export function repoRelativePath(repoDir: string, key: string): string {
-  const parts = repoDir.replace(/\/+$/, "").split("/");
-  const name = parts.pop() ?? "";
-  const parent = parts.pop() ?? "";
-  const prefix = `${parent}/${name}/`;
-  return key.startsWith(prefix) ? key.slice(prefix.length) : key;
+// The repository root is a question for jj, not arithmetic on the directory name.
+//
+// It used to be arithmetic: the key `conversation/7/a.sh` was turned into `a.sh` by
+// stripping the last two components of the repository directory. That is right only
+// when the repository is the conversation directory itself, and it bit the deployment
+// it was written for — the repository was `/workspace/pi-gchat-bridge`, because the
+// artifacts directory lives inside an existing checkout and `initArtifactRepo`
+// deliberately keeps the enclosing repo rather than nesting one. Stripping two
+// components then produced `pi-gchat-bridge/src/durable/docs/planning/…`, and every
+// comment failed with `No such path`.
+//
+// So `jj root` answers it, cached per directory: the answer changes only if the
+// artifact directory is given its own repository, which happens at most once per process.
+const roots = new Map<string, string | undefined>();
+
+/** The repository containing `dir`, as jj reports it; `undefined` outside any repo. */
+export async function repoRoot(dir: string): Promise<string | undefined> {
+  const key = path.resolve(dir);
+  if (roots.has(key)) return roots.get(key);
+  let root: string | undefined;
+  try {
+    root = (await jj(dir, ["root"])).trim() || undefined;
+  } catch {
+    root = undefined; // not a repository yet, or jj is not installed
+  }
+  roots.set(key, root);
+  return root;
 }
 
-/** The inverse of `repoRelativePath`: what the viewer calls a file the repo changed. */
-export function artifactKeyForPath(repoDir: string, filePath: string): string {
-  const parts = repoDir.replace(/\/+$/, "").split("/");
-  const name = parts.pop() ?? "";
-  const parent = parts.pop() ?? "";
-  return `${parent}/${name}/${filePath}`.replace(/^\/+/, "");
+/** Drop a cache entry, for when a directory may have become a repository. */
+export function forgetRepoRoot(dir: string): void {
+  roots.delete(path.resolve(dir));
+}
+
+/**
+ * The files the repository containing `repoDir` holds at the revision an annotate reads.
+ *
+ * This is what decides whether a key names a file at all. It has to be asked rather than
+ * guessed, because `jj file annotate` accepts any path the *working copy* resolves — a
+ * path outside the repository included — so a wrong answer from the caller is not an
+ * error jj will raise on its own.
+ *
+ * `jj file list` is the answer. Cached per (root, revision), so a display costs one call
+ * and a membership test per file.
+ */
+const manifests = new Map<string, ReadonlySet<string> | undefined>();
+
+async function filesInRepo(repoDir: string): Promise<ReadonlySet<string> | undefined> {
+  const root = await repoRoot(repoDir);
+  if (root === undefined) return undefined;
+  // The revision an annotate of `@` will read: the last non-empty commit, because
+  // the harness keeps `@` empty. Asking for the working copy's own file list would
+  // name files that no commit holds yet, and jj would then refuse the annotate.
+  //
+  // Keyed by revision, because it moves: a turn commits, and the next file the
+  // repository holds has to be found. Keyed by root alone, the first read of a
+  // repository — often the *initial* commit, with nothing in it but `.gitignore` —
+  // would answer every question for the rest of the process, and every later comment
+  // would be refused.
+  const revision = (await currentRevision(repoDir).catch(() => undefined)) ?? "@";
+  const key = `${root}\u0000${revision}`;
+  const cached = manifests.get(key);
+  if (cached !== undefined) return cached;
+  let files: ReadonlySet<string> | undefined;
+  try {
+    // `--ignore-working-copy` on purpose, and it is not a detail. Every *read* here
+    // carries it so a display request cannot snapshot a half-written file. Without
+    // it, this call snapshots the working copy as a side effect, and the annotate
+    // that follows — which does ignore the working copy — then looks at a commit
+    // that has no changes in it and answers `No such path` for every line the turn
+    // just wrote. The manifest has to describe the same revision the annotate will
+    // read, or the two disagree and every comment is refused.
+    files = new Set(
+      (await jj(root, ["file", "list", "--ignore-working-copy", "--no-pager", "-r", revision]))
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line !== ""),
+    );
+  } catch {
+    files = undefined; // a repository jj cannot list is one nothing can be proven in
+  }
+  manifests.set(key, files);
+  return files;
+}
+
+/**
+ * The path a key names *inside the repository*, or `undefined` when it does not name one.
+ *
+ * Three spellings are in play and they are not the same string:
+ *
+ *   - an artifact key is relative to whichever artifact root contains the file
+ *     (`docs/planning/x.md` for a file in the checkout, `conversation/7/a.sh` for one
+ *     under the artifacts directory), because that is what the viewer serves;
+ *   - a file the transcript named is absolute, because that is what the tool call said;
+ *   - the repository is wherever `jj root` points — not necessarily the conversation
+ *     directory, which normally sits *inside* a checkout rather than being a repo of
+ *     its own — so `jj` wants the path relative to that.
+ *
+ * Deriving it rather than assuming means a repository rooted anywhere works. The caller
+ * turns `undefined` into a refusal that says *why*, rather than handing jj a path it
+ * will reject with a message about a missing file.
+ */
+export async function repoRelativePath(repoDir: string, key: string): Promise<string | undefined> {
+  if (key === "") return undefined;
+  const files = await filesInRepo(repoDir);
+  if (files === undefined) return undefined;
+  const root = await repoRoot(repoDir);
+  if (root === undefined) return undefined;
+
+  // A relative key has two plausible readings and both are real: relative to whichever
+  // root the viewer keyed it against (`docs/planning/x.md`), or relative to the
+  // repository directory the caller was handed (`conversation/7/a.sh`). Neither can be
+  // chosen by shape — a key with no slash is ambiguous — so both are tried, and the
+  // manifest says which one the repository actually holds. An absolute key has one.
+  const readings = keyReadings(repoDir, root, key);
+  for (const absolute of readings) {
+    const relative = path.relative(root, absolute).split(path.sep).join("/");
+    if (relative !== "" && !relative.startsWith("../") && files.has(relative)) return relative;
+  }
+  // Last resort, and rarely needed: a key routed through a symlink, or through a
+  // spelling of the same directory that differs from the manifest's.
+  for (const absolute of readings) {
+    const resolved = await realPathOrUndefined(absolute);
+    if (resolved === undefined) continue;
+    const relative = path.relative(root, resolved).split(path.sep).join("/");
+    if (relative !== "" && !relative.startsWith("../") && files.has(relative)) return relative;
+  }
+  return undefined;
+}
+
+/**
+ * Every path a relative key could mean, most specific first.
+ *
+ * A key comes from one of two places and they disagree about the base: the viewer keys
+ * files against whichever artifact root holds them (`docs/planning/x.md`), and a
+ * caller holding the conversation directory names files the way the model does
+ * (`conversation/7/a.sh`, or bare `a.sh`). Neither can be picked by inspection, so all
+ * of them are offered and the manifest decides.
+ */
+function keyReadings(repoDir: string, root: string, key: string): string[] {
+  if (path.isAbsolute(key)) return [key];
+  const readings = [path.resolve(repoDir, key), path.resolve(root, key)];
+  // A viewer key is named against the *root* rather than against a directory:
+  // `conversation/7/a.sh` for a repository at `<root>/artifacts/conversation/7`, which is
+  // where the artifacts directory puts it. Neither reading above reaches that. Walking
+  // the directory's ancestors down to (and including) the repository root covers it, and
+  // stops there: a candidate above the repository cannot be a path inside it, so
+  // resolving one would only ever be a wrong answer waiting to match.
+  for (let up = path.resolve(repoDir); ; up = path.dirname(up)) {
+    readings.push(path.join(up, key));
+    if (up === root || path.dirname(up) === up) break;
+  }
+  // A key that begins with the directory it is being resolved against is the viewer's
+  // spelling of a file beside the caller: `conversation/7/a.sh` from
+  // `…/conversation/7`. Suffix matching, not arithmetic on a fixed number of
+  // components — the whole bug this replaces was assuming there were two.
+  const segments = path.resolve(repoDir).split(path.sep);
+  for (let index = segments.length - 1; index > 0; index -= 1) {
+    const suffix = segments.slice(index).join("/") + "/";
+    if (key.startsWith(suffix)) readings.push(path.resolve(repoDir, key.slice(suffix.length)));
+  }
+  return readings;
+}
+
+/** `realpath`, or `undefined` for a file that is not there. */
+async function realPathOrUndefined(target: string): Promise<string | undefined> {
+  try {
+    return await fsp.realpath(target);
+  } catch {
+    return undefined; // deleted since the transcript named it
+  }
+}
+
+/**
+ * What the viewer calls a file the repository changed: a key relative to its own root.
+ *
+ * **The key is relative to the root that holds the file, and to no other.** Picking a
+ * root from a list looks equivalent and is not: the list here is the *serving*
+ * allow-list, which in this deployment is `PI_CWD` (`/workspace`) plus the artifacts
+ * directory, while the file that was committed lives under
+ * `/workspace/pi-gchat-bridge`. The longest-root rule then yields
+ * `pi-gchat-bridge/docs/planning/…` — a key the artifact origin never serves, because
+ * the origin derives its own list from a *different* root set (`PI_CWD` is the agent's
+ * working directory for that computation). The pin becomes unopenable, and — worse —
+ * a comment written against the same text is refused, because the two sides disagree
+ * about what the file is called.
+ *
+ * The root the file was *derived* under is the only correct answer, so it is passed in
+ * rather than guessed. `journal` here is `ArtifactFile.root`, carried through from
+ * `artifactKeyFor` when the file was listed, which is the same answer the origin and
+ * the pane already agree on.
+ *
+ * A file with no known root keeps its repository path. It is unservable today, but it
+ * names something real, and a later root change can find it.
+ */
+export function artifactKeyForPath(repoDir: string, rootOf: string | undefined, filePath: string): string {
+  const absolute = path.isAbsolute(filePath) ? filePath : path.resolve(repoDir, filePath);
+  if (rootOf === undefined) return filePath;
+  const relative = path.relative(rootOf, absolute).split(path.sep).join("/");
+  if (relative === "" || relative.startsWith("../")) return filePath;
+  return relative;
 }
 
 /**
@@ -256,6 +433,9 @@ export async function initArtifactRepo(dir: string): Promise<boolean> {
 
   try {
     await jj(dir, ["git", "init", "--colocate"]);
+    // The directory's root just changed: it was "the enclosing repo" a moment ago
+    // (or nothing), and paths resolved against the stale answer would be wrong.
+    forgetRepoRoot(dir);
     // Fold the `.gitignore` into an initial revision immediately, so it is not
     // attributed to the first turn that writes a file. Without this, turn 1
     // always looks like it changed something the model never touched.
@@ -289,8 +469,14 @@ export async function commitTurn(
 ): Promise<string | undefined> {
   let finished = false;
   try {
-    // `--ignore-working-copy` on the reads keeps a display from creating an op,
-    // but the write path needs the snapshot, so it is deliberately absent here.
+    // The write path needs the snapshot, so `--ignore-working-copy` is deliberately
+    // absent here — and that is the *only* thing that puts the turn's files into a
+    // commit. It has to happen in this one call. Once `@` is empty, any other
+    // workspace-repairing command (an earlier `jj st`, a `jj file list`) snapshots the
+    // new files into `@`, and this `jj commit` then finds "no changes", makes no
+    // revision, and the turn's files stay in the working copy — uncommitted, and
+    // unpinnable, which is a turn's artifacts quietly missing from history rather than
+    // wrongly annotated. One call, one snapshot, one commit.
     //
     // Cleanliness is read from the entry lines only. Testing the header as well
     // was a bug: `jj st` prints "Working copy changes:" even when the only entry
@@ -349,6 +535,19 @@ export async function annotate(
   revision: string,
   file: string,
 ): Promise<AnnotatedLine[]> {
+  // **`jj` resolves a fileset against the working directory, not the repository
+  // root.** `jj file annotate -r @ docs/plan.md`, run with the cwd at
+  // `<repo>/artifacts/conversation/7`, is `No such path` even though the repository
+  // holds `docs/plan.md` — and `jj file list` from that same directory prints
+  // `../../../docs/plan.md`, which is the same fact from the other side. That is why a
+  // repository that is not the conversation directory broke every comment: the path
+  // was right for the repository and wrong for the call.
+  //
+  // `repoRelativePath` answers in the repository's terms, because that is what the
+  // manifest and the anchor model are about. Rebasing it onto the cwd here, at the one
+  // place a path is handed to jj, keeps the two spellings apart.
+  const root = (await repoRoot(dir)) ?? path.resolve(dir);
+  const cwdRelative = path.relative(path.resolve(dir), path.resolve(root, file));
   // A tab separator, because jj's template language supports `\t` but not
   // `\u0001` (it fails to parse). File content can contain a tab, so the split is
   // bounded to the first three fields and the remainder is content.
@@ -363,7 +562,7 @@ export async function annotate(
     revision,
     "-T",
     'commit.change_id().short() ++ "\t" ++ original_line_number ++ "\t" ++ line_number ++ "\t" ++ content',
-    file,
+    cwdRelative,
   ]);
 
   const lines: AnnotatedLine[] = [];

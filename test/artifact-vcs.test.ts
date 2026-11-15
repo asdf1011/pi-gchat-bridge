@@ -17,12 +17,15 @@ import { after, test } from "node:test";
 
 import {
   annotate,
+  artifactKeyForPath,
   changedFiles,
   classifyComments,
   commitTurn,
   currentRevision,
+  forgetRepoRoot,
   initArtifactRepo,
   orphanedComments,
+  repoRelativePath,
   revisionDiff,
   showFile,
   type ArtifactComment,
@@ -71,7 +74,7 @@ async function repo(name: string): Promise<string> {
 }
 
 function write(dir: string, file: string, body: string): void {
-  fs.mkdirSync(dir, { recursive: true });
+  fs.mkdirSync(path.dirname(path.join(dir, file)), { recursive: true });
   fs.writeFileSync(path.join(dir, file), body, "utf8");
 }
 
@@ -395,4 +398,85 @@ test("the file at a revision is the file that revision held", { skip }, async ()
   assert.equal(await showFile(dir, second, "a.sh"), "echo one\necho two\n");
   // Which is the point: a comment can be shown against the text it was written on.
   assert.deepEqual(await changedFiles(dir, second), ["a.sh"]);
+});
+
+// --- Where the repository actually is -------------------------------------------
+//
+// The deployment this was written for keeps its artifact directory *inside* a
+// checkout: `BRIDGE_ARTIFACTS_DIR=<checkout>/artifacts`, and `initArtifactRepo`
+// deliberately keeps the enclosing repository rather than nesting one. So the
+// conversation directory `/…/checkout/artifacts/conversation/7` belongs to a
+// repository rooted three components up, and every path conversion that assumed
+// "the repo is the conversation directory" produced `checkout/src/durable/docs/…`
+// — a comment refused with `No such path`, which reads like a missing file rather
+// than a broken path. These are the cases that used to fail.
+
+test("a repository swallowed by a checkout still names its files the jj way", { skip }, async () => {
+  // `/…/checkout`, and the conversation directory inside it.
+  const checkout = freshDir("checkout");
+  fs.mkdirSync(checkout, { recursive: true });
+  await initArtifactRepo(checkout);
+
+  // A key relative to the checkout's root, which is how the viewer names a file the
+  // model edited in the working tree.
+  write(checkout, "docs/planning/plan.md", "# Plan\n");
+  assert.ok(await commitTurn(checkout, 90));
+  forgetRepoRoot(checkout);
+  assert.equal(await repoRelativePath(checkout, "docs/planning/plan.md"), "docs/planning/plan.md");
+  assert.equal((await annotate(checkout, "@", "docs/planning/plan.md")).length, 1);
+
+  // A key relative to the artifacts root, from a directory inside the repo: the
+  // repository path is still relative to the repository, not to the key's root.
+  //
+  // Read from the repository root, which is the only directory whose `jj file
+  // annotate <path>` agrees with the repository's own view of its paths: jj resolves a
+  // fileset against the *working directory*, so from inside `artifacts/conversation/7`
+  // even `artifacts/conversation/7/a.sh` is `No such path`. `annotate` is handed a path
+  // and runs jj where the file is, so it is the case that matters in practice.
+  const conversation = path.join(checkout, "artifacts/conversation/7");
+  write(checkout, "artifacts/conversation/7/a.sh", "echo hi\n");
+  assert.ok(await commitTurn(checkout, 91));
+  forgetRepoRoot(checkout);
+  forgetRepoRoot(conversation);
+  assert.equal(await repoRelativePath(checkout, "artifacts/conversation/7/a.sh"), "artifacts/conversation/7/a.sh");
+  // And from the conversation directory, where the manifest was first read *before*
+  // this turn committed — the case where a stale answer would say "not in the repo".
+  assert.equal(await repoRelativePath(conversation, "conversation/7/a.sh"), "artifacts/conversation/7/a.sh");
+  // And the file the turn committed can be annotated, which is the whole point.
+  assert.equal((await annotate(checkout, "@", "artifacts/conversation/7/a.sh")).length, 1);
+  assert.ok(conversation.includes("conversation/7"));
+});
+
+test("a path the repository does not hold is refused, not sent to jj", { skip }, async () => {
+  const dir = await repo("offrepo");
+  write(dir, "a.sh", "echo one\n");
+  assert.ok(await commitTurn(dir, 92));
+
+  // The shape that used to reach jj and come back as `No such path`.
+  assert.equal(await repoRelativePath(dir, "src/durable/docs/planning/plan.md"), undefined);
+  // A key whose repository has nothing to do with this one, too.
+  assert.equal(await repoRelativePath(dir, "conversation/7/elsewhere.md"), undefined);
+  // And an empty key names no file at all.
+  assert.equal(await repoRelativePath(dir, ""), undefined);
+});
+
+test("a file's key is recovered from the root that contains it", { skip }, async () => {
+  const checkout = freshDir("keys");
+  fs.mkdirSync(checkout, { recursive: true });
+  await initArtifactRepo(checkout);
+  // The key is relative to the root the file was *derived* under, and to no other.
+  // Picking a root from a list is the bug this replaced: the serving list is
+  // `PI_CWD` plus the artifacts directory, while `/workspace/pi-gchat-bridge/docs/…`
+  // lives under `PI_CWD` and would key as `pi-gchat-bridge/docs/…` — a key the
+  // artifact origin never serves, so the pin opens nothing and a comment on the same
+  // text is refused.
+  assert.equal(
+    artifactKeyForPath(checkout, path.join(checkout, "artifacts"), "artifacts/conversation/7/a.sh"),
+    "conversation/7/a.sh",
+  );
+  assert.equal(artifactKeyForPath(checkout, checkout, "docs/planning/plan.md"), "docs/planning/plan.md");
+  // A file outside the root it was given keeps its own path: unservable, and named so.
+  assert.equal(artifactKeyForPath(checkout, checkout, "/elsewhere/x.md"), "/elsewhere/x.md");
+  // No root at all is the same honest answer.
+  assert.equal(artifactKeyForPath(checkout, undefined, "docs/planning/plan.md"), "docs/planning/plan.md");
 });
