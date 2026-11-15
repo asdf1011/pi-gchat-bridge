@@ -807,6 +807,23 @@ export class BridgeHost {
   }
 
   /**
+   * Whether a run owns this conversation right now.
+   *
+   * The same fact `projectView` reports as `busy` — `pi.live.run` exists — read from the live document
+   * rather than by projecting the whole conversation. The restart gate asks this about every recently
+   * used conversation, and a projection per conversation to learn one boolean is how a cheap question
+   * becomes the reason a restart has to wait.
+   */
+  async busy(conversationId: number): Promise<boolean> {
+    const live = await this.harness.snapshot(
+      LiveDoc,
+      conversationId as ConversationId,
+      this.context,
+    );
+    return live?.run !== undefined;
+  }
+
+  /**
    * Tool tasks of a conversation's current tool round that are still running.
    *
    * Read from `pi.live`, which is the round's presentation: a slot with a `taskId`

@@ -467,6 +467,15 @@ export interface SessionHost {
    */
   exists(conversationId: number, options?: { signal?: AbortSignal }): Promise<boolean>;
 
+  /**
+   * Whether a turn is running in this conversation.
+   *
+   * A boolean, not a `snapshot().busy`: three callers ask only this — the restart gate, `/abort`'s
+   * "was anything running", and the gate that decides whether a command should interrupt — and a
+   * projection each time was the wrong price for the answer.
+   */
+  busy(conversationId: number, options?: { signal?: AbortSignal }): Promise<boolean>;
+
   /** What this conversation looks like right now. Small and bounded. */
   snapshot(conversationId: number, options?: { signal?: AbortSignal }): Promise<ProjectedView | undefined>;
 

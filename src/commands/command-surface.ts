@@ -479,7 +479,7 @@ export async function runCommand(
   if (command === "/abort") {
     // The view is the authority on "is something running" — `abort` is idempotent and reports only
     // whether the conversation exists, so asking it would have said "Stopped." to an idle thread.
-    const running = (await seam.snapshot(subject.conversationId))?.busy === true;
+    const running = await seam.busy(subject.conversationId);
     if (!running) return text("Nothing was running.");
     await seam.abort(subject.conversationId);
     return text("Stopped.");

@@ -336,7 +336,8 @@ below, because it is the same code and the same review.
 - **Done when:** the ordering matches the documented guarantee.
 
 ### 7.5 `/idle` snapshots every recent conversation
-- **Status:** pending
+- **Status:** done — `seam.busy()` (one read of `pi.live`), used by the restart gate, `/abort` and the
+  interrupt check. The `snapshot().busy` reads are gone from all three.
 - **Where:** `src/durable/host-routes.ts`
 - **Issue:** a `snapshot` per conversation touched in 24 h to read one boolean (`busy`), each building
   a full projection.

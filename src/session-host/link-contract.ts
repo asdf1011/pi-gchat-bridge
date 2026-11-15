@@ -309,6 +309,13 @@ export const ConversationContract = remote("pi-bridge.conversation", {
          * reader loses an afternoon. Null rather than absent: chord has no `undefined`.
          */
         settings: method(Type.Object({}), Type.Union([ConversationStateSchema, Type.Null()])),
+        /**
+         * Is a turn running here, right now?
+         *
+         * A boolean of its own rather than a field of `settings`: three callers ask only this, and
+         * `settings` opens the conversation to answer questions they did not ask.
+         */
+        busy: method(Type.Object({}), Type.Boolean()),
         artifacts: method(Type.Object({}), Type.Array(ArtifactSchema)),
         history: method(
           Type.Object({ limit: Type.Number(), offset: Type.Number() }),

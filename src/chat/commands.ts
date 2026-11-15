@@ -833,5 +833,5 @@ async function isBusy(seam: SessionHost, chatKey: string): Promise<boolean> {
   // which is why this resolves first instead of asking for a conversation.
   const named = await seam.resolve(chatKey);
   if (!named) return false;
-  return (await seam.snapshot(named.conversationId))?.busy ?? false;
+  return seam.busy(named.conversationId);
 }

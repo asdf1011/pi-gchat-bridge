@@ -81,7 +81,8 @@ export function hostRoutes(deps: HostRoutesDeps): RouteTable {
     // Exists for the restart gate. "No child processes" is not the same question: an agent thinking
     // between tool calls looks idle for a minute at a time, so a gate built on process silence fires
     // mid-turn and kills the work it was trying to protect. Only conversations touched recently are
-    // asked, because a dormant thread cannot be mid-turn and each answer costs a view snapshot.
+    // asked: a dormant thread cannot be mid-turn, and each answer is now one read of that
+    // conversation's live document rather than a projection of the whole transcript.
     if (req.method === "GET" && url.pathname === "/idle") {
       const busy: number[] = [];
       const since = Date.now() - 24 * 60 * 60 * 1000;
@@ -89,7 +90,7 @@ export function hostRoutes(deps: HostRoutesDeps): RouteTable {
         const bindings = await deps.host.bindings();
         for (const binding of Object.values(bindings.byChatKey)) {
           if ((binding.updatedAt ?? binding.createdAt) < since) continue;
-          if ((await deps.seam.snapshot(binding.conversationId))?.busy === true) {
+          if (await deps.seam.busy(binding.conversationId)) {
             busy.push(binding.conversationId);
           }
         }

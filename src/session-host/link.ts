@@ -155,6 +155,7 @@ export function serveSessionHost(seam: SessionHost): Host {
       // `state` is the word for the replicated view above, so the seam's `state` travels as
       // `settings`: one word for two things inside one object is how a reader loses an afternoon.
       settings: async () => (await seam.state(conversation)) ?? null,
+      busy: () => seam.busy(conversation),
       compact: async ({ instructions }: { instructions?: string }) => {
         await seam.compact(conversation, instructions);
         return null;
@@ -399,6 +400,10 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
     commentThread: (conversationId: number, commentId: string) =>
       withRef(host, session, conversationId, undefined, async (ref) =>
         (await host.root((ctx) => ref.commentThread({ commentId }, ctx))) as readonly CommentReply[],
+      ),
+    busy: (conversationId: number) =>
+      withRef(host, session, conversationId, false, async (ref) =>
+        Boolean(await host.root((ctx) => ref.busy({}, ctx))),
       ),
     state: (conversationId: number) =>
       withRef(host, session, conversationId, undefined, async (ref) =>
