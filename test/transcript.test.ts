@@ -633,7 +633,7 @@ test("proseSnippet brackets the terms and centres on the first match", () => {
   const snippet = proseSnippet(text, "ofxsync");
   assert.match(snippet, /\[ofxsync\]/);
   assert.ok(snippet.startsWith("…"), "a match in the middle is not shown from the start");
-  assert.ok(snippet.length < 240, snippet.length);
+  assert.ok(snippet.length < 240, `snippet was ${snippet.length} chars`);
   // Short words are not bracketed: splitting a phrase on whitespace would mark every `a`.
   // Case-insensitively, and the text keeps its own casing... except that the replacement
   // writes the *matched substring* back, so `Testing` against `testing` yields `[testing]`.

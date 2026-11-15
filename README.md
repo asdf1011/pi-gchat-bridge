@@ -445,6 +445,22 @@ need different responses from a person.
 The one deadline the bridge still owns is a steer: `BRIDGE_STEER_WAIT_MS` (10s) bounds how long a
 message can wait behind a tool that never returns before the tool is aborted so the message can land.
 
+## Deploying
+
+```bash
+npm run deploy              # build, then restart the bridge once it is idle
+npm run deploy -- --now     # build, then restart without waiting (kills a running turn)
+npm run deploy -- --check   # build, then report what a restart would see, and change nothing
+```
+
+Build and restart are one command because they are one act. The bridge runs `dist/`, so a change
+that is committed and compiled is still not live until the process that loaded the old `dist/` is
+replaced — a gap with no symptom: `/healthz` answers 200, the page renders, and the old code keeps
+serving. `scripts/deploy.sh` builds first and **stops on a failed build without touching the running
+bridge**, then hands off to `.restart-when-idle.sh`, which waits for no running turn and no child
+process before killing anything (a restart kills every tool the agent is running). A deploy that
+cannot be interrupted is refused rather than forced; the watcher logs to `data/bridge-restart.log`.
+
 ## Roadmap
 
 - [x] Pub/Sub receiver (DMs + spaces, no public endpoint)

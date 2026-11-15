@@ -16,7 +16,8 @@
     "evals:regrade": "node evals/regrade.mjs",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
-    "test:all": "tsx --test test/*.test.ts"
+    "test:all": "tsx --test test/*.test.ts",
+    "deploy": "bash scripts/deploy.sh"
   },
   "dependencies": {
     "@earendil-works/chord": "^1.4.0",

@@ -3142,9 +3142,10 @@ test("a repaint keeps the anchor mark and the miss note", async () => {
       { role: "user", text: "first", html: "<p>first</p>", entryId: 41 },
       { role: "assistant", text: "second", html: "<p>second</p>", entryId: 42 },
     ],
-    frames: [{ event: "text", data: { text: "streaming", busy: true } }],
   });
-  // A frame arrived after the anchor was applied.
+  // A frame arrives after the anchor was applied — the same repaint a live turn causes.
+  h.sources[0]!.emit("text", { text: "streaming", busy: true });
+  await Promise.resolve();
   assert.ok(
     h.dom.window.document.querySelector('[data-entry="42"]')?.classList.contains("at-entry"),
     "the mark survives a repaint",
