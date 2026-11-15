@@ -198,14 +198,71 @@ rather than off the disk; the live file remains the default. Bindings record the
 newest revision each conversation produced (`ArtifactRevision`), which is what a
 revision picker will list.
 
+### Commenting on part of a picture
+
+A picture has no lines, so the unit is a rectangle dragged over it. The gesture
+runs *inside* the image document (`REGION_SCRIPT`), because a document framed from
+another origin gets no pointer events; it reports the rectangle to the parent, the
+same way a text selection is reported.
+
+**The rectangle is in the picture's own pixels, not screen pixels.** A picture is
+scaled to fit the drawer, so the pixels under the finger are not the pixels in the
+file, and a rectangle counted on screen would frame a different thing at a
+different drawer width. The document knows both numbers and does the conversion;
+nothing downstream ever sees a screen coordinate.
+
+- **A tap is not a selection.** Below `MIN_REGION_SIDE` the gesture was a click,
+  so no region is offered. A click instead *measures* the picture, which is how
+  the drawer can say the picture is commentable at all — a drag is the only
+  gesture that can select, but it is not the only gesture a reader makes.
+- **The rectangle is checked twice.** `normalizeRegion` clamps it to the picture
+  and drops a shape too small to be one; the crop clamps again, because that is
+  the code that would index past the end of the decoded pixels.
+- **`?region=x,y,w,h` serves the crop.** The artifact origin does the cutting,
+  because the bytes are already there and the allow-list has already approved the
+  file. This is also the composer's preview, so a wrong rectangle is visible
+  *before* it is sent — the same URL in both places.
+- **The address is `shot.png#x120,y64,w320,h180`** (`regionSuffix`), and it is
+  parsed back by `parseRegion`. No ratio: the four numbers are pixels, which a
+  reader can hold against the picture.
+- **Liveness is the picture's dimensions.** A rectangle in the picture's own
+  pixels does not move when the file is edited, so there is nothing to re-anchor
+  to a revision — an image comment is `visible` while the file keeps the size it
+  was measured against and `orphaned` once it does not. The size travels with the
+  rectangle for exactly that check, and a deployment that cannot measure the file
+  reports `visible` rather than claiming a comment is dead.
+
+**What the model receives.** The text the region comment becomes (`imageRegionText`,
+reached through `modelText`) names the file, the rectangle, the picture's size, and
+says the selection is attached. The attachment is the crop itself, as an
+`ImageContent` part beside the text — so a seeing model is shown what was pointed
+at, and a text-only model still gets the rectangle and a path to `read`.
+
+**`view_image`** is for the rest of that story: a model that cannot see the
+attachment, or that wants the region fresh after the file changed, asks for it by
+*comment id*, never by coordinates. The rectangle comes from the record, because
+the part of a picture a person drew is the one fact here that cannot be re-derived.
+
 ### Not done yet
 
 - **The drawer opens the live file.** Pinning by default to "the revision this
   conversation produced" needs the picker, and the pins are already recorded.
 - **No dropdown.** `revisionLog()` (jj `files()` revset) lists a file's revisions
   in one call; the UI for choosing one is not written.
-- **Commenting is source-view only.** A rendered Markdown page has no line numbers
-  to anchor to, so `?render` shows no marks yet.
+- **Commenting is source-view only, for *text*.** A rendered Markdown page has no
+  line numbers to anchor to, so `?render` shows no marks yet. A picture is
+  commentable (`?render` does not apply to one), but its rectangle is not drawn
+  back onto the picture when the thread is opened. The comment is not lost — the
+  address names the rectangle and the crop attachment shows it — but the picture
+  itself carries no mark, unlike a commented source file.
+- **A rectangle on a replaced picture cannot be mapped.** Changing a PNG's
+  *content* without changing its dimensions leaves an old rectangle `visible`
+  over different pixels. jj has the old bytes and the same crop code could
+  compare them, but nothing does yet.
+- **The crop is best-effort.** A format Photon cannot decode, or a deployment
+  without the wasm module, sends the comment without the attachment. The words
+  are the part that must not be lost, so this is a missing picture rather than a
+  failed comment.
 - **`BRIDGE_WEB_ENGINE=link`** publishes the comment operations over the chord
   link (see `link-contract.ts`); the other adapter-side operations still do not.
 - **Replying has no idempotency key.** A double-click on "Reply" can start two
