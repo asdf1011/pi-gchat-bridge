@@ -160,6 +160,31 @@ test("a tool frame reports the newest unfinished call, and null clears it", asyn
   assert.deepEqual(c.sent.at(-1), { event: "tool", data: null });
 });
 
+test("a repeated identical command is announced as a new call", async () => {
+  // Two consecutive calls to the same command render the same line. Keying the
+  // send on that line made the second announcement a no-op, so a client was left
+  // holding the status of a call that had already finished.
+  const fake = fakeSeam({ snapshot: view("") });
+  const c = client();
+  await attachWebClient(options(fake.seam), 1, c);
+
+  const call = (callId: string, status: "running" | "done") => [
+    { callId, name: "bash", status, arguments: { command: "jj st" } },
+  ];
+  const frames = () => c.sent.filter((s) => s.event === "tool");
+
+  fake.push(view("", call("1", "running")));
+  // Between two tools in a round there is no idle frame: the projection goes
+  // straight from "call 1 running" to "call 2 running".
+  fake.push(view("", call("2", "running")));
+
+  assert.equal(frames().length, 2, "the second call is announced, not suppressed");
+  assert.match(String((frames().at(-1)!.data as { line: string }).line), /jj st/);
+
+  fake.push(view("", call("2", "done")));
+  assert.deepEqual(c.sent.at(-1), { event: "tool", data: null }, "and it still clears");
+});
+
 test("a second client is independent of the first", async () => {
   const fake = fakeSeam({ snapshot: view("") });
   const a = client();

@@ -1105,6 +1105,15 @@ let liveHtml = '';
 let busy = false;
 let statusLine = '';
 /**
+ * Whether the last `text` frame said a turn had finished.
+ *
+ * Distinct from `busy`, which only a `text` frame sets: a tool can start (and be
+ * announced by a `tool` frame) before any text arrives at all, and at that moment
+ * `busy` is still false. So "no turn running" and "the turn just ended" are two
+ * different facts, and conflating them is what let a status line outlive its turn.
+ */
+let turnEnded = false;
+/**
  * The stream the live block belongs to.
  *
  * Bumped on every `connectStream`, and captured by the catch-up it asks for. Without
@@ -1568,7 +1577,13 @@ function paint() {
     // nothing being written. Text is arriving on the frames, so the stream itself is
     // the evidence of progress — printing "thinking…" under a message that is
     // actively growing would be noise competing with the answer.
-    status.textContent = statusLine || (busy && !liveText ? 'thinking…' : '');
+    // A tool line only means something while a turn is running, and `turnEnded` is
+    // the only fact that says one is not: a tool can be announced before any text
+    // arrives, so `busy` is not enough. Belt-and-braces for the same bug
+    // `applyView` clears — whichever of the two frames arrives last, the pane cannot
+    // show a dead command.
+    const running = statusLine && !turnEnded ? statusLine : '';
+    status.textContent = running || (busy && !liveText ? 'thinking…' : '');
     if (status.textContent) bubble.append(status);
     log.append(row);
   }
@@ -1658,6 +1673,7 @@ function open(id) {
   turnHtml = '';
   liveHtml = '';
   busy = false;
+  turnEnded = false;
   statusLine = '';
   log.innerHTML = '';
   tool.textContent = '';
@@ -1781,7 +1797,9 @@ function connectStream(id) {
     lastFrameAt = Date.now();
     const d = JSON.parse(e.data);
     // The server words this exactly as Chat does; the page just shows it.
-    statusLine = d ? String(d.line || '') : '';
+    // A frame that names a tool *after* the turn has ended is stale — the two
+    // arrive as separate events and either can be last — so it sets nothing.
+    statusLine = d && !turnEnded ? String(d.line || '') : '';
     tool.textContent = '';
     paint();
   });
@@ -1861,7 +1879,14 @@ function applyView(view) {
   turnHtml = typeof d.turnHtml === 'string' ? d.turnHtml : '';
   liveHtml = typeof d.html === 'string' ? d.html : '';
   busy = Boolean(d.busy);
-  if (busy) statusLine = '';
+  // The fix for a zombie status line. A turn's end arrives as a `text` frame with
+  // `busy: false` and its tool clearing arrives as a separate `tool` frame with
+  // `null`. The status used to be cleared only when the *next* turn began, so if the
+  // completion repaint landed before the `tool` frame — or that frame never came —
+  // the row survived on `statusLine` alone: a "Running: …" under an answer that had
+  // already finished, which only a new turn painted over.
+  turnEnded = !d.busy;
+  statusLine = '';
 }
 
 /**

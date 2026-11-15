@@ -530,6 +530,30 @@ test("a tool frame shows in the pane, and null clears it", async () => {
   }
 });
 
+test("a stale tool frame cannot revive a status line after the turn ends", async () => {
+  // Frames are two separate events and either can arrive last. A `tool` frame that
+  // names a call *after* the turn has settled must not be painted as though the call
+  // were still running — that is the "Running: …" that outlived its command.
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+      history: [{ role: "user", text: "go", at: 1, html: "<p>go</p>" }],
+    });
+    const log = h.dom.window.document.getElementById("log")!;
+    const source = h.sources[0]!;
+
+    source.emit("text", { text: "done", busy: true });
+    source.emit("text", { text: "done", busy: false });
+    source.emit("tool", { name: "bash", status: "running", line: "Running: jj split" });
+    await h.settle();
+
+    assert.equal(log.querySelector(".msg.live .status"), null, "an idle turn shows no running command");
+  } finally {
+    h?.close();
+  }
+});
+
 test("a stream error says reconnecting rather than going blank", async () => {
   let h: Harness | undefined;
   try {

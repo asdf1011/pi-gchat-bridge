@@ -91,7 +91,22 @@ export async function attachWebClient(
   // produces. Starting at "" would make the first frame — an idle conversation
   // included — look like a change and paint an empty answer.
   let lastText = "\u0000";
-  let lastTool = "";
+  /**
+   * Which tool call the client was last told about, keyed on its identity rather
+   * than on its rendered line.
+   *
+   * Keying on the line was a bug: two consecutive identical commands (`jj st`,
+   * then `jj st`) render the same `Running: jj st`, so when the first finished the
+   * frame that would have cleared it was suppressed as "no change". The client kept
+   * a status line for a tool that had already exited, and only a *new* turn cleared
+   * it — which is what a zombie "Running: …" under a finished answer looked like.
+   *
+   * Seeded with the key of "no tool in flight", not with `undefined`: an idle
+   * conversation must paint nothing, so the first frame must not send a clearing
+   * event nobody needs. `undefined` is reserved for "this client has not been told
+   * anything yet".
+   */
+  let lastTool: string | null = null;
 
   // The seam sends the current state as the first frame, so there is nothing to
   // paint separately: the delta guards below make a repeat harmless anyway.
@@ -118,13 +133,17 @@ export async function attachWebClient(
       // Tool status is a single line, so send it only when it changes. The
       // `detail` is the same summarising the Chat status line does — a command
       // or a path — so both surfaces say what is running, not just which tool.
+      //
+      // The change *key* is the call id, not the rendered line: a repeated command
+      // renders identically, and suppressing that frame left the previous call's
+      // status on screen after it had finished (see `lastTool` above).
       const tool = projected.tools.filter((t) => t.status !== "done").at(-1);
-      const text = tool ? toolLine(tool.name, tool.arguments) : "";
-      if (text !== lastTool) {
-        lastTool = text;
+      const key = tool?.callId ?? null;
+      if (key !== lastTool) {
+        lastTool = key;
         client.send(
           "tool",
-          tool ? { name: tool.name, status: tool.status, output: tool.output, line: text } : null,
+          tool ? { name: tool.name, status: tool.status, output: tool.output, line: toolLine(tool.name, tool.arguments) } : null,
         );
       }
     } catch (error) {
