@@ -115,7 +115,9 @@ below, because it is the same code and the same review.
 
 ## 2. The link's per-operation envelope is copied 25 times
 
-- **Status:** pending
+- **Status:** done — `withRef()` in `link.ts` is now the only place a conversation reference is opened
+  and released; `attach` is the documented exception. `link.ts` went 611 → 606 lines with 14 sites
+  collapsed, and the three "gone" conventions are now one `absent` argument per operation.
 - **Where:** `src/session-host/link.ts` (`linkSessionHost`), `src/session-host/link-contract.ts` /
   `serveSessionHost`
 - **Issue:** the `conversationRef` → `if (!ref) return …` → `try { host.root(…) } finally { ref.release() }`

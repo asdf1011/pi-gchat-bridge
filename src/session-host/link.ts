@@ -302,15 +302,8 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
       return Boolean(await host.root((ctx) => root.has({ conversation: conversationId }, ctx)));
     },
 
-    snapshot: async (conversationId: number) => {
-      const ref = await conversationRef(host, conversationId, session);
-      if (!ref) return undefined;
-      try {
-        return ref.view.value as ProjectedView;
-      } finally {
-        ref.release();
-      }
-    },
+    snapshot: (conversationId: number) =>
+      withRef(host, session, conversationId, undefined, async (ref) => ref.view.value as ProjectedView),
 
 
     attach: async (conversationId: number, onFrame: (view: ProjectedView) => void): Promise<ViewHandle | undefined> => {
@@ -333,20 +326,13 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
       };
     },
 
-    artifacts: async (conversationId: number) => {
-      const ref = await conversationRef(host, conversationId, session);
-      if (!ref) return undefined;
-      try {
-        return (await host.root((ctx) => ref.artifacts({}, ctx))) as readonly ArtifactFile[];
-      } finally {
-        ref.release();
-      }
-    },
+    artifacts: (conversationId: number) =>
+      withRef(host, session, conversationId, undefined, async (ref) =>
+        (await host.root((ctx) => ref.artifacts({}, ctx))) as readonly ArtifactFile[],
+      ),
 
-    submit: async (conversationId: number, request: SubmitRequest): Promise<SubmitResult> => {
-      const ref = await conversationRef(host, conversationId, session);
-      if (!ref) return { error: `no such conversation: ${conversationId}` };
-      try {
+    submit: (conversationId: number, request: SubmitRequest): Promise<SubmitResult> =>
+      withRef(host, session, conversationId, { error: `no such conversation: ${conversationId}` }, async (ref) => {
         const result = await host.root((ctx) =>
           ref.submit(
             {
@@ -365,48 +351,27 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
         return ("submissionId" in result && result.submissionId !== undefined
           ? { submissionId: result.submissionId }
           : { error: result.error ?? "submit failed" }) as SubmitResult;
-      } finally {
-        ref.release();
-      }
-    },
+      }),
 
-    history: async (conversationId: number, options?: { limit?: number; offset?: number }) => {
-      const ref = await conversationRef(host, conversationId, session);
-      if (!ref) return undefined;
-      try {
-        return (await host.root((ctx) =>
+    history: (conversationId: number, options?: { limit?: number; offset?: number }) =>
+      withRef(host, session, conversationId, undefined, async (ref) =>
+        (await host.root((ctx) =>
           ref.history({ limit: options?.limit ?? 20, offset: options?.offset ?? 0 }, ctx),
-        )) as readonly TranscriptMessage[];
-      } finally {
-        ref.release();
-      }
-    },
+        )) as readonly TranscriptMessage[],
+      ),
 
-    image: async (conversationId: number, entryId: number, index: number) => {
-      const ref = await conversationRef(host, conversationId, session);
-      if (!ref) return undefined;
-      try {
-        const found = await host.root((ctx) => ref.image({ entryId, index }, ctx));
-        return found ?? undefined;
-      } finally {
-        ref.release();
-      }
-    },
+    image: (conversationId: number, entryId: number, index: number) =>
+      withRef(host, session, conversationId, undefined, async (ref) =>
+        (await host.root((ctx) => ref.image({ entryId, index }, ctx))) ?? undefined,
+      ),
 
-    comments: async (conversationId: number) => {
-      const ref = await conversationRef(host, conversationId, session);
-      if (!ref) return undefined;
-      try {
-        return (await host.root((ctx) => ref.comments({}, ctx))) as readonly CommentView[];
-      } finally {
-        ref.release();
-      }
-    },
+    comments: (conversationId: number) =>
+      withRef(host, session, conversationId, undefined, async (ref) =>
+        (await host.root((ctx) => ref.comments({}, ctx))) as readonly CommentView[],
+      ),
 
-    addComment: async (conversationId: number, input: CommentInput) => {
-      const ref = await conversationRef(host, conversationId, session);
-      if (!ref) return { error: `no such conversation: ${conversationId}` };
-      try {
+    addComment: (conversationId: number, input: CommentInput) =>
+      withRef(host, session, conversationId, { error: `no such conversation: ${conversationId}` }, async (ref) => {
         const result = (await host.root((ctx) =>
           ref.addComment(
             {
@@ -427,51 +392,27 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
           return { error: result.error ?? "the host declined the comment" };
         }
         return { comment: result.comment };
-      } finally {
-        ref.release();
-      }
-    },
+      }),
 
-    resolveComment: async (conversationId: number, commentId: string, resolved: boolean) => {
-      const ref = await conversationRef(host, conversationId, session);
-      if (!ref) return false;
-      try {
-        return Boolean(await host.root((ctx) => ref.resolveComment({ commentId, resolved }, ctx)));
-      } finally {
-        ref.release();
-      }
-    },
+    resolveComment: (conversationId: number, commentId: string, resolved: boolean) =>
+      withRef(host, session, conversationId, false, async (ref) =>
+        Boolean(await host.root((ctx) => ref.resolveComment({ commentId, resolved }, ctx))),
+      ),
 
-    noteCommentSubmission: async (conversationId: number, commentId: string, submissionId: number) => {
-      const ref = await conversationRef(host, conversationId, session);
-      if (!ref) return;
-      try {
+    noteCommentSubmission: (conversationId: number, commentId: string, submissionId: number) =>
+      withRef(host, session, conversationId, undefined, async (ref) => {
         await host.root((ctx) => ref.noteCommentSubmission({ commentId, submissionId }, ctx));
-      } finally {
-        ref.release();
-      }
-    },
+      }),
 
 
-    commentThread: async (conversationId: number, commentId: string) => {
-      const ref = await conversationRef(host, conversationId, session);
-      if (!ref) return undefined;
-      try {
-        return (await host.root((ctx) => ref.commentThread({ commentId }, ctx))) as readonly CommentReply[];
-      } finally {
-        ref.release();
-      }
-    },
-    state: async (conversationId: number) => {
-      const ref = await conversationRef(host, conversationId, session);
-      if (!ref) return undefined;
-      try {
-        const found = (await host.root((ctx) => ref.settings({}, ctx))) as ConversationState | null;
-        return found ?? undefined;
-      } finally {
-        ref.release();
-      }
-    },
+    commentThread: (conversationId: number, commentId: string) =>
+      withRef(host, session, conversationId, undefined, async (ref) =>
+        (await host.root((ctx) => ref.commentThread({ commentId }, ctx))) as readonly CommentReply[],
+      ),
+    state: (conversationId: number) =>
+      withRef(host, session, conversationId, undefined, async (ref) =>
+        ((await host.root((ctx) => ref.settings({}, ctx))) as ConversationState | null) ?? undefined,
+      ),
     models: async () => {
       const root = await session();
       return (await host.root((ctx) => root.models({}, ctx))) as readonly ModelInfo[];
@@ -527,27 +468,15 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
       const root = await session();
       return Boolean(await host.root((ctx) => root.label({ name, label: text }, ctx)));
     },
-    compact: async (conversationId: number, instructions?: string) => {
-      const ref = await conversationRef(host, conversationId, session);
-      if (!ref) return;
-      try {
-        await host.root((ctx) =>
-          ref.compact(instructions === undefined ? {} : { instructions }, ctx),
-        );
-      } finally {
-        ref.release();
-      }
-    },
-    abort: async (conversationId: number) => {
-      const ref = await conversationRef(host, conversationId, session);
-      // A conversation that is gone is not running anything, which is what `false` already means.
-      if (!ref) return false;
-      try {
-        return Boolean(await host.root((ctx) => ref.abort({}, ctx)));
-      } finally {
-        ref.release();
-      }
-    },
+    compact: (conversationId: number, instructions?: string) =>
+      withRef(host, session, conversationId, undefined, async (ref) => {
+        await host.root((ctx) => ref.compact(instructions === undefined ? {} : { instructions }, ctx));
+      }),
+    // A conversation that is gone is not running anything, which is what `false` already means.
+    abort: (conversationId: number) =>
+      withRef(host, session, conversationId, false, async (ref) =>
+        Boolean(await host.root((ctx) => ref.abort({}, ctx))),
+      ),
 
     awaitSubmission: async (submissionId: number) => {
       const root = await session();
@@ -558,10 +487,11 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
       return (await host.root((ctx) => root.submission({ submissionId }, ctx))) as SubmissionState;
     },
     write: async (conversationId: number, entry: AdapterEntry) => {
-      const ref = await conversationRef(host, conversationId, session);
-      if (!ref) throw new Error(`no such conversation: ${conversationId}`);
-      try {
-        return (await host.root((ctx) =>
+      // The one operation that throws for a missing conversation rather than reporting it: a notice
+      // that could not be written is not a value any caller switches on, and `write` is called from
+      // places that would have to invent an answer.
+      const written = await withRef(host, session, conversationId, undefined, async (ref) =>
+        (await host.root((ctx) =>
           ref.write(
             {
               kind: entry.kind,
@@ -570,10 +500,10 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
             },
             ctx,
           ),
-        )) as number;
-      } finally {
-        ref.release();
-      }
+        )) as number,
+      );
+      if (written === undefined) throw new Error(`no such conversation: ${conversationId}`);
+      return written;
     },
     recordVerdict: async (name: string, verdict: AdapterVerdict) => {
       const root = await session();
@@ -583,24 +513,55 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
       const root = await session();
       return ((await host.root((ctx) => root.verdict({ name }, ctx))) as AdapterVerdict | null) ?? undefined;
     },
-    firstTurn: async (conversationId: number) => {
-      const ref = await conversationRef(host, conversationId, session);
-      if (!ref) return undefined;
-      try {
-        const found = (await host.root((ctx) => ref.firstTurn({}, ctx))) as {
+    firstTurn: (conversationId: number) =>
+      withRef(host, session, conversationId, undefined, async (ref) =>
+        ((await host.root((ctx) => ref.firstTurn({}, ctx))) as {
           userText: string;
           assistantText: string;
-        } | null;
-        return found ?? undefined;
-      } finally {
-        ref.release();
-      }
-    },
+        } | null) ?? undefined,
+      ),
   };
 }
 
+/**
+ * Open one conversation reference, run one call, and release it whatever happens.
+ *
+ * Every operation needs the same three steps — open, call, release — and the release is the one that
+ * matters. A reference that is not released keeps a chord object alive, and with it the host-side
+ * task holding that conversation's `state("view")` subscription: a leak with no symptom until the
+ * process is carrying hundreds of watches over a day of traffic.
+ *
+ * Written out by hand, "forgot the `finally`" was one copied block away, twenty-five times. `attach`
+ * is the single exception and says so in place, because its reference has to outlive the call.
+ */
+async function withRef<T>(
+  host: Host,
+  session: () => Promise<Record<string, any>>,
+  conversationId: number,
+  absent: T,
+  run: (ref: ConversationRef) => Promise<T>,
+): Promise<T> {
+  const ref = await conversationRef(host, conversationId, session);
+  if (!ref) return absent;
+  try {
+    return await run(ref);
+  } finally {
+    ref.release();
+  }
+}
+
+/** A chord reference to one conversation object, as this module uses it. */
+type ConversationRef = {
+  readonly view: { readonly value: unknown; subscribe(fn: (value: unknown) => void): () => void };
+  release(): void;
+} & Record<string, any>;
+
 /** A conversation reference, or `undefined` when the host has no such conversation. */
-async function conversationRef(host: Host, conversationId: number, session: () => Promise<any>) {
+async function conversationRef(
+  host: Host,
+  conversationId: number,
+  session: () => Promise<Record<string, any>>,
+): Promise<ConversationRef | undefined> {
   try {
     const root = await session();
     // One extra round trip per open, not per frame: a chord object would
