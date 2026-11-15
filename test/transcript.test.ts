@@ -21,6 +21,7 @@ import {
   defaultIndexPath,
   displayText,
   entryLink,
+  entryLinkMarkdown,
   flattenRecord,
   proseSnippet,
   readOrigins,
@@ -703,9 +704,30 @@ test("cli prints the link under a hit, and --link-host overrides where it points
   // Its own line: a URL spliced into the snippet stops being clickable.
   assert.equal(pinned.out.length, 2);
   assert.match(pinned.out[0]!, /memorable/);
-  assert.equal(pinned.out[1]!.trim(), `https://example.test/1/#e${entryId}`);
+  // Markdown link form, because a bare URL is not clickable in the web bridge's renderer.
+  assert.equal(
+    pinned.out[1]!.trim(),
+    `[conversation 1, message ${entryId}](https://example.test/1/#e${entryId})`,
+  );
 
   const suppressed = lines();
   runCli(["search", "memorable", "--no-links"], { storePath: store.storePath, ...suppressed.deps });
   assert.equal(suppressed.out.length, 1, "nothing but the hit");
+});
+
+test("entryLinkMarkdown writes the form both surfaces render as a link", () => {
+  // The web bridge's renderer handles `[label](url)` and does not autolink a raw URL — it falls
+  // through as escaped text, which is how a line of `https://…` sat there unclickable. Chat
+  // autolinks a bare URL *and* accepts Markdown, so this form is correct on both.
+  assert.equal(
+    entryLinkMarkdown(27202, 28368, "https://pi.hl.id.au"),
+    "[conversation 27202, message 28368](https://pi.hl.id.au/27202/#e28368)",
+  );
+  // No entry id: the label says what it is rather than leaving a dangling "message undefined".
+  assert.equal(
+    entryLinkMarkdown(7, undefined, "https://pi.hl.id.au"),
+    "[conversation 7](https://pi.hl.id.au/7/)",
+  );
+  // The same no-origin rule as the plain form.
+  assert.equal(entryLinkMarkdown(7, 9, ""), "");
 });

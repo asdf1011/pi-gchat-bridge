@@ -144,3 +144,15 @@ test("an image inside a code span or fence stays literal", () => {
   assert.ok(!html.includes("<img"), html);
   assert.match(html, /<code>!\[a\]\(api\/x\.png\)<\/code>/);
 });
+
+test("a Markdown link renders as an anchor, and a bare URL does not", () => {
+  // Why the skill insists on `[label](url)`: this renderer has no bare-URL autolinking, so a raw
+  // https:// line fell through as escaped text and was unclickable in the web bridge. Chat behaves
+  // the opposite way, so the Markdown form is the only one correct on both.
+  const linked = inline("[conversation 27202](https://pi.hl.id.au/27202/#e34779)");
+  assert.match(linked, /<a href="https:\/\/pi\.hl\.id\.au\/27202\/#e34779"[^>]*>conversation 27202<\/a>/);
+
+  const bare = inline("https://pi.hl.id.au/27202/#e34779");
+  assert.ok(!bare.includes("<a "), `a bare URL must not become a link: ${bare}`);
+  assert.match(bare, /https:\/\/pi\.hl\.id\.au/);
+});

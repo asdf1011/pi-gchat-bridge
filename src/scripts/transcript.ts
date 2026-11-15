@@ -854,6 +854,32 @@ export function entryLink(
   return `${base}/${conversationId}/${entryId === undefined ? "" : `#e${entryId}`}`;
 }
 
+/**
+ * The same link as Markdown, labelled with where it goes.
+ *
+ * A bare URL is not a link everywhere this text is read. The web bridge's renderer handles
+ * `[label](url)` and does not autolink a raw URL at all — it falls through as escaped text, so a
+ * line of `https://…` sat there unclickable. Chat autolinks a bare URL, and also accepts the
+ * Markdown form, so writing the Markdown form is correct on both and needs no surface check.
+ *
+ * The label is `conversation 27202, message 34779` rather than "here" or the URL again: the reader
+ * decides whether to click from what the link is, and the numbers are what the hit line above
+ * already reports, so the link reads as the same thing.
+ */
+export function entryLinkMarkdown(
+  conversationId: number,
+  entryId: number | undefined,
+  origin: string = process.env.BRIDGE_WEB_ORIGIN ?? "",
+): string {
+  const url = entryLink(conversationId, entryId, origin);
+  if (url === "") return "";
+  const label =
+    entryId === undefined
+      ? `conversation ${conversationId}`
+      : `conversation ${conversationId}, message ${entryId}`;
+  return `[${label}](${url})`;
+}
+
 function formatAt(at: number): string {
   if (at <= 0) return "".padEnd(16);
   return new Date(at).toISOString().slice(0, 16).replace("T", " ");
@@ -1103,9 +1129,10 @@ function searchVerb(args: SearchVerbArgs): number {
       `${String(hit.conversationId).padStart(6)}  ${formatAt(hit.at)}  ` +
         `${hit.kind.replace(/^pi\./, "").padEnd(11)}  ${who.padEnd(18)}  ${hit.snippet}`,
     );
-    // On its own line, because a URL that has been wrapped or spliced into a sentence is a URL
-    // that stops being clickable — and the whole point of printing it is that somebody clicks it.
-    const link = linkOrigin === false ? "" : entryLink(hit.conversationId, hit.entryId, linkOrigin);
+    // Its own line, in Markdown link form: a URL that has been wrapped or spliced into a sentence
+    // stops being clickable, and a bare URL is not a link at all in the web bridge's renderer.
+    const link =
+      linkOrigin === false ? "" : entryLinkMarkdown(hit.conversationId, hit.entryId, linkOrigin);
     if (link !== "") out(`              ${link}`);
   }
   if (wantStats) err(statsLine(stats));
