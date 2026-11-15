@@ -117,6 +117,10 @@ async function loadPage(
     pretendToBeVisual: true,
     beforeParse(win) {
 
+      // jsdom has no layout, so it has no `scrollIntoView`. The page calls it on the entry a link
+      // names; without this the anchor throws where a browser would scroll.
+      (win.Element.prototype as unknown as { scrollIntoView(): void }).scrollIntoView = () => {};
+
       // EventSource: record instances, let tests emit frames.
       class StubEventSource {
         url: string;
@@ -3059,4 +3063,90 @@ test("a failed request that is not a redirect does not claim the session expired
   } finally {
     h?.close();
   }
+});
+
+// --- Step 1–2: entry ids in the DOM, and the #e<id> anchor ------------------------------------
+
+test("every transcript row names the entry it came from", async () => {
+  const h = await loadPage({
+    history: [
+      { role: "user", text: "first", html: "<p>first</p>", entryId: 41 },
+      { role: "assistant", text: "second", html: "<p>second</p>", entryId: 42 },
+    ],
+  });
+  // The anchor works by finding this attribute, so it is the whole basis of the feature.
+  const marked = [...h.dom.window.document.querySelectorAll("[data-entry]")].map((row) => row.getAttribute("data-entry"));
+  assert.deepEqual(marked, ["41", "42"]);
+});
+
+test("#e<id> scrolls the named message into view and marks it", async () => {
+  const h = await loadPage({
+    hash: "#e42",
+    history: [
+      { role: "user", text: "first", html: "<p>first</p>", entryId: 41 },
+      { role: "assistant", text: "second", html: "<p>second</p>", entryId: 42 },
+    ],
+  });
+  const row = h.dom.window.document.querySelector('[data-entry="42"]');
+  assert.ok(row, "the row exists");
+  assert.ok(row!.classList.contains("at-entry"), "the named row is marked");
+  assert.ok(
+    !h.dom.window.document.querySelector('[data-entry="41"]')!.classList.contains("at-entry"),
+    "and only that row",
+  );
+});
+
+test("a fragment naming a message that is not here says so", async () => {
+  const h = await loadPage({
+    hash: "#e999",
+    history: [{ role: "user", text: "only message", html: "<p>only</p>", entryId: 41 }],
+  });
+  // Silently landing at the bottom of the thread is the failure this is here to prevent.
+  assert.match(h.dom.window.document.body.textContent ?? "", /not in this conversation/);
+});
+
+test("an entry anchor is not mistaken for an artifact", async () => {
+  const h = await loadPage({
+    hash: "#e41",
+    artifactsBaseUrl: "http://127.0.0.1:8082",
+    artifacts: [{ key: "conversation/7/notes.md", markdown: true }],
+    history: [{ role: "user", text: "first", html: "<p>first</p>", entryId: 41 }],
+  });
+  // Both live in one fragment. Reading `#e41` as a key would find nothing, drop it, and lose the
+  // position — which is silent, so it needs a test.
+  // The document list is still the list, not a document: the fragment was read as an entry.
+  assert.equal(h.dom.window.document.querySelectorAll("#artifacts-list .doc").length, 0);
+  assert.ok(h.dom.window.document.querySelector('[data-entry="41"]')?.classList.contains("at-entry"));
+});
+
+test("an artifact fragment still opens the document", async () => {
+  const h = await loadPage({
+    hash: "#conversation%2F7%2Fnotes.md",
+    artifactsBaseUrl: "http://127.0.0.1:8082",
+    artifacts: [{ key: "conversation/7/notes.md", markdown: true }],
+    history: [{ role: "user", text: "first", html: "<p>first</p>", entryId: 41 }],
+  });
+  // The guard against `#e<id>` must not break the case it sits next to: an artifact key still
+  // opens its document, and nothing is treated as an entry anchor.
+  assert.ok(h.dom.window.document.querySelector('[data-entry="41"]'));
+  assert.ok(!h.dom.window.document.querySelector('[data-entry="41"]')!.classList.contains("at-entry"));
+});
+
+test("a repaint keeps the anchor mark and the miss note", async () => {
+  // `paint()` rebuilds the log from `transcript` on every stream frame, so a class added to a row
+  // or a note prepended to the log lasts only until the next frame. That is invisible in a DOM
+  // test with no frames and obvious in a browser — the browser test is where this was found.
+  const h = await loadPage({
+    hash: "#e42",
+    history: [
+      { role: "user", text: "first", html: "<p>first</p>", entryId: 41 },
+      { role: "assistant", text: "second", html: "<p>second</p>", entryId: 42 },
+    ],
+    frames: [{ event: "text", data: { text: "streaming", busy: true } }],
+  });
+  // A frame arrived after the anchor was applied.
+  assert.ok(
+    h.dom.window.document.querySelector('[data-entry="42"]')?.classList.contains("at-entry"),
+    "the mark survives a repaint",
+  );
 });

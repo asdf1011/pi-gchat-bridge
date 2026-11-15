@@ -396,11 +396,21 @@ window.addEventListener('hashchange', () => {
 function artifactKeyFromHash() {
   const raw = location.hash.replace(/^#/, '');
   if (!raw) return '';
+  // `#e<number>` names a transcript entry, not a document. Both live in one fragment, so without
+  // this an entry link would be read as a key, found in no list, and the page would drop the
+  // fragment — silently losing the position it was asked to show.
+  if (/^e\d+$/.test(raw)) return '';
   try {
     return decodeURIComponent(raw);
   } catch {
     return raw; // not percent-encoded, but still names something
   }
+}
+
+/** The entry id the URL fragment names (`#e1234`), or undefined. */
+function entryIdFromHash() {
+  const match = /^#e(\d+)$/.exec(location.hash);
+  return match ? Number(match[1]) : undefined;
 }
 
 /**

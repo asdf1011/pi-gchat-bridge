@@ -831,6 +831,29 @@ function statsLine(stats: IndexStats): string {
   );
 }
 
+/**
+ * The URL of one message, for quoting a hit to somebody who can click it.
+ *
+ * `/<conversationId>/#e<entryId>` — the page's own shape, plus the entry anchor it now honours.
+ * The origin comes from `BRIDGE_WEB_ORIGIN`, because this tool runs beside the bridge and the
+ * bridge already knows where it is served from; guessing `pi.hl.id.au` here would break the day
+ * the deployment moves, and a link built from the database path would be worse than none.
+ *
+ * No entry id means the conversation, not a broken string: a hit that cannot be anchored is
+ * still a hit worth linking.
+ */
+export function entryLink(
+  conversationId: number,
+  entryId: number | undefined,
+  origin: string = process.env.BRIDGE_WEB_ORIGIN ?? "",
+): string {
+  const base = origin.replace(/\/+$/, "");
+  // A deployment with no web origin has no pages to link to, and inventing a host would send a
+  // reader somewhere that does not exist. Empty, and the formatter omits the line.
+  if (base === "") return "";
+  return `${base}/${conversationId}/${entryId === undefined ? "" : `#e${entryId}`}`;
+}
+
 function formatAt(at: number): string {
   if (at <= 0) return "".padEnd(16);
   return new Date(at).toISOString().slice(0, 16).replace("T", " ");
@@ -854,6 +877,9 @@ const USAGE = [
   "  --all                      every kind, including tool results",
   "  --max-stale <seconds>      accept an answer that may miss the last <s> seconds;",
   "                             0 (default) always catches up first",
+  "  --link-host <origin>       origin for the link printed under each hit",
+  "                             (default BRIDGE_WEB_ORIGIN)",
+  "  --no-links                 print hits without their links",
   "",
   "common options:",
   "  --limit <n>                lines to print (default 20)",
@@ -892,6 +918,9 @@ function searchCommand(
   let withThinking = false;
   let fromEntry: number | undefined;
   let maxStaleness = 0;
+  // Links are on by default when the deployment says where its pages are; `--no-links` turns them
+  // off, and `--link-host` overrides the origin (a different proxy prefix, a test).
+  let linkOrigin: string | false = process.env.BRIDGE_WEB_ORIGIN ?? "";
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i] as string;
@@ -940,6 +969,18 @@ function searchCommand(
       case "--by-conversation":
         byConversation = true;
         break;
+      case "--link-host": {
+        const value = argv[++i];
+        if (value === undefined || value === "") {
+          err("--link-host needs an origin, e.g. https://pi.hl.id.au");
+          return 2;
+        }
+        linkOrigin = value;
+        break;
+      }
+      case "--no-links":
+        linkOrigin = false;
+        break;
       case "--stats":
         wantStats = true;
         break;
@@ -980,7 +1021,7 @@ function searchCommand(
 
   return searchVerb({
     deps, out, err, positional, conversationId, kinds, limit,
-    wantStats, byConversation, maxStaleness,
+    wantStats, byConversation, maxStaleness, linkOrigin,
   });
 }
 
@@ -996,10 +1037,13 @@ interface SearchVerbArgs {
   wantStats: boolean;
   byConversation: boolean;
   maxStaleness: number;
+  /** Origin for the links printed under hits. `false` suppresses them. */
+  linkOrigin: string | false;
 }
 
 function searchVerb(args: SearchVerbArgs): number {
   const { deps, out, err, positional, conversationId, kinds, limit, wantStats } = args;
+  const linkOrigin = args.linkOrigin;
   const query = positional.join(" ").trim();
   if (query === "") {
     out(USAGE);
@@ -1059,6 +1103,10 @@ function searchVerb(args: SearchVerbArgs): number {
       `${String(hit.conversationId).padStart(6)}  ${formatAt(hit.at)}  ` +
         `${hit.kind.replace(/^pi\./, "").padEnd(11)}  ${who.padEnd(18)}  ${hit.snippet}`,
     );
+    // On its own line, because a URL that has been wrapped or spliced into a sentence is a URL
+    // that stops being clickable — and the whole point of printing it is that somebody clicks it.
+    const link = linkOrigin === false ? "" : entryLink(hit.conversationId, hit.entryId, linkOrigin);
+    if (link !== "") out(`              ${link}`);
   }
   if (wantStats) err(statsLine(stats));
   return 0;

@@ -20,6 +20,7 @@ import {
   countByConversation,
   defaultIndexPath,
   displayText,
+  entryLink,
   flattenRecord,
   proseSnippet,
   readOrigins,
@@ -273,7 +274,12 @@ test("cli prints hits and exits 0, and says so when there are none", () => {
   const store = makeStore([["pi.user", "a memorable phrase"]]);
 
   const found = lines();
-  assert.equal(runCli(["search", "memorable"], { storePath: store.storePath, ...found.deps }), 0);
+  // `--no-links`, because the default follows `BRIDGE_WEB_ORIGIN` and this test is about the hit,
+  // not the link. The link's own behaviour is tested below, with the origin pinned.
+  assert.equal(
+    runCli(["search", "memorable", "--no-links"], { storePath: store.storePath, ...found.deps }),
+    0,
+  );
   assert.equal(found.out.length, 1);
   assert.match(found.out[0]!, /memorable/);
 
@@ -303,7 +309,10 @@ test("cli --conversation and --kind narrow the same way the API does", () => {
     ["pi.tool-result", "ledger two"],
   ]);
   const scoped = lines();
-  runCli(["search", "ledger", "--kind", "pi.user"], { storePath: store.storePath, ...scoped.deps });
+  runCli(["search", "ledger", "--kind", "pi.user", "--no-links"], {
+    storePath: store.storePath,
+    ...scoped.deps,
+  });
   assert.equal(scoped.out.length, 1, "tool results stay out unless asked for");
   assert.match(scoped.out[0]!, /^ +1 /, "conversation id leads the line");
 });
@@ -663,4 +672,40 @@ test("readOrigins on a store with no origins table is empty, not an error", () =
   const db = new DatabaseSync(store.storePath, { readOnly: true });
   assert.equal(readOrigins(db).size, 0);
   db.close();
+});
+
+// --- links -------------------------------------------------------------------------------------
+
+test("entryLink builds the page's own shape, with the entry as a fragment", () => {
+  // What the page now honours: /<id>/ opens a conversation, #e<entryId> names a turn in it.
+  assert.equal(entryLink(27202, 28368, "https://pi.hl.id.au"), "https://pi.hl.id.au/27202/#e28368");
+  // A trailing slash on the configured origin does not become a double slash.
+  assert.equal(entryLink(7, 9, "https://pi.hl.id.au/"), "https://pi.hl.id.au/7/#e9");
+  // No entry id is the conversation, not `/undefined/#eundefined`.
+  assert.equal(entryLink(7, undefined, "https://pi.hl.id.au"), "https://pi.hl.id.au/7/");
+});
+
+test("entryLink with no configured origin is empty rather than invented", () => {
+  // A deployment with no web UI has no pages to link to. Guessing a host would send a reader
+  // somewhere that does not exist, which is worse than printing nothing.
+  assert.equal(entryLink(7, 9, ""), "");
+});
+
+test("cli prints the link under a hit, and --link-host overrides where it points", () => {
+  const store = makeStore([["pi.user", "a memorable phrase"]]);
+  const entryId = 1;
+
+  const pinned = lines();
+  runCli(["search", "memorable", "--link-host", "https://example.test"], {
+    storePath: store.storePath,
+    ...pinned.deps,
+  });
+  // Its own line: a URL spliced into the snippet stops being clickable.
+  assert.equal(pinned.out.length, 2);
+  assert.match(pinned.out[0]!, /memorable/);
+  assert.equal(pinned.out[1]!.trim(), `https://example.test/1/#e${entryId}`);
+
+  const suppressed = lines();
+  runCli(["search", "memorable", "--no-links"], { storePath: store.storePath, ...suppressed.deps });
+  assert.equal(suppressed.out.length, 1, "nothing but the hit");
 });

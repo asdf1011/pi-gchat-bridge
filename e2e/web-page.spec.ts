@@ -204,7 +204,10 @@ async function stubApi(
       body: JSON.stringify({
         messages: held,
         before: held[0]?.entryId ?? before,
-        atStart: before !== 0 && held.length < limit,
+        // A short page means there is nothing older — on the first page as well as later ones.
+        // The `before !== 0` this used to carry made the first page never report the beginning,
+        // so anything walking backwards (the entry anchor) had no way to stop.
+        atStart: held.length < limit,
       }),
     });
   });
@@ -2157,4 +2160,38 @@ test("the page is installable, and the manifest describes where it is served", a
   await expect(page.locator("#conv-title")).toHaveText("deploy notes");
   await expect(page).toHaveTitle("deploy notes — pi bridge");
   expect(errors).toEqual([]);
+});
+
+/**
+ * The entry anchor, in a real browser.
+ *
+ * The jsdom tests prove the row is found and marked; only a browser can say whether the scroll
+ * actually moved, which is the part a reader notices. This is the "silent failure" the plan
+ * called out — a link that lands at the bottom of the thread looks like it worked.
+ */
+test("a link to a message scrolls that message into view", async ({ page }) => {
+  const errors = watchErrors(page);
+  await stubApi(page, {
+    history: [
+      { role: "user", text: "the first message", html: "<p>the first message</p>", entryId: 41 },
+      { role: "assistant", text: "an answer", html: "<p>an answer</p>", entryId: 42 },
+      { role: "user", text: "the last message", html: "<p>the last message</p>", entryId: 43 },
+    ],
+  });
+  await page.goto("/7/#e41");
+
+  const row = page.locator('[data-entry="41"]');
+  await expect(row).toHaveClass(/at-entry/);
+  // In view, not merely marked: `scrollIntoView` is the part jsdom cannot check.
+  await expect(row).toBeInViewport();
+  expect(errors).toEqual([]);
+});
+
+test("a link to a message that is not there says so", async ({ page }) => {
+  await stubApi(page, {
+    history: [{ role: "user", text: "only message", html: "<p>only</p>", entryId: 41 }],
+  });
+  await page.goto("/7/#e999");
+  // The fragment survives a reload, so an old link must read as "gone", not as "here".
+  await expect(page.locator("#log .anchor-miss")).toHaveText(/not in this conversation/);
 });

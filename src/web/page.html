@@ -175,6 +175,13 @@
   } }
   #log .msg { display: flex; gap: .55rem; margin: 0 0 .9rem; align-items: flex-start; }
   #log .msg.me { flex-direction: row-reverse; }
+  /* The message a link named. A tinted bubble rather than a border, so the row does not shift and
+     the transcript still reads as one column. Cleared by the next hash change, not by a timer:
+     a highlight that fades is a highlight the reader can miss while scrolling. */
+  #log .msg.at-entry > .col > .bubble { background: rgba(120, 170, 255, .12);
+    box-shadow: 0 0 0 1px rgba(120, 170, 255, .35); border-radius: .5rem; }
+  #log .anchor-miss { margin: 0 0 .9rem; padding: .5rem .7rem; border-radius: .4rem;
+    font-size: .85em; opacity: .8; background: rgba(255, 190, 90, .12); }
   #log .msg > .col { display: flex; flex-direction: column; min-width: 0; max-width: min(46rem, 86%); }
   #log .msg.me > .col { align-items: flex-end; }
   #log .meta { display: flex; gap: .4rem; align-items: baseline; margin: 0 0 .15rem .15rem;
@@ -1171,10 +1178,13 @@ function formatWhen(ms, short) {
 }
 
 /** One chat row: a name for pi, just a time for you. */
-function messageRow(role, html, at, live, images) {
+function messageRow(role, html, at, live, images, entryId) {
   const me = role === 'user';
   const block = document.createElement('div');
   block.className = 'msg ' + (me ? 'me' : 'pi') + (live ? ' live' : '');
+  // The entry this row came from, so an anchor can name one turn. Absent on the live
+  // row: the turn in flight has no entry yet — its id exists only once it is stored.
+  if (entryId !== undefined && entryId !== null) block.dataset.entry = String(entryId);
 
   const col = document.createElement('div');
   col.className = 'col';
@@ -1302,6 +1312,23 @@ if (typeof ResizeObserver === 'function') {
  *  that scrolling rarely waits. */
 const HISTORY_PAGE = 50;
 
+/**
+ * The entry a link named that this conversation does not contain, if any.
+ *
+ * State rather than a DOM node because `paint()` rebuilds `#log` from `transcript` on every stream
+ * frame — a note appended to the log by the anchor was wiped milliseconds later by the first
+ * frame, which is why the browser test could not see it while the jsdom one (no frames) could.
+ */
+let anchorMiss = undefined;
+
+/**
+ * The entry a link named and this conversation does contain.
+ *
+ * Same reasoning as `anchorMiss`: the highlight is a class on a row that `paint()` rebuilds, so it
+ * has to be remembered and re-applied or the first stream frame erases it.
+ */
+let anchoredEntry = undefined;
+
 /** Messages loaded so far, oldest first. `transcript` is the same array. */
 let historyComplete = false;
 /** A page is in the air: a scroll must not ask for a second copy. */
@@ -1370,6 +1397,7 @@ function prependEarlier(older) {
         message.at,
         false,
         message.images ? message.images.map((image) => ({ ...image, entryId: message.entryId })) : undefined,
+        message.entryId,
       ),
     );
   }
@@ -1414,9 +1442,78 @@ async function loadEarlier() {
   }
 }
 
+/**
+ * Scroll to the entry the fragment names, loading earlier pages until it is on the page.
+ *
+ * The transcript is paged backwards, so the entry a link names is usually not in the first page —
+ * a deep link to a turn three hundred messages up has to read its way back to it. Bounded by
+ * `historyComplete`, so a stale or invented id stops at the beginning of the conversation instead
+ * of fetching for ever.
+ *
+ * Returns whether the entry was reached. The caller decides what to say when it was not: silently
+ * leaving the reader at the bottom of an old thread is the failure this exists to avoid.
+ */
+async function scrollToEntry(entryId) {
+  if (!current) return false;
+  // The rows for the newest page do not exist until the history read paints them, and `open()`
+  // starts that read without waiting. Without this, a link into a conversation checked the DOM
+  // first, found nothing, and reported the entry as missing — which is how a real browser caught
+  // what the jsdom test could not.
+  await historyReady;
+  if (!current) return false;
+  for (;;) {
+    const row = log.querySelector('[data-entry="' + entryId + '"]');
+    if (row) {
+      row.scrollIntoView({ block: 'center' });
+      row.classList.add('at-entry');
+      anchoredEntry = entryId;
+      return true;
+    }
+    if (historyComplete || loadingEarlier) return false;
+    const held = transcript.length;
+    await loadEarlier();
+    // Nothing more arrived, so there is nothing left to look in.
+    if (transcript.length === held) return false;
+  }
+}
+
+/** Follow a new fragment: an entry to show, or an artifact the panel already handles. */
+async function followHash() {
+  const entryId = entryIdFromHash();
+  if (entryId !== undefined) {
+    // Cleared first, so a hash change that *does* find its entry removes an older note.
+    anchorMiss = undefined;
+    anchoredEntry = undefined;
+    if (!(await scrollToEntry(entryId))) {
+      // Say so rather than pretending: the fragment names something this conversation does not
+      // contain, which is what an old link to a deleted turn looks like.
+      anchorMiss = entryId;
+      paintAnchorMiss();
+    }
+    return;
+  }
+  void restoreArtifact(artifactKeyFromHash());
+}
+
+window.addEventListener('hashchange', () => {
+  void followHash();
+});
+
+/** The note explaining that the linked message is not in this conversation. */
+function paintAnchorMiss() {
+  const note = document.createElement('div');
+  note.className = 'anchor-miss';
+  note.textContent = 'That message is not in this conversation.';
+  // Before the rows, which is where a reader looks after the fragment fails to take them anywhere.
+  log.prepend(note);
+}
+
 function paint() {
   log.innerHTML = '';
   log.append(earlierButton);
+  // Re-emitted on every repaint, because every repaint rebuilds the log. Cheap: one node, and
+  // only while the fragment names something that is not here.
+  if (anchorMiss !== undefined) paintAnchorMiss();
   for (const message of transcript) {
     log.append(
       messageRow(
@@ -1425,8 +1522,14 @@ function paint() {
         message.at,
         false,
         message.images ? message.images.map((image) => ({ ...image, entryId: message.entryId })) : undefined,
+        message.entryId,
       ),
     );
+  }
+  // After the rows exist, not before: a querySelector against a log that has just been emptied
+  // finds nothing, which is how the first version marked the wrong moment.
+  if (anchoredEntry !== undefined) {
+    log.querySelector('[data-entry="' + anchoredEntry + '"]')?.classList.add('at-entry');
   }
   // The live turn: the streaming answer, and the status of whatever is running.
   if (liveText || turnText || busy || statusLine) {
@@ -1491,6 +1594,16 @@ function followEnd() {
  * transcript — carrying the previous one's counter over would ask for a window
  * measured against a different thread.
  */
+/**
+ * The history read in flight for the conversation on screen.
+ *
+ * `open()` deliberately does not await it — the pane paints when the page lands, and the composer
+ * must not wait on the network. But anything that needs rows *to exist* (the entry anchor) has to
+ * wait for exactly this, and re-checking the DOM in a loop would be a worse way to say so. This is
+ * the page's own "the transcript is painted" signal.
+ */
+let historyReady = Promise.resolve();
+
 async function loadHistory() {
   if (!current) return;
   beforeAnchor = 0;
@@ -1541,7 +1654,8 @@ function open(id) {
   log.innerHTML = '';
   tool.textContent = '';
   restoreDraft(id);
-  void loadHistory();
+  historyReady = loadHistory();
+  void historyReady;
   connectStream(id);
 }
 
@@ -3540,8 +3654,9 @@ if (openId === undefined) {
     // reopen the box for no reason.
     history.replaceState({}, '', location.pathname);
   }
-  // A reload lands here with the fragment still naming the file that was open.
-  void restoreArtifact(artifactKeyFromHash());
+  // A reload lands here with the fragment still naming something: a document that was open
+  // (`#key`), or a message a link points at (`#e1234`). `followHash` tells them apart.
+  void followHash();
 }
 </script>
 </body>
