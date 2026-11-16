@@ -75,9 +75,8 @@ What that gives us, and why each is a requirement rather than an implementation 
 
 ### How it is invoked — three options, not a decision
 
-An earlier draft of this document said the reviewer must be an *extension* whose tool
-starts the child. That was writing an implementation decision into a requirements
-document, and the decision does not obviously hold. What the flow actually needs is small:
+Whether the invocation is a tool, a skill, or something added later is an implementation
+choice, not a requirement. What the flow actually needs is small:
 
 - something that can **create and configure a child conversation** with a task owner;
 - something that can read and write **review comments** in the reviewed conversation;
@@ -107,22 +106,20 @@ agent-side and stay regardless of the choice: the reviewer is **told** to stay r
 
 ### Delegation from a reviewer
 
-A reviewer starting another review is **allowed**, not forbidden — an earlier draft of this
-document banned it, which was a guess about a failure mode rather than a requirement. A
-reviewer that has found what it is out of its depth on should be able to hand it to
-something better placed: a security-focused reviewer, a reviewer with a bigger model, one
-scoped to another directory. Requiring a return to the asking conversation first would make
-the reviewer pretend to have finished, which is worse.
+A reviewer may start a review of its own. A reviewer that has found what it is out of its
+depth on should be able to hand it to something better placed: a security-focused reviewer,
+a reviewer with a bigger model, one scoped to another directory. Requiring a return to the
+asking conversation first would make the reviewer pretend to have finished, which is worse.
 
-What is worth requiring is that delegation stays a **tree**, not a web:
+Delegation stays a **tree**, not a web:
 
-- **R2.5 A reviewer may start a review of its own, under itself.** The new child is owned by
-  the same task chain, so aborting the outer review aborts what it started, and the task
-  graph shows the shape. Nothing delegates to a conversation outside its own subtree.
+- **R2.5 A reviewer starts a review under itself.** The new child is owned by the same task
+  chain, so aborting the outer review aborts what it started, and the task graph shows the
+  shape. Nothing delegates to a conversation outside its own subtree.
 - **R2.6 Nesting is bounded and visible.** There is a depth limit (the abort path and the
   budget both depend on it terminating), and each level is attributed, so a review's
   comments say which reviewer produced them (R9.1). A chain nobody can read is the failure
-  mode the ban was reaching for; a chain that is bounded and attributed is not.
+  mode to design against; a chain that is bounded and attributed is not.
 - **R2.7 A delegated review reports to the same place.** Its comments go to the conversation
   the *root* review was asked from (§9.1 R9.3), not to its parent reviewer's conversation,
   which nobody is reading. The parent's summary says that it delegated.
