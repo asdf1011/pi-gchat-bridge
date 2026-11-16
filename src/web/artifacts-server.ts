@@ -20,14 +20,18 @@
  *      served. The list is the allow-list; there is no filesystem browsing.
  */
 import { randomBytes } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import http from "node:http";
 
-import { imageTypeOf, isMarkdown, readArtifact, readArtifactBytes, type ArtifactFile } from "../durable/artifacts.js";
+import { imageTypeOf, isMarkdown, isPdf, readArtifact, readArtifactBytes, type ArtifactFile } from "../durable/artifacts.js";
 import { repoRelativePath, showFile, showFileBytes } from "../durable/artifact-vcs.js";
 import { parseRegion } from "../durable/comments.js";
 import { logger } from "../logger.js";
 import type { SessionHost } from "../session-host/api.js";
 import { cropRegion } from "./crop.js";
+import { pdfPageCount, renderPdfPage } from "./pdf.js";
 import { escapeHtml, markdownDocument, renderMarkdown } from "./markdown.js";
 
 export interface ArtifactsServerOptions {
@@ -528,6 +532,15 @@ export const REGION_SCRIPT = `
         {
           t: "pi-artifact-region",
           file: document.body.getAttribute("data-file") || "",
+          // The page this rectangle is on, read from *this* document's own URL. The
+          // parent cannot work it out for itself: a page turn is a navigation inside
+          // this frame, so the parent's copy of the frame's address is stale, and
+          // cross-origin it cannot read the real one at all.
+          page: (function () {
+            var found = /[?&]page=(\\d+)/.exec(location.search || "");
+            var page = found ? Number(found[1]) : undefined;
+            return page && page > 0 ? page : undefined;
+          })(),
           region: region,
           // Where the comment box should be talked about: the reader let go here, and a
           // bar pinned to a fixed strip would be a separate place from the box they just
@@ -1186,6 +1199,59 @@ what is still there.</p>
 }
 
 /**
+ * Run `use` with a path to a PDF's bytes.
+ *
+ * The live file already has one. A *pinned revision* does not — its bytes came out of
+ * jj — so they are written to a temporary file, because PyMuPDF opens paths rather
+ * than buffers. That is the only reason this exists: keeping `?rev=` working for a PDF
+ * rather than making the revision view refuse documents.
+ *
+ * The temporary file is removed in a `finally`, so a render that throws or times out
+ * still cleans up. Its name carries the process id, so two bridges cannot collide, and
+ * it lives in the OS temp directory rather than in the conversation's repository — a
+ * scratch file for a render is not something to commit.
+ */
+async function withPdfBytes<T>(
+  bytes: Buffer,
+  key: string,
+  use: (path: string) => Promise<T>,
+  livePath?: string,
+): Promise<T> {
+  if (livePath !== undefined) return use(livePath);
+  const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-pdf-"));
+  const file = path.join(dir, (path.basename(key) || "document") + ".pdf");
+  try {
+    await fs.promises.writeFile(file, bytes);
+    return await use(file);
+  } finally {
+    await fs.promises.rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+/**
+ * The paging strip under a rendered page.
+ *
+ * Links, not buttons: this document runs one script and that script's job is the
+ * rectangle, so a page turn is an ordinary navigation of the frame — the same thing
+ * clicking a link in a source view does. Both ends are drawn even at the ends of the
+ * document, disabled, so the strip does not move under the pointer between pages.
+ *
+ * The page number is in the URL, so a reader who reloads, or who follows a link to
+ * page 3, lands there.
+ */
+function pageControls(key: string, page: number, pageCount: number | undefined): string {
+  const base = encodeURIComponent(key.split("/").at(-1) ?? key);
+  const at = (n: number): string => `${base}?page=${n}`;
+  const last = pageCount === undefined ? undefined : pageCount;
+  const previous = page > 1 ? `<a href="${escapeHtml(at(page - 1))}" rel="prev">← page ${page - 1}</a>` : `<a aria-disabled="true">←</a>`;
+  const next =
+    last !== undefined && page >= last
+      ? `<a aria-disabled="true">→</a>`
+      : `<a href="${escapeHtml(at(page + 1))}" rel="next">page ${page + 1} →</a>`;
+  return `<nav class="pages">${previous}<span>page ${page}${last === undefined ? "" : ` of ${last}`}</span>${next}</nav>`;
+}
+
+/**
  * An image, centred on the theme's own background.
  *
  * Served as HTML around an `<img>` rather than as the bare bytes, for a reason that
@@ -1201,20 +1267,24 @@ what is still there.</p>
  */
 function imageDocument(input: {
   key: string;
-  size: number;
-  truncated: boolean;
+  /**
+   * What `<img>` points at, **relative to this document**.
+   *
+   * The document is served at `<root>/c/<id>/<key>`, so a sibling is just the last path
+   * segment: the full key again would resolve to `<root>/c/<id>/<key>/<key>` and quietly
+   * 404. Relative also makes the URL work behind any mount prefix without this file
+   * having to know what the prefix is.
+   */
+  href: string;
+  /** A line under the picture — a truncation note, or "page 2 of 3". */
+  note?: string;
+  /** A second line, for the page controls a PDF needs and a PNG does not. */
+  controls?: string;
   /** Per-response, for the swipe script — the same rule as every other scripted document. */
   nonce: string;
 }): string {
-  // Relative to this document, not to the conversation root: the document is served
-  // at `<root>/c/<id>/<key>`, so the image is its *sibling* `<key>?raw` — the full
-  // key again would resolve to `<root>/c/<id>/<key>/<key>` and quietly 404. Only the
-  // last segment is needed, and that is also what makes the URL work behind any
-  // mount prefix without this file having to know what the prefix is.
-  const href = `${encodeURIComponent(input.key.split("/").at(-1) ?? input.key)}?raw`;
-  const note = input.truncated
-    ? `<p class="note">Showing the first ${Math.round(input.size / 1024)} KiB of ${input.size} bytes.</p>`
-    : "";
+  const note = input.note === undefined ? "" : `<p class="note">${escapeHtml(input.note)}</p>`;
+  const controls = input.controls ?? "";
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -1257,10 +1327,23 @@ function imageDocument(input: {
         border: 2px solid #4c9aff; background: #4c9aff33; border-radius: 2px;
         box-shadow: 0 0 0 1px #0006 inset; }
   .note { position: absolute; bottom: .5rem; left: .5rem; margin: 0; opacity: .7; }
+  /* Page controls, for a document that has pages. A fixed strip at the foot rather
+     than something over the picture: it must not cover the part being read, and it
+     must not sit under the finger that is dragging a rectangle. */
+  .pages { position: fixed; bottom: 0; left: 0; right: 0; display: flex; gap: .5rem;
+        align-items: center; justify-content: center; padding: .35rem .5rem;
+        background: Canvas; border-top: 1px solid #8886; font-size: 12px; }
+  .pages a, .pages span { padding: .2rem .5rem; border-radius: .3rem; text-decoration: none;
+        color: CanvasText; }
+  .pages a { background: #8882; }
+  .pages a[aria-disabled="true"] { opacity: .35; pointer-events: none; }
+  /* Clear of the strip above, so the last line of a page is not hidden behind it. */
+  body:has(.pages) { padding-bottom: 3rem; }
 </style>
 </head>
 <body data-file="${escapeHtml(input.key)}">
-<img class="crop-target" src="${escapeHtml(href)}" alt="${escapeHtml(input.key)}" draggable="false">
+${controls}
+<img class="crop-target" src="${escapeHtml(input.href)}" alt="${escapeHtml(input.key)}" draggable="false">
 ${note}
 <script nonce="${input.nonce}">${SWIPE_SCRIPT}</script>
 <script nonce="${input.nonce}">${REGION_SCRIPT}</script>
@@ -1426,6 +1509,133 @@ async function handle(
   const revision = (url.searchParams.get("rev") ?? "").trim();
   const repo = options.repoFor?.(conversationId);
 
+  // A PDF is a document with pages, and a page has to be rasterised before it can be
+  // drawn or commented on. It is answered here, before anything tries to read the file
+  // as text: `readArtifact` reports a PDF as "binary" and returns no content, so a
+  // check below it would never see one at all.
+  //
+  // Three URLs, and each means something different to a reader:
+  //
+  //   plain        — a document around page 1 (or `?page=N`), with paging controls.
+  //                  What the drawer frames, and what drag-to-comment works over.
+  //   `?page=N`    — the same document, at that page.
+  //   `?raw`       — the PDF's own bytes, so ↗ opens the browser's real viewer, with
+  //                  text selection, links and zoom. A rasterised page is for reviewing;
+  //                  the PDF itself is for reading.
+  //
+  // `?page=N&raw=1` (or `?png`) answers the rendered page *as a PNG*, which is what the
+  // region crop and the comment preview need — a crop of a page is a crop of a picture.
+  if (isPdf(key)) {
+    let bytes: Buffer;
+    try {
+      if (revision !== "" && revision !== "latest") {
+        if (!repo) throw new Error("artifacts are not version controlled here");
+        bytes = await showFileBytes(repo, revision, await repoPathOrThrow(repo, file.path, file.key));
+      } else {
+        bytes = readArtifactBytes(file).bytes;
+      }
+    } catch (error) {
+      logger.error(`[artifacts] ${key}: ${(error as Error).message}`);
+      send(res, 404, "text/html; charset=utf-8", documentCsp, unreadableDocument(key));
+      return;
+    }
+
+    const raw = url.searchParams.has("raw");
+    // Which of the three answers this is. `?region=` counts as an image request on its
+    // own: the crop is cut from a rendered page, so it needs the render either way.
+    const wantsRegion = url.searchParams.has("region");
+    const wantsPageImage = wantsRegion || (url.searchParams.has("page") && (raw || url.searchParams.has("png")));
+
+    if (raw && !wantsPageImage) {
+      // The file itself. `application/pdf` inline is what makes ↗ a PDF tab rather than
+      // a download, and it is the one content type here that the browser parses as a
+      // document — which is safe only because it is *the browser's* PDF viewer, in its
+      // own tab, not this origin's frame. The frame never asks for this URL.
+      const filename = encodeURIComponent(key.split("/").at(-1) ?? key);
+      send(res, 200, "application/pdf", IMAGE_CSP, bytes, {
+        "Content-Disposition": `${url.searchParams.has("download") ? "attachment" : "inline"}; filename="${filename}"`,
+        "Color-Scheme": "light dark",
+      });
+      return;
+    }
+
+    // No page named is page 1: the drawer asks for the first page of a document it has
+    // not counted yet. A page that *is* named and is not a positive number is the
+    // request being wrong, and is refused rather than quietly turned into page 1 —
+    // `?page=0` must not show the first page as if nothing had happened.
+    const asked = url.searchParams.get("page");
+    const requested = asked === null ? 1 : Number.parseInt(asked, 10);
+    if (!Number.isFinite(requested) || requested < 1) {
+      send(res, 404, "text/plain; charset=utf-8", TEXT_CSP, `no page ${asked} in ${key}`);
+      return;
+    }
+    // Past the end is answered by the renderer, which is the only party that knows how
+    // many pages there are.
+    const page = requested;
+
+    // Rendering needs bytes on disk. The live file is already there; a *pinned
+    // revision* is not, so its bytes go to a temporary file first. That is the only way
+    // to keep `?rev=` working for a PDF, and the alternative — refusing a revision —
+    // would make the two views of a document disagree about what they can show.
+    const pinned = revision !== "" && revision !== "latest";
+    const livePath = pinned ? undefined : file.path;
+    const rendered = await withPdfBytes(bytes, key, (at) => renderPdfPage(at, page), livePath);
+    if (rendered === undefined) {
+      send(
+        res,
+        404,
+        "text/plain; charset=utf-8",
+        TEXT_CSP,
+        `cannot render ${key} page ${page}; the document may be damaged, or page ${page} may not exist`,
+      );
+      return;
+    }
+
+    // A region of a page is a region of the *picture* the page renders as, so the crop
+    // is the same code the image path uses — the rectangle is already in the rendered
+    // page's pixels, because that is the picture the reader dragged over.
+    if (wantsRegion) {
+      const rectangle = parseRegion(url.searchParams.get("region") ?? "");
+      const cropped = rectangle === undefined ? undefined : cropRegion(rendered.bytes, "image/png", rectangle);
+      if (cropped === undefined) {
+        send(res, 404, "text/plain; charset=utf-8", TEXT_CSP, `cannot crop ${key} page ${page} at that region`);
+        return;
+      }
+      send(res, 200, cropped.mimeType, IMAGE_CSP, cropped.bytes, {
+        "Content-Disposition": 'inline; filename="region.png"',
+        "Color-Scheme": "light dark",
+      });
+      return;
+    }
+
+    if (wantsPageImage) {
+      send(res, 200, "image/png", IMAGE_CSP, rendered.bytes, {
+        "Content-Disposition": `inline; filename="page-${page}.png"`,
+        "Color-Scheme": "light dark",
+      });
+      return;
+    }
+
+    const pageCount = await withPdfBytes(bytes, key, (at) => pdfPageCount(at), livePath);
+    const nonce = randomBytes(16).toString("base64");
+    send(
+      res,
+      200,
+      "text/html; charset=utf-8",
+      imageDocumentCsp(frameAncestorsFor(options.webOrigin), nonce),
+      imageDocument({
+        key,
+        // The page as a PNG is a *sibling* URL: `?page=N&png`. Relative, for the same
+        // reason the image's `?raw` is.
+        href: `${encodeURIComponent(key.split("/").at(-1) ?? key)}?page=${page}&png`,
+        ...(pageCount === undefined ? {} : { note: `page ${page} of ${pageCount}` }),
+        controls: pageControls(key, page, pageCount),
+        nonce,
+      }),
+    );
+    return;
+  }
+
   // An image is answered from its bytes, before anything tries to decode it as
   // text. Doing it here rather than after `readArtifact` is not an optimisation:
   // that function reports a PNG as "binary" and returns no content, so a check
@@ -1491,7 +1701,16 @@ async function handle(
         200,
         "text/html; charset=utf-8",
         imageDocumentCsp(frameAncestorsFor(options.webOrigin), nonce),
-        imageDocument({ key, size: image.size, truncated: image.size > image.bytes.length, nonce }),
+        imageDocument({
+          key,
+          // Relative to this document: the last segment plus `?raw`, which is the
+          // sibling bytes of the same artifact.
+          href: `${encodeURIComponent(key.split("/").at(-1) ?? key)}?raw`,
+          ...(image.size > image.bytes.length
+            ? { note: `Showing the first ${Math.round(image.size / 1024)} KiB of ${image.size} bytes.` }
+            : {}),
+          nonce,
+        }),
       );
       return;
     }

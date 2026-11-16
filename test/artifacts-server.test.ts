@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { spawnSync } from "node:child_process";
 import zlib from "node:zlib";
 import os from "node:os";
 import path from "node:path";
@@ -756,6 +757,141 @@ test("the image document carries the region script, and refuses network like the
     const csp = response.headers.get("content-security-policy") ?? "";
     assert.match(csp, /default-src 'none'/);
     assert.doesNotMatch(csp, /connect-src/);
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** A two-page PDF, written by PyMuPDF, so a page can be rendered for real. */
+function writePdf(target: string): boolean {
+  const result = spawnSync(
+    "python3",
+    [
+      "-c",
+      [
+        "import sys, pymupdf",
+        "document = pymupdf.open()",
+        "page = document.new_page()",
+        "page.insert_text((72, 72), 'first page of the document')",
+        "second = document.new_page()",
+        "second.insert_text((72, 72), 'second page of the document')",
+        "document.save(sys.argv[1])",
+      ].join("\n"),
+      target,
+    ],
+    { encoding: "utf8" },
+  );
+  return result.status === 0;
+}
+
+/** The size a PNG declares in its IHDR. */
+function pngDimensions(bytes: Buffer): { width: number; height: number } {
+  return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+}
+
+const pdfAvailable = (() => {
+  const probe = spawnSync("python3", ["-c", "import pymupdf"], { encoding: "utf8" });
+  return probe.status === 0;
+})();
+
+test("a PDF is served as a document around a rendered page", { skip: !pdfAvailable && "pymupdf is not available" }, async () => {
+  // The reader's request: clicking a PDF in the drawer should show the document, not
+  // "looks binary". What is framed is one *page*, rasterised, because a page is what a
+  // rectangle can be drawn on — the PDF itself is what ↗ opens.
+  const root = tempDir();
+  const harness = await serve(root, ["resume.pdf"]);
+  try {
+    assert.ok(writePdf(path.join(root, "resume.pdf")));
+    const response = await fetch(`${harness.base}/c/1/resume.pdf`);
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("content-type") ?? "", /^text\/html/);
+
+    const html = await response.text();
+    // The page, as a sibling PNG URL, and the same gesture surface a picture has.
+    assert.match(html, /<img class="crop-target" src="resume\.pdf\?page=1&amp;png"/);
+    assert.ok(html.includes("pi-artifact-region"), "the region script is there");
+    assert.ok(html.includes('class="pages"'), "and the paging strip");
+    assert.ok(html.includes("page 1 of 2"), html);
+    assert.ok(html.includes('data-file="resume.pdf"'), html);
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a PDF page is available as a PNG, and a page that does not exist is refused", { skip: !pdfAvailable && "pymupdf is not available" }, async () => {
+  const root = tempDir();
+  const harness = await serve(root, ["resume.pdf"]);
+  try {
+    assert.ok(writePdf(path.join(root, "resume.pdf")));
+
+    const page = await fetch(`${harness.base}/c/1/resume.pdf?page=2&png`);
+    assert.equal(page.status, 200);
+    assert.equal(page.headers.get("content-type"), "image/png");
+    const bytes = Buffer.from(await page.arrayBuffer());
+    const size = pngDimensions(bytes);
+    // A4 at 150 dpi. The exact number is not the point; that it is a page-sized raster
+    // rather than the document's bytes is.
+    assert.ok(size.width > 1000 && size.height > 1000, JSON.stringify(size));
+
+    // Past the end: an honest 404, not an empty image.
+    assert.equal((await fetch(`${harness.base}/c/1/resume.pdf?page=9&png`)).status, 404);
+    assert.equal((await fetch(`${harness.base}/c/1/resume.pdf?page=0&png`)).status, 404);
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a region of a PDF page is cropped from that page", { skip: !pdfAvailable && "pymupdf is not available" }, async () => {
+  // The comment path: a rectangle on page 2 must be cut from page 2. Getting this
+  // wrong is invisible in a single-page document and wrong in every real one.
+  const root = tempDir();
+  const harness = await serve(root, ["resume.pdf"]);
+  try {
+    assert.ok(writePdf(path.join(root, "resume.pdf")));
+    const response = await fetch(`${harness.base}/c/1/resume.pdf?page=2&png&region=x100,y120,w400,h300`);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "image/png");
+    assert.deepEqual(pngDimensions(Buffer.from(await response.arrayBuffer())), { width: 400, height: 300 });
+
+    // And the rectangle is checked against the *page*, so nonsense is refused.
+    assert.equal((await fetch(`${harness.base}/c/1/resume.pdf?page=2&png&region=garbage`)).status, 404);
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("?raw serves the PDF itself, for the browser's own viewer", { skip: !pdfAvailable && "pymupdf is not available" }, async () => {
+  // A rasterised page is for reviewing; the PDF is for reading. This is what ↗ opens,
+  // and it must be the document itself — text selection, links and zoom intact.
+  const root = tempDir();
+  const harness = await serve(root, ["resume.pdf"]);
+  try {
+    assert.ok(writePdf(path.join(root, "resume.pdf")));
+    const response = await fetch(`${harness.base}/c/1/resume.pdf?raw`);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "application/pdf");
+    assert.match(response.headers.get("content-disposition") ?? "", /^inline; filename="resume\.pdf"$/);
+    const bytes = Buffer.from(await response.arrayBuffer());
+    assert.equal(bytes.subarray(0, 5).toString("ascii"), "%PDF-", "the document's own bytes");
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a PDF that cannot be opened is refused, not served as garbage", { skip: !pdfAvailable && "pymupdf is not available" }, async () => {
+  const root = tempDir();
+  const harness = await serve(root, ["broken.pdf"]);
+  try {
+    // Named like a PDF, holds text. The renderer refuses it; the viewer must not turn
+    // that into a page of noise.
+    fs.writeFileSync(path.join(root, "broken.pdf"), "this is not a pdf\n");
+    assert.equal((await fetch(`${harness.base}/c/1/broken.pdf`)).status, 404);
+    assert.equal((await fetch(`${harness.base}/c/1/broken.pdf?page=1&png`)).status, 404);
   } finally {
     await harness.close();
     fs.rmSync(root, { recursive: true, force: true });

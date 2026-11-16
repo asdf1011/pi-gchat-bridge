@@ -258,6 +258,8 @@ export interface CommentRegion {
   /** The picture's size when the rectangle was drawn, so a replaced file can be noticed. */
   imageWidth: number;
   imageHeight: number;
+  /** Which page of a document the rectangle is on, 1-based. Absent for a picture. */
+  page?: number;
 }
 
 /** What a new comment needs. The anchors are derived host-side, never sent. */

@@ -385,3 +385,52 @@ test("Chat is told about the same region in words a person reads", () => {
   assert.match(text, /\[shot\.png#x120,y64,w320,h180\]/);
   assert.match(text, /the 320×180 region at \(120, 64\) of a 1280×800 image/);
 });
+
+test("a region on a PDF carries its page in the address", () => {
+  // Unlike a picture, a document has pages, and "page 3" is the first thing a reader
+  // needs to know. The page leads, because it is where in the document you are being
+  // sent; the rectangle follows.
+  const onPage = { x: 120, y: 64, width: 320, height: 180, imageWidth: 1240, imageHeight: 1755, page: 3 };
+  assert.equal(anchorAddress({ file: "resume.pdf", anchors: [], region: onPage }), "resume.pdf#p3,x120,y64,w320,h180");
+  // A picture has no page, and its address is unchanged.
+  assert.equal(
+    anchorAddress({ file: "shot.png", anchors: [], region: { ...onPage, page: undefined } }),
+    "shot.png#x120,y64,w320,h180",
+  );
+});
+
+test("a page-numbered address round-trips, and page 0 is refused", () => {
+  const parsed = parseRegion("#p3,x120,y64,w320,h180");
+  assert.equal(parsed?.page, 3);
+  assert.equal(parsed?.x, 120);
+  assert.equal(parseRegion("#p1,x0,y0,w8,h8")?.page, 1);
+  // Without a page the address is still a rectangle, which is what a picture has.
+  assert.equal(parseRegion("#x120,y64,w320,h180")?.page, undefined);
+  // Page numbering starts at one: zero is not "before the first page", it is a mistake.
+  assert.equal(parseRegion("#p0,x120,y64,w320,h180"), undefined);
+  assert.equal(parseRegion("#px,x120,y64,w320,h180"), undefined);
+
+  const normalized = normalizeRegion({ x: 10, y: 10, width: 40, height: 40, imageWidth: 100, imageHeight: 100, page: 2 });
+  assert.equal(normalized?.page, 2);
+  assert.equal(
+    normalizeRegion({ x: 10, y: 10, width: 40, height: 40, imageWidth: 100, imageHeight: 100, page: 0 }),
+    undefined,
+    "a rectangle on page zero describes nothing",
+  );
+});
+
+test("the model is told the page, because a rectangle means nothing without it", () => {
+  const text = modelText(
+    {
+      id: "2f4f5da0-7c07-4e39-8f7b-9fd9aaee6a92",
+      file: "resume.pdf",
+      anchors: [],
+      region: { x: 120, y: 64, width: 320, height: 180, imageWidth: 1240, imageHeight: 1755, page: 3 },
+      text: "this bullet is wrong",
+      author: "henry",
+    },
+    { path: "/workspace/artifacts/conversation/7/resume.pdf" },
+  );
+  assert.match(text, /resume\.pdf#p3,x120,y64,w320,h180/);
+  assert.match(text, /on page 3 of the document/);
+});

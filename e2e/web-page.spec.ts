@@ -19,7 +19,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import { SWIPE_SCRIPT } from "../src/web/artifacts-server.js";
-import { imageDocumentFor } from "./image-document.js";
+import { imageDocumentFor, pdfPageDocumentFor } from "./image-document.js";
 
 const CONVERSATIONS = [
   { conversationId: 7, chatKey: "spaces/A/threads/T1", model: "deepseek/deepseek-flash", name: "deploy notes" },
@@ -2311,6 +2311,8 @@ test("artifacts: dragging over a picture selects a region and opens the comment 
 
   // The comment box opens, addressed by the rectangle rather than by a line.
   await expect(page.locator("#comment-bar")).toBeVisible();
+  // The comment box opens, addressed by the rectangle rather than by a line.
+  await expect(page.locator("#comment-bar")).toBeVisible();
   await expect(page.locator("#comment-addr")).toContainText("screenshot.png x");
   // And the selected part is previewed, from the same URL the comment will carry.
   await expect(page.locator("#comment-preview")).toBeVisible();
@@ -2401,4 +2403,213 @@ test("artifacts: opening an image comment shows the part of the picture it is ab
   await expect(page.locator("#comment-sheet-preview")).toBeVisible();
   expect(await page.locator("#comment-sheet-preview").getAttribute("src"))
     .toBe("https://artifacts.example/c/7/pi/out/screenshot.png?region=x8,y4,w16,h12");
+});
+
+test("artifacts: a PDF opens as a rendered page, and a rectangle on it is a comment", async ({ page }) => {
+  // The request this exists for: clicking a PDF in the drawer shows the document rather
+  // than "looks binary", and the same drag-to-comment gesture a picture has works on the
+  // page. The page arrives as an image from the server, so the drawer's own code needs
+  // to know only that a PDF is framed like a picture.
+  await stubApi(page);
+  await page.route("**/api/environment", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ artifactsBaseUrl: "https://artifacts.example", pageVersion: "t" }),
+    }),
+  );
+  await page.route("**/api/c/*/artifacts", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([
+        { key: "pi/out/resume.pdf", wrote: 1, edited: 0, markdown: false, image: false, pdf: true },
+      ]),
+    }),
+  );
+  await page.route("**/api/c/*/comments", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
+  );
+
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAYAAACinX6EAAAAJUlEQVR42u3NMQEAAAgDoC251a3gLwSgcyfTVFVVVVVVVVVVVVX1tQFrwAPhpO4WAAAAAElFTkSuQmCC",
+    "base64",
+  );
+  const asked: string[] = [];
+  await page.route("https://artifacts.example/**", (route) => {
+    const url = route.request().url();
+    asked.push(url);
+    if (url.includes("&png") || url.includes("?raw")) {
+      return route.fulfill({ status: 200, contentType: "image/png", body: png });
+    }
+    if (url.includes("region=")) {
+      return route.fulfill({ status: 200, contentType: "image/png", body: png });
+    }
+    // The page document the artifact origin really builds: the gesture surface, the
+    // paging strip, and both scripts.
+    return route.fulfill({
+      status: 200,
+      contentType: "text/html",
+      body: pdfPageDocumentFor("pi/out/resume.pdf", 1, 3),
+    });
+  });
+
+  await page.goto("/7/");
+  await page.locator("#artifacts-toggle").click();
+
+  // The row says what it is, so a reader knows a document opens rather than source.
+  const row = page.locator("#artifact-list li", { hasText: "resume.pdf" });
+  await expect(row.locator(".counts")).toContainText("pdf");
+
+  await row.click();
+  await expect(page.locator("#artifacts-title")).toHaveText("resume.pdf");
+  await expect
+    .poll(() => page.evaluate(() => getComputedStyle(document.getElementById("artifact-track")!).transform))
+    .toBe("matrix(1, 0, 0, 1, 0, 0)");
+
+  // The frame asks for the *page document*, not for the PDF's bytes and not for a
+  // source view: a PDF has no lines to number.
+  const src = await currentFrame(page).getAttribute("src");
+  expect(src).toBe("https://artifacts.example/c/7/pi/out/resume.pdf");
+
+  // ↗ opens the PDF itself, not the rendered page: a raster is for reviewing, the
+  // document is for reading. Asserted on the URL the button builds rather than on a
+  // popup, because a popup is a second tab this test has not stubbed.
+  const newTabUrl = await page.evaluate(() => {
+    const open = window.open;
+    let called: string | undefined;
+    (window as unknown as { open: unknown }).open = (u: string) => {
+      called = u;
+      return null;
+    };
+    try {
+      (document.getElementById("artifacts-newtab") as HTMLElement).click();
+    } finally {
+      (window as unknown as { open: unknown }).open = open;
+    }
+    return called;
+  });
+  expect(newTabUrl).toBe("https://artifacts.example/c/7/pi/out/resume.pdf?raw");
+});
+
+test("artifacts: the crop of a PDF comment names the page it was drawn on", async ({ page }) => {
+  // The bug this guards: the drawer's own state still says page 1 after the reader turns
+  // a page, because the paging links navigate the *frame* and a navigation inside a frame
+  // never touches the parent's DOM. A comment drawn on page 3 would then crop page 1 —
+  // invisible in a one-page document, and wrong in every real one.
+  await stubApi(page);
+  await page.route("**/api/environment", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ artifactsBaseUrl: "https://artifacts.example", pageVersion: "t" }),
+    }),
+  );
+  await page.route("**/api/c/*/artifacts", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([
+        { key: "pi/out/resume.pdf", wrote: 1, edited: 0, markdown: false, image: false, pdf: true },
+      ]),
+    }),
+  );
+  await page.route("**/api/c/*/comments", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
+  );
+
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAYAAACinX6EAAAAJUlEQVR42u3NMQEAAAgDoC251a3gLwSgcyfTVFVVVVVVVVVVVVX1tQFrwAPhpO4WAAAAAElFTkSuQmCC",
+    "base64",
+  );
+  const crops: string[] = [];
+  await page.route("https://artifacts.example/**", (route) => {
+    const url = route.request().url();
+    if (url.includes("region=")) crops.push(url);
+    if (url.includes("&png") || url.includes("?raw") || url.includes("region=")) {
+      return route.fulfill({ status: 200, contentType: "image/png", body: png });
+    }
+    const page = Number(/[?&]page=(\d+)/.exec(url)?.[1] ?? "1");
+    return route.fulfill({
+      status: 200,
+      contentType: "text/html",
+      body: pdfPageDocumentFor("pi/out/resume.pdf", page, 3),
+    });
+  });
+
+  await page.goto("/7/");
+  await page.locator("#artifacts-toggle").click();
+  await page.locator("#artifact-list li", { hasText: "resume.pdf" }).click();
+  await expect(page.locator("#artifacts-title")).toHaveText("resume.pdf");
+
+  // The reader turns to page 3 — by *clicking the paging link*, which is the gesture the
+  // document actually offers. A `location.href` assignment from the test would do the same
+  // thing to the frame's history but reads as a test hacking the state rather than using
+  // it, and it hides whether the link works at all.
+  // Not the main frame: its URL fragment carries the artifact key, so a substring match
+  // on `resume.pdf` finds the *page* and not the document inside the drawer.
+  const pageDocument = page
+    .frames()
+    .find((f) => f !== page.mainFrame() && f.url().includes("resume.pdf"));
+  expect(pageDocument).toBeTruthy();
+  await expect
+    .poll(async () => pageDocument!.evaluate(() => Boolean(document.querySelector(".pages a[rel=next]"))).catch(() => false))
+    .toBe(true);
+  // Two turns, to page 3: a single page turn would pass even if the drawer were stuck
+  // reporting "page 2" as a constant, and the point is that the page is read, not guessed.
+  for (const target of ["page=2", "page=3"]) {
+    const at = page.frames().find((f) => f !== page.mainFrame() && f.url().includes(target.endsWith("2") ? "resume.pdf" : "page=2"));
+    await expect
+      .poll(async () => at!.evaluate(() => document.readyState === "complete" && Boolean(document.querySelector(".pages a[rel=next]"))).catch(() => false))
+      .toBe(true);
+    await at!.evaluate(() => {
+      (document.querySelector(".pages a[rel=next]") as HTMLElement).click();
+    });
+    await expect
+      .poll(() => page.frames().some((f) => f !== page.mainFrame() && f.url().includes(target)))
+      .toBe(true);
+  }
+
+  // A frame whose URL already names page 3 can still be mid-navigation, with no document
+  // in it; waiting for the picture is waiting for the page the reader actually sees, and
+  // a pointer event sent into a loading document is simply dropped.
+  const frame = await expect
+    .poll(async () => {
+      const candidate = page
+        .frames()
+        .find((f) => f !== page.mainFrame() && (f.url().includes("page=2") || f.url().includes("page=3")));
+      if (!candidate) return false;
+      return candidate
+        .evaluate(() => document.readyState === "complete" && Boolean(document.querySelector("img")))
+        .catch(() => false);
+    })
+    .toBe(true)
+    .then(() => page.frames().find((f) => f !== page.mainFrame() && (f.url().includes("page=2") || f.url().includes("page=3")))!);
+
+  await frame.evaluate(() => {
+    const image = document.querySelector("img")!;
+    const box = image.getBoundingClientRect();
+    const at = (fx: number, fy: number) => ({ x: box.left + box.width * fx, y: box.top + box.height * fy });
+    const from = at(0.2, 0.2);
+    const to = at(0.7, 0.6);
+    const send = (type: string, point: { x: number; y: number }) =>
+      image.dispatchEvent(
+        new PointerEvent(type, { clientX: point.x, clientY: point.y, bubbles: true, pointerId: 1, pointerType: "mouse", button: 0 }),
+      );
+    send("pointerdown", from);
+    send("pointermove", to);
+    send("pointerup", to);
+  });
+
+  await expect(page.locator("#comment-bar")).toBeVisible();
+  // The page is part of the address the reader sees, so the comment says where it is.
+  await expect(page.locator("#comment-addr")).toContainText("resume.pdf");
+  await expect(page.locator("#comment-addr")).toContainText("p3");
+
+  // And the crop the preview asks for names page 3, not page 1 — the whole point of
+  // reading the page from where the frame actually is.
+  await expect.poll(() => crops.length).toBeGreaterThan(0);
+  expect(crops[0]).toContain("page=3");
+  expect(crops[0]).toContain("region=");
+  expect(await page.locator("#comment-preview").getAttribute("src")).toContain("page=3");
 });

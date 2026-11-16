@@ -49,13 +49,34 @@ import { renderMarkdown } from "./markdown.js";
 import { modelKey } from "../shared/model-key.js";
 import { readBody as readBodyShared } from "../shared/serve-routes.js";
 import { runCommand } from "../commands/command-surface.js";
-import { imageTypeOf, isMarkdown } from "../durable/artifacts.js";
+import { imageTypeOf, isMarkdown, isPdf } from "../durable/artifacts.js";
 import { currentAddress, MAX_COMMENT_CHARS, modelText } from "../durable/comments.js";
 import { entriesBefore } from "../durable/entries.js";
 import type { CommentRegion, SessionHost } from "../session-host/api.js";
 import { logger } from "../logger.js";
 
 /** Keep a number inside a range, without trusting the query string. */
+/**
+ * The artifact origin, as a CSP source for images — or nothing when there is none.
+ *
+ * A bare origin and no path: `img-src https://artifacts.example` allows any image that
+ * host serves, which is the whole point (the crop URL carries a key and a page, so the
+ * path is not fixed). Empty string when unset, so a deployment with no artifact viewer
+ * keeps the narrowest possible policy rather than an allowance it cannot use.
+ */
+function artifactImageOrigin(base: string | undefined): string {
+  const trimmed = (base ?? "").trim().replace(/\/$/, "");
+  if (trimmed === "") return "";
+  try {
+    const url = new URL(trimmed);
+    return ` ${url.protocol}//${url.host}`;
+  } catch {
+    // Not a URL: say nothing rather than emit a broken source expression, which would
+    // make the browser drop the *whole* `img-src` directive and fall back to `default-src`.
+    return "";
+  }
+}
+
 function clamp(value: number, low: number, high: number): number {
   return Math.min(high, Math.max(low, value));
 }
@@ -305,7 +326,14 @@ export async function handleWebRequest(
       // would refuse `data:` too if the list did not name it. `data:` is here
       // for the composer's optimistic preview of a just-pasted image, which is
       // this origin's own bytes. No CDN, no avatars, no remote anything.
-      "Content-Security-Policy": "img-src 'self' data:; object-src 'none'; base-uri 'self'",
+      //
+      // The *artifact origin* is the one named exception, and it is not a hole:
+      // the comment composer previews the crop a selection will send, and that
+      // crop is served by the artifact host. Without it the preview could never
+      // load — `naturalWidth` 0, nothing shown — which is exactly how it was
+      // discovered. It is only named when the deployment has an artifact origin at
+      // all, and it grants nothing beyond `img-src`: no script, no frame, no fetch.
+      "Content-Security-Policy": `img-src 'self' data:${artifactImageOrigin(options.artifactsBaseUrl)}; object-src 'none'; base-uri 'self'`,
     });
     res.end(webPage());
     return true;
@@ -418,6 +446,9 @@ export async function handleWebRequest(
           // view: a picture has no lines to number and no text to show, and asking
           // for `?view=source` would answer with its bytes under a text content type.
           image: imageTypeOf(artifact.key) !== undefined,
+          // A PDF is framed like a picture but is not one: the drawer asks for a *page*
+          // and offers paging, and ↗ opens the PDF itself rather than a raster.
+          pdf: isPdf(artifact.key),
         })),
       ),
     );

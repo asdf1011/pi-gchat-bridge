@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { deflateSync } from "node:zlib";
+import { spawnSync } from "node:child_process";
 
 import { inProcessSessionHost } from "../src/session-host/inprocess.js";
 import type { BridgeHost } from "../src/durable/host.js";
@@ -284,6 +285,9 @@ test("submit() passes an inline image through as a model block", async () => {
   assert.equal(draft.content[1].mimeType, "image/png");
 });
 
+/** Whether PyMuPDF is installed, so a PDF test can be skipped rather than fail here. */
+const hasPdf = spawnSync("python3", ["-c", "import pymupdf"]).status === 0;
+
 /**
  * A 48x32 RGBA PNG, built here so a region comment has a real picture to crop.
  *
@@ -443,6 +447,63 @@ test("the region a comment selected can be cropped, and an unlisted file cannot"
     // through a comment's rectangle.
     assert.equal(
       await seam.cropArtifactRegion(1, "not-an-artifact.png", { x: 0, y: 0, width: 8, height: 8, imageWidth: 48, imageHeight: 32 }),
+      undefined,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a region of a PDF is cropped from the page it names", { skip: !hasPdf && "pymupdf is not available" }, async () => {
+  // The comment path for a document: the page is rendered and the rectangle cut from
+  // *that* picture. Cropping the file's own bytes would cut into compressed structure
+  // and produce noise, so this is the seam that has to render first.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-seam-pdf-"));
+  try {
+    const file = path.join(root, "resume.pdf");
+    const made = spawnSync("python3", [
+      "-c",
+      [
+        "import sys, pymupdf",
+        "document = pymupdf.open()",
+        "first = document.new_page()",
+        "first.insert_text((72, 72), 'page one')",
+        "second = document.new_page()",
+        "second.insert_text((72, 72), 'page two')",
+        "document.save(sys.argv[1])",
+      ].join("\n"),
+      file,
+    ]);
+    assert.equal(made.status, 0, "the fixture PDF was written");
+
+    const seam = inProcessSessionHost({
+      host: fakeHost({
+        conversations: [1],
+        view: {
+          entries: [
+            { id: 3, model: [{ content: [{ type: "toolCall", name: "write", arguments: { path: file } }] }] },
+          ],
+          docs: {},
+        },
+      }),
+      roots: [fs.realpathSync(root)],
+    });
+
+    // Page 2's raster, cropped. The dimensions prove it was rendered rather than read.
+    const cropped = await seam.cropArtifactRegion(1, "resume.pdf", {
+      x: 40, y: 40, width: 200, height: 120, imageWidth: 1240, imageHeight: 1755, page: 2,
+    });
+    assert.ok(cropped, "the page was rendered and cropped");
+    assert.equal(cropped.width, 200);
+    assert.equal(cropped.height, 120);
+    assert.equal(cropped.mimeType, "image/png");
+    assert.equal(Buffer.from(cropped.data, "base64").readUInt32BE(0), 0x89504e47, "a real PNG");
+
+    // A page the document does not have crops nothing, rather than page 1 by accident.
+    assert.equal(
+      await seam.cropArtifactRegion(1, "resume.pdf", {
+        x: 40, y: 40, width: 200, height: 120, imageWidth: 1240, imageHeight: 1755, page: 9,
+      }),
       undefined,
     );
   } finally {

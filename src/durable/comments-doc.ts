@@ -47,6 +47,14 @@ export type StoredRegion = {
   height: number;
   imageWidth: number;
   imageHeight: number;
+  /**
+   * Which page of a document the rectangle is on, 1-based. Absent for a picture.
+   *
+   * Stored because it is part of *what was commented on*, not a display hint: a
+   * rectangle on page 3 means nothing on page 1, and there is no way to recover the
+   * page later from the coordinates alone.
+   */
+  page?: number;
 };
 
 /**

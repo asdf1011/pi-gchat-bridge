@@ -392,3 +392,19 @@ const IMAGE_TYPES: Readonly<Record<string, string>> = {
 export function imageTypeOf(key: string): string | undefined {
   return IMAGE_TYPES[path.extname(key).toLowerCase()];
 }
+
+/**
+ * Whether this artifact is a PDF, which the viewer renders a page at a time.
+ *
+ * A PDF is *not* an image: it has pages, and a page has to be rasterised before it can
+ * be drawn or commented on. The renderer is in `web/pdf.ts`, and this predicate exists
+ * here because the artifact *list* needs the answer too — a row says "pdf" so a reader
+ * knows what opens, and the drawer decides from the same fact whether to ask for a
+ * page rather than the file itself.
+ *
+ * Extension-based, like every other type decision in this file: the name is what a
+ * person reads, and a `.pdf` that is not a PDF fails at the renderer with a reason.
+ */
+export function isPdf(key: string): boolean {
+  return path.extname(key).toLowerCase() === ".pdf";
+}

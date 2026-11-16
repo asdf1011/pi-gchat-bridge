@@ -26,6 +26,7 @@ import type { AgentChange, ConversationId, UserInput } from "@earendil-works/pi-
 import {
   deriveArtifacts,
   imageTypeOf,
+  isPdf,
   mergeArtifacts,
   presentArtifacts,
   readArtifactBytes,
@@ -33,6 +34,7 @@ import {
   type ArtifactFile,
 } from "../durable/artifacts.js";
 import { cropRegion } from "../web/crop.js";
+import { renderPdfPage } from "../web/pdf.js";
 import {
   annotate,
   artifactKeyForPath,
@@ -688,10 +690,23 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
       const files = await listArtifacts(conversationId);
       const artifact = files?.find((candidate) => candidate.key === file);
       if (artifact === undefined) return undefined;
-      const type = imageTypeOf(artifact.key);
-      if (type === undefined) return undefined;
-      const bytes = readArtifactBytes(artifact).bytes;
-      const cropped = cropRegion(bytes, type, { ...region, imageWidth: 0, imageHeight: 0 });
+
+      // A PDF's rectangle is a rectangle of one *page*, so the page is rendered first
+      // and the crop is cut from that picture — the same two steps the artifact origin
+      // takes for `?page=N&png&region=`. Cropping the file's bytes directly would cut
+      // into compressed document structure.
+      let source: { bytes: Buffer; type: string };
+      if (isPdf(artifact.key)) {
+        const rendered = await renderPdfPage(artifact.path, region.page ?? 1);
+        if (rendered === undefined) return undefined;
+        source = { bytes: rendered.bytes, type: "image/png" };
+      } else {
+        const type = imageTypeOf(artifact.key);
+        if (type === undefined) return undefined;
+        source = { bytes: readArtifactBytes(artifact).bytes, type };
+      }
+
+      const cropped = cropRegion(source.bytes, source.type, { ...region, imageWidth: 0, imageHeight: 0 });
       if (cropped === undefined) return undefined;
       return {
         data: cropped.bytes.toString("base64"),

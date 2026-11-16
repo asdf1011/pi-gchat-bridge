@@ -82,7 +82,7 @@ function currentKey() {
  * pool is capped: every entry is a live document with its own scripts and memory, and
  * a conversation with forty artifacts should not keep forty of them.
  */
-function frameFor(key, markdown, image, url) {
+function frameFor(key, markdown, image, url, pdf = false) {
   const existing = framesByKey.get(key);
   if (existing) return existing;
   const frame = document.createElement('iframe');
@@ -91,7 +91,8 @@ function frameFor(key, markdown, image, url) {
   frame.setAttribute('referrerpolicy', 'no-referrer');
   frame.dataset.key = key;
   frame.dataset.image = image ? '1' : '';
-  frame.classList.toggle('image', image);
+  frame.dataset.pdf = pdf ? '1' : '';
+  frame.classList.toggle('image', image || pdf);
   // Created *inside* the strip and never moved: an iframe that changes parent is
   // re-fetched, so the pool has to be positional rather than shuffled between
   // containers.
@@ -186,15 +187,34 @@ const artifactsTitle = document.getElementById('artifacts-title');
  * how the other numbered anything. Everything else opens as the source view,
  * where a line number is the obvious unit.
  */
-function artifactUrl(key, markdown, image) {
+function artifactUrl(key, markdown, image, pdf) {
   const path = key.split('/').map(encodeURIComponent).join('/');
+  // `pdf` is a third kind beside markdown and image: a document with pages, which the
+  // server renders one page at a time. It is framed exactly like a picture — the
+  // document it builds is a picture with paging around it — so the two share a branch.
   // An image has no view to choose, but it does have two URLs: the plain one is a
   // document that centres the picture on this theme's background (a browser paints
   // an image document's own backdrop white, which is a white slab in a dark drawer),
   // and `?raw` is the bytes themselves. The drawer frames the first and ↗ opens the
   // second, which is what a person means by "open the picture".
-  if (image) return artifactsBase + '/c/' + current + '/' + path;
+  //
+  // A PDF is framed the same way, one page at a time: the document the server builds
+  // around the *rendered* page. Which page lives in the frame's URL, and the paging
+  // links inside the document are how it changes — so reloading, or following a link
+  // to `?page=3`, lands on the page it names.
+  if (image || pdf) return artifactsBase + '/c/' + current + '/' + path;
   return artifactsBase + '/c/' + current + '/' + path + (markdown ? '?render' : '?view=source');
+}
+
+/**
+ * Where a PDF's own bytes live — what ↗ opens.
+ *
+ * Deliberately not the rendered page: a rasterised page is for *reviewing*, where a
+ * rectangle is a thing you can draw. A PDF itself is for *reading*, and the browser's
+ * viewer gives text selection, links and zoom that a picture cannot.
+ */
+function pdfRawUrl(key) {
+  return artifactsBase + '/c/' + current + '/' + key.split('/').map(encodeURIComponent).join('/') + '?raw';
 }
 
 /** Where an image's own bytes live, for the new-tab button and for download links. */
@@ -215,14 +235,48 @@ function rawArtifactUrl(key) {
  */
 function regionArtifactUrl(key, region) {
   const path = key.split('/').map(encodeURIComponent).join('/');
-  return (
-    artifactsBase +
-    '/c/' +
-    current +
-    '/' +
-    path +
-    '?region=x' + region.x + ',y' + region.y + ',w' + region.width + ',h' + region.height
-  );
+  // A PDF's rectangle is a rectangle of *one page*, so the page travels with it: the
+  // crop is cut from `?page=N&png`, and without the page a comment on page 3 would crop
+  // page 1. The page is the one on the *region*, which the document itself reported —
+  // reading it back out of the frame's URL was the bug, because a page turn navigates
+  // the frame and a cross-origin frame's location cannot be read from here at all.
+  const reported = Number(region.page);
+  const page = Number.isFinite(reported) && reported > 0 ? reported : pageOfFrame(key);
+  const query = [
+    ...(page === undefined ? [] : ['page=' + page, 'png']),
+    'region=x' + region.x + ',y' + region.y + ',w' + region.width + ',h' + region.height,
+  ];
+  return artifactsBase + '/c/' + current + '/' + path + '?' + query.join('&');
+}
+
+/**
+ * Which page a PDF frame is on, as a *fallback*.
+ *
+ * The document reports its own page in the region message, and that is the answer used:
+ * it is the only party that knows, because a page turn navigates the frame and a
+ * cross-origin frame's location cannot be read from here at all. This exists for a
+ * document that does not report one — an older cached build, or a frame still on its
+ * first page, where `src` is whatever this page set and so is right.
+ */
+function pageOfFrame(key) {
+  const frame = framesByKey.get(key);
+  if (!frame) return undefined;
+  // The frame's *current* location where it can be read, else its `src`. A paging link
+  // navigates the frame without touching the parent's DOM, so `getAttribute('src')` keeps
+  // saying page 1; cross-origin `contentWindow.location` throws, and the attribute is then
+  // all there is. Read when the two agree, which is why the message's own report is the
+  // real answer and this is only the fallback.
+  let href = '';
+  try {
+    href = frame.contentWindow?.location?.href ?? '';
+  } catch {
+    href = '';
+  }
+  if (href === '') href = frame.getAttribute('src') || '';
+  const match = /[?&]page=(\d+)/.exec(href);
+  if (!match) return undefined;
+  const page = Number(match[1]);
+  return Number.isFinite(page) && page > 0 ? page : undefined;
 }
 
 /**
@@ -245,7 +299,24 @@ function regionPreviewUrl(selection) {
  * picture nobody is looking at.
  */
 function imageFrameFor(source) {
-  return currentFrame && currentFrame.contentWindow === source ? currentFrame : null;
+  if (!currentFrame || !source) return null;
+  if (currentFrame.contentWindow === source) return currentFrame;
+  // A frame that has *navigated* is the same frame with a different window. Identity on
+  // `contentWindow` holds for the initial document and then fails — and cross-origin it
+  // fails harder, because `contentWindow` reads as `null` once the frame is on another
+  // host. That is not an edge case here: the drawer frames the artifact host, so every
+  // page turn is a cross-origin navigation, and the region message would be dropped
+  // exactly when a reader had paged forward.
+  //
+  // So the pool is searched instead: a message from any frame this drawer owns is a
+  // message about a document the drawer is showing. It is not weaker than the identity
+  // check it replaces — `default-src 'none'` and the sandbox mean these frames can only
+  // talk to this window, and `window.addEventListener('message')` on the parent already
+  // decides everything else by `data.t`.
+  for (const frame of framesByKey.values()) {
+    if (frame.contentWindow === source) return frame;
+  }
+  return null;
 }
 
 /**
@@ -277,6 +348,12 @@ function commentOnRegion(message) {
   if (!region || typeof region !== 'object') return;
   if (typeof message.file !== 'string' || message.file === '') return;
   hideSelectionBar();
+  // Which page this rectangle is on. The *document* says, in its message, because it is
+  // the only party that knows: a page turn navigates the frame, and cross-origin the
+  // parent cannot read where the frame ended up. `pageOfFrame` is the fallback for a
+  // document that does not report one (an image, or an older cached build).
+  const reported = Number(message.page);
+  const page = Number.isFinite(reported) && reported > 0 ? reported : pageOfFrame(message.file);
   showCommentBar({
     file: message.file,
     region: {
@@ -286,6 +363,7 @@ function commentOnRegion(message) {
       height: Number(region.height) || 0,
       imageWidth: Number(region.imageWidth) || 0,
       imageHeight: Number(region.imageHeight) || 0,
+      ...(page === undefined ? {} : { page }),
     },
     intent: message.intent === 'comment' ? 'comment' : undefined,
   });
@@ -337,6 +415,14 @@ function watchFrameLoads(frame) {
     if (frame.hidden) return;
     frameLoadsSeen += 1;
     if (frameLoadsSeen <= frameLoadsCaused) return; // one of ours
+    // A *page turn* is a navigation this page did not cause and does not mean "back".
+    // A PDF's paging links navigate the frame itself, so without this every page turn
+    // closed the drawer back to the list — the document was readable only on page 1.
+    // Counted as ours, because it is the drawer's own document moving within itself.
+    if (frame.dataset.pdf === '1' && frame === currentFrame) {
+      frameLoadsCaused = frameLoadsSeen;
+      return;
+    }
     frameLoadsCaused = frameLoadsSeen;
     if (artifactsOpen && artifactsPanel.classList.contains('showing-doc')) applyListState();
   });
@@ -365,7 +451,7 @@ function loadFrameIn(frame, url) {
  * and the keyboard both go through here, so "next" looks the same however you
  * asked for it.
  */
-function showArtifact(key, markdown, push = true, image = false, from = 'right') {
+function showArtifact(key, markdown, push = true, image = false, from = 'right', pdf = false) {
   for (const li of artifactsList.children) li.classList.toggle('on', li.dataset.key === key);
   // The document slides over the list and takes the drawer's full width, so a
   // name-heavy list stops competing with the thing being read.
@@ -400,12 +486,13 @@ function showArtifact(key, markdown, push = true, image = false, from = 'right')
   // A frame that already holds this document is reused, which is what makes going
   // back and forth instant — and, more importantly, what makes a *step* possible
   // without reloading anything that is on screen.
-  showKey(key, markdown, image);
+  showKey(key, markdown, image, pdf);
   closeCommentBar();
   closeThread();
   artifactsNewTab.dataset.key = key;
   artifactsNewTab.dataset.markdown = markdown ? '1' : '';
   artifactsNewTab.dataset.image = image ? '1' : '';
+  artifactsNewTab.dataset.pdf = pdf ? '1' : '';
 }
 
 /**
@@ -415,9 +502,9 @@ function showArtifact(key, markdown, push = true, image = false, from = 'right')
  * otherwise), parked in the strip and made current. No existing frame is reloaded,
  * which is the whole point of the pool.
  */
-function showKey(key, markdown, image) {
-  const url = artifactUrl(key, markdown, image);
-  const frame = frameFor(key, markdown, image, url);
+function showKey(key, markdown, image, pdf) {
+  const url = artifactUrl(key, markdown, image, pdf);
+  const frame = frameFor(key, markdown, image, url, pdf);
   // The frame is in the strip before it is made current, so it is already laid out
   // and, on a re-visit, already painted. Neighbours are left loaded and detached:
   // that is what makes the next step instant instead of a reload.
@@ -524,7 +611,7 @@ async function restoreArtifact(key) {
     }
     return;
   }
-  showArtifact(key, row.dataset.markdown === '1', false, row.dataset.image === '1');
+  showArtifact(key, row.dataset.markdown === '1', false, row.dataset.image === '1', 'right', row.dataset.pdf === '1');
 }
 
 /**
@@ -555,6 +642,7 @@ async function loadArtifacts(preserve) {
     li.dataset.key = row.key;
     li.dataset.markdown = row.markdown ? '1' : '';
     li.dataset.image = row.image ? '1' : '';
+    li.dataset.pdf = row.pdf ? '1' : '';
     li.innerHTML = '<span class="col"><span class="name"></span><span class="dir"></span></span><span class="counts"></span>';
     // The name first and the directory underneath: a list of full paths is mostly
     // directory, and the drawer only needs enough to tell two files apart.
@@ -567,10 +655,12 @@ async function loadArtifacts(preserve) {
     // `logo.png` opens as a picture rather than as a page of source, and the
     // distinction is the whole reason the viewer needed a new kind of row.
     if (row.image) counts.unshift('image');
+    else if (row.pdf) counts.unshift('pdf');
     else if (row.markdown) counts.unshift('markdown');
     li.querySelector('.counts').textContent = counts.join(', ');
     li.title = row.key;
-    li.onclick = () => showArtifact(row.key, Boolean(row.markdown), true, Boolean(row.image));
+    li.onclick = () =>
+      showArtifact(row.key, Boolean(row.markdown), true, Boolean(row.image), 'right', Boolean(row.pdf));
     artifactsList.append(li);
   }
   if (preserve && framed !== '') {
@@ -660,6 +750,7 @@ function artifactOrder() {
     key: li.dataset.key,
     markdown: li.dataset.markdown === '1',
     image: li.dataset.image === '1',
+    pdf: li.dataset.pdf === '1',
   }));
 }
 
@@ -795,7 +886,8 @@ function prepareNeighbour(side) {
     entry.key,
     entry.markdown,
     entry.image,
-    artifactUrl(entry.key, entry.markdown, entry.image),
+    artifactUrl(entry.key, entry.markdown, entry.image, entry.pdf),
+    entry.pdf,
   );
   gesture.frame.hidden = false;
   // Order in the strip: `order: -1` puts it before the current pane (left), the
@@ -951,6 +1043,7 @@ function artefactsAfterStep(entry) {
   artifactsNewTab.dataset.key = entry.key;
   artifactsNewTab.dataset.markdown = entry.markdown ? '1' : '';
   artifactsNewTab.dataset.image = entry.image ? '1' : '';
+  artifactsNewTab.dataset.pdf = entry.pdf ? '1' : '';
   closeCommentBar();
   closeThread();
 }
@@ -961,11 +1054,18 @@ artifactsNewTab.onclick = () => {
     // An image opens as itself, not as the wrapper that frames it: a new tab is
     // where you want the picture, and the browser's own viewer gives it the whole
     // window and a right-click "Save as".
+    //
+    // A PDF opens as the PDF. The drawer shows one rasterised page because a page is
+    // what a rectangle can be drawn on, but a tab is for reading, and the browser's
+    // own viewer has text selection, links and zoom that a rendered image cannot.
     const isImage = artifactsNewTab.dataset.image === '1';
+    const isPdf = artifactsNewTab.dataset.pdf === '1';
     window.open(
       isImage
         ? rawArtifactUrl(key)
-        : artifactUrl(key, artifactsNewTab.dataset.markdown === '1', false),
+        : isPdf
+          ? pdfRawUrl(key)
+          : artifactUrl(key, artifactsNewTab.dataset.markdown === '1', false),
       '_blank',
       'noopener',
     );

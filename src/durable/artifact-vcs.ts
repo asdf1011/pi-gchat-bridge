@@ -306,6 +306,8 @@ export interface ArtifactRegion {
   height: number;
   imageWidth: number;
   imageHeight: number;
+  /** Which page of a document the rectangle is on, 1-based. Absent for a picture. */
+  page?: number;
 }
 
 /** A comment on an artifact, anchored to `(revision, line)` pairs. */

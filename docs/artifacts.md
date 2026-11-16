@@ -198,6 +198,29 @@ rather than off the disk; the live file remains the default. Bindings record the
 newest revision each conversation produced (`ArtifactRevision`), which is what a
 revision picker will list.
 
+## PDFs
+
+A PDF is not an image and not text: it is a document with pages. Clicking one in the
+drawer shows **page 1, rendered** — not "looks binary", which is what it used to say.
+
+- **The page is a PNG**, rendered by PyMuPDF (the library the conversion that prompted
+  this feature used: `pymupdf.open(...).get_pixmap(dpi=150)`). A rasterised page cannot
+  become a document, so the artifact origin keeps `default-src 'none'` — the one
+  property that made client-side rendering with pdf.js unattractive, since it would
+  have needed `worker-src` and wasm on the strictest surface in the deployment.
+- **`?page=N` is the document**, `?page=N&png` is the page as an image, and `?raw` is
+  the PDF itself. ↗ opens `?raw`: a raster is for *reviewing*, where a rectangle is
+  something you can draw; the PDF is for *reading*, where the browser's own viewer has
+  text selection, links and zoom.
+- **Rendering is lazy and per page.** A 40-page document is one page's work, not forty;
+  the pixel budget is capped at 40 megapixels, and a page that would exceed it is
+  rendered at the largest DPI that fits rather than refused.
+- **The page count is read from the document**, so the strip under the page says "page
+  2 of 7" and offers the pages either side.
+- **A comment on a page names the page**: `resume.pdf#p3,x120,y64,w320,h180`. The page
+  leads the address because it is the first thing that locates the rectangle — page 3
+  and page 1 are different places, and no amount of coordinates recovers which.
+
 ### Commenting on part of a picture
 
 A picture has no lines, so the unit is a rectangle dragged over it. The gesture
@@ -263,6 +286,13 @@ the part of a picture a person drew is the one fact here that cannot be re-deriv
   without the wasm module, sends the comment without the attachment. The words
   are the part that must not be lost, so this is a missing picture rather than a
   failed comment.
+- **A PDF page is a picture once rendered, and is commented on as one.** There is no
+  snapping to text blocks or paragraphs: the PDF's text layer is available, and a drag
+  could quote the paragraph under it, but the rectangles a person draws are what the
+  address records. Reading a page is what ↗ and the browser's viewer are for.
+- **HTML is not rendered.** The mechanism would be the same (Chromium via Playwright,
+  then the identical page-image path) but it needs a browser process per render, so it
+  is a separate decision rather than a missing branch.
 - **`BRIDGE_WEB_ENGINE=link`** publishes the comment operations over the chord
   link (see `link-contract.ts`); the other adapter-side operations still do not.
 - **Replying has no idempotency key.** A double-click on "Reply" can start two

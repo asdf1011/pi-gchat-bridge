@@ -101,6 +101,15 @@ export interface Region {
    */
   imageWidth: number;
   imageHeight: number;
+  /**
+   * Which page of a document this rectangle is on, 1-based.
+   *
+   * Absent for a picture, present for a PDF. Unlike the rectangle it is not a
+   * *position* so much as part of the document's identity: page 3 of a PDF is a
+   * different place from page 1, and a rectangle without its page would mean "some
+   * 320x180 box somewhere in the document".
+   */
+  page?: number;
 }
 
 /**
@@ -133,6 +142,10 @@ export function normalizeRegion(value: unknown): Region | undefined {
   const imageHeight = number(input.imageHeight);
   if (x === undefined || y === undefined || width === undefined || height === undefined) return undefined;
   if (imageWidth === undefined || imageHeight === undefined) return undefined;
+  // A page is 1-based when it is there at all; `0` is not "before page one", it is a
+  // number somebody got wrong.
+  const page = number(input.page);
+  if (input.page !== undefined && (page === undefined || page < 1)) return undefined;
   if (imageWidth < 1 || imageHeight < 1) return undefined;
   if (width <= 0 || height <= 0) return undefined;
   // Inside the picture: a rectangle that starts off it describes nothing.
@@ -142,7 +155,12 @@ export function normalizeRegion(value: unknown): Region | undefined {
   const bottom = Math.min(Math.round(imageHeight), Math.max(Math.round(y + height), top + 1));
   const clamped = { x: left, y: top, width: right - left, height: bottom - top };
   if (clamped.width < MIN_REGION_SIDE || clamped.height < MIN_REGION_SIDE) return undefined;
-  return { ...clamped, imageWidth: Math.round(imageWidth), imageHeight: Math.round(imageHeight) };
+  return {
+    ...clamped,
+    imageWidth: Math.round(imageWidth),
+    imageHeight: Math.round(imageHeight),
+    ...(page === undefined ? {} : { page: Math.round(page) }),
+  };
 }
 
 /**
@@ -154,18 +172,25 @@ person reading it can hold the four numbers against a picture, and because a rat
 would silently behave differently for the same comment after a crop.
  */
 export function regionSuffix(region: Region): string {
-  return `#x${region.x},y${region.y},w${region.width},h${region.height}`;
+  // A page leads: `resume.pdf#p1,x120,y64,w320,h180`. First because it is the part a
+  // person reads to know *where in the document* they are being sent, and because it
+  // matches how a page is addressed on its own (`?page=1`).
+  const page = region.page === undefined ? "" : `p${region.page},`;
+  return `#${page}x${region.x},y${region.y},w${region.width},h${region.height}`;
 }
 
 /** The rectangle an address names, or `undefined` when it names a line instead. */
 export function parseRegion(fragment: string): Region | undefined {
-  const match = /^#?x(\d+),y(\d+),w(\d+),h(\d+)$/.exec(fragment.trim());
+  const match = /^#?(?:p(\d+),)?x(\d+),y(\d+),w(\d+),h(\d+)$/.exec(fragment.trim());
   if (!match) return undefined;
+  const page = match[1] === undefined ? undefined : Number(match[1]);
+  if (page !== undefined && page < 1) return undefined;
   const region = {
-    x: Number(match[1]),
-    y: Number(match[2]),
-    width: Number(match[3]),
-    height: Number(match[4]),
+    ...(page === undefined ? {} : { page }),
+    x: Number(match[2]),
+    y: Number(match[3]),
+    width: Number(match[4]),
+    height: Number(match[5]),
     // The size is not in the address: a reader sees the rectangle, and the size it was
     // measured against is a fact about the file, not about the comment.
     imageWidth: 0,
@@ -417,10 +442,14 @@ export function imageRegionText(comment: Printable & { region: Region }, options
     region.imageWidth > 0 && region.imageHeight > 0
       ? ` of a ${region.imageWidth}x${region.imageHeight} image`
       : "";
+  // A PDF is a document, not a picture, and the page is the first thing a model needs
+  // to know about the rectangle: "page 3" is where the reader was, and a rectangle
+  // quoted without it would be a box in a document of unknown length.
+  const onPage = region.page === undefined ? "" : `, on page ${region.page} of the document`;
   return [
     `${who} commented on the selected region of ${where}${tag}`,
-    `Selected region: ${region.width}x${region.height} at (${region.x}, ${region.y})${size}.`,
-    "The selection is attached to this message as an image: it is that rectangle of the picture, cut out, so you can see exactly what was pointed at even if you cannot view the whole file.",
+    `Selected region: ${region.width}x${region.height} at (${region.x}, ${region.y})${size}${onPage}.`,
+    "The selection is attached to this message as an image: it is that rectangle of the page, rendered and cut out, so you can see exactly what was pointed at even if you cannot view the whole file.",
     comment.text.trim(),
   ]
     .filter((part) => part !== "")

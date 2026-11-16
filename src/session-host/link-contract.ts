@@ -223,6 +223,8 @@ export const CommentRegionSchema = Type.Object({
   height: Type.Number(),
   imageWidth: Type.Number(),
   imageHeight: Type.Number(),
+  // Present for a PDF: the rectangle is a rectangle of one page.
+  page: Type.Optional(Type.Number()),
 });
 
 /**

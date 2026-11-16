@@ -94,6 +94,10 @@ test("every surface file is one of the ones we know about", () => {
     "web/crop.ts",
     "web/manifest.ts",
     "web/markdown.ts",
+    // Rasterising one page of a PDF, for the same reason `crop.ts` is here: reached from
+    // two surfaces — the artifact origin's `?page=N&png` and the seam's
+    // `cropArtifactRegion` — and it knows about neither, taking a path and a page number.
+    "web/pdf.ts",
     "web/routes.ts",
     "web/sink.ts",
   ]);

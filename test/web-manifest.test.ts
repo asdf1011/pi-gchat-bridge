@@ -37,7 +37,7 @@ interface Served {
 }
 
 /** A real socket, so the path is what a browser would send. */
-async function serve(): Promise<Served> {
+async function serve(options: { artifactsBaseUrl?: string } = {}): Promise<Served> {
   const server = http.createServer((req, res) => {
     void (async () => {
       const url = new URL(req.url ?? "/", "http://localhost");
@@ -45,6 +45,7 @@ async function serve(): Promise<Served> {
         seam,
         model: { provider: "p", modelId: "m" },
         who: {},
+        ...(options.artifactsBaseUrl === undefined ? {} : { artifactsBaseUrl: options.artifactsBaseUrl }),
       });
       if (!handled) {
         res.writeHead(404, { "Content-Type": "application/json" });
@@ -240,4 +241,48 @@ test("the mount root agrees with the page's own idea of it", () => {
   assert.equal(mountRootOf("/pi/web/manifest.webmanifest"), "/pi/web/");  // A path that is not a page is not a mount either: nothing serves the app there,
   // so there is no root to install it at.
   assert.equal(mountRootOf("/nonsense"), undefined);
+});
+
+test("the artifact origin is the one host the page may load an image from", async () => {
+  // The comment composer previews the crop a selection will send, and that crop is served
+  // by the artifact origin — a different host. Without this the preview loads and paints
+  // nothing (`naturalWidth` 0), which is how the gap was found: a PDF's page crop is the
+  // visible picture, so a broken preview is a broken comment.
+  //
+  // The allowance is exactly that origin and nothing more: no script, no frame, no
+  // connect. And a deployment with no artifact viewer keeps the original, narrowest form.
+  const withArtifacts = await serve({ artifactsBaseUrl: "https://artifacts.example" });
+  try {
+    const csp = (await fetch(`${withArtifacts.base}/7/`)).headers.get("content-security-policy") ?? "";
+    assert.match(csp, /img-src 'self' data: https:\/\/artifacts\.example;/, csp);
+    // Still closed everywhere else, and the whole origin is named — not a path, which a
+    // crop URL (a key, a page and a region) could not fit inside.
+    assert.match(csp, /object-src 'none'/);
+    assert.match(csp, /base-uri 'self'/);
+    assert.doesNotMatch(csp, /script-src[^;]*artifacts/);
+    assert.doesNotMatch(csp, /connect-src/);
+  } finally {
+    await withArtifacts.close();
+  }
+
+  const without = await serve();
+  try {
+    const csp = (await fetch(`${without.base}/7/`)).headers.get("content-security-policy") ?? "";
+    assert.match(csp, /img-src 'self' data:;/, "no allowance nobody can use");
+  } finally {
+    await without.close();
+  }
+});
+
+test("an artifact base that is not a URL is ignored rather than breaking img-src", async () => {
+  // A malformed source expression makes the browser drop the whole directive, which would
+  // fall back to `default-src` and quietly change what the page may load. Saying nothing
+  // is the safe failure.
+  const served = await serve({ artifactsBaseUrl: "not a url" });
+  try {
+    const csp = (await fetch(`${served.base}/7/`)).headers.get("content-security-policy") ?? "";
+    assert.match(csp, /img-src 'self' data:;/, csp);
+  } finally {
+    await served.close();
+  }
 });

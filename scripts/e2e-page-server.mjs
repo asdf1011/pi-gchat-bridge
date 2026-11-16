@@ -46,6 +46,10 @@ const server = http.createServer((req, res) => {
   void handleWebRequest(req, res, url, {
     seam,
     model: { provider: "deepseek", modelId: "deepseek-flash" },
+    // The artifact origin the specs stub. The page's `img-src` names it so the comment
+    // composer's crop preview can load, which is a real deployment rule and not a test
+    // convenience: without it the preview silently fails to load and shows nothing.
+    artifactsBaseUrl: "https://artifacts.example",
   })
     .then((handled) => {
       if (handled || res.headersSent) return;
