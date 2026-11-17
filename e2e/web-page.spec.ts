@@ -2292,6 +2292,13 @@ test("artifacts: dragging over a picture selects a region and opens the comment 
   // pixels is real and the assertion below is not trivially true.
   expect(drawn.width).toBeGreaterThan(0);
 
+  // Arm the picture first. A drag over an unarmed picture is the browser's — that is
+  // what lets pan and pinch work — so commenting is now: press the button, then drag.
+  await page.locator("#comment-fab").click();
+  await expect
+    .poll(() => frame.evaluate(() => document.querySelector("img")!.classList.contains("armed")))
+    .toBe(true);
+
   // Drag across the left half of the picture. A mouse is used rather than a touch: the
   // region script listens to pointer events, and a mouse drag is the same gesture.
   await frame.evaluate(() => {
@@ -2586,6 +2593,16 @@ test("artifacts: the crop of a PDF comment names the page it was drawn on", asyn
     .toBe(true)
     .then(() => page.frames().find((f) => f !== page.mainFrame() && (f.url().includes("page=2") || f.url().includes("page=3")))!);
 
+  // Armed, so the drag after it is a selection rather than the browser's pan. Pressing
+  // the button is also what opens the composer, so an *unarmed* frame here would mean
+  // the arming message never crossed to the page that had navigated — which is the
+  // cross-origin case, and is why the page reports its own page number rather than the
+  // parent reading it.
+  await page.locator("#comment-fab").click();
+  await expect
+    .poll(() => frame.evaluate(() => document.querySelector("img")!.classList.contains("armed")))
+    .toBe(true);
+
   await frame.evaluate(() => {
     const image = document.querySelector("img")!;
     const box = image.getBoundingClientRect();
@@ -2612,4 +2629,155 @@ test("artifacts: the crop of a PDF comment names the page it was drawn on", asyn
   expect(crops[0]).toContain("page=3");
   expect(crops[0]).toContain("region=");
   expect(await page.locator("#comment-preview").getAttribute("src")).toContain("page=3");
+});
+
+test("artifacts: the comment button arms a picture, and leaves gestures alone until it does", async ({ page }) => {
+  // The mobile bug this exists for: `touch-action: none` on the picture made pan and
+  // pinch impossible, so a page could not be zoomed enough to read. The fix is a mode —
+  // the picture belongs to the browser until the comment button is pressed.
+  await stubApi(page);
+  await page.route("**/api/environment", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ artifactsBaseUrl: "https://artifacts.example", pageVersion: "t" }),
+    }),
+  );
+  await page.route("**/api/c/*/artifacts", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([{ key: "pi/out/shot.png", wrote: 1, edited: 0, markdown: false, image: true }]),
+    }),
+  );
+  await page.route("**/api/c/*/comments", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
+  );
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAYAAACinX6EAAAAJUlEQVR42u3NMQEAAAgDoC251a3gLwSgcyfTVFVVVVVVVVVVVVX1tQFrwAPhpO4WAAAAAElFTkSuQmCC",
+    "base64",
+  );
+  await page.route("https://artifacts.example/**", (route) => {
+    const url = route.request().url();
+    if (url.includes("?raw") || url.includes("region=")) {
+      return route.fulfill({ status: 200, contentType: "image/png", body: png });
+    }
+    return route.fulfill({ status: 200, contentType: "text/html", body: imageDocumentFor("pi/out/shot.png") });
+  });
+
+  await page.goto("/7/");
+  await page.locator("#artifacts-toggle").click();
+
+  // Nothing open: nothing to comment on.
+  await expect(page.locator("#comment-fab")).toBeHidden();
+
+  await page.locator("#artifact-list li").first().click();
+  await expect(page.locator("#comment-fab")).toBeVisible();
+
+  // Not the main frame: its fragment carries the artifact key, so a substring match on
+  // the key finds the drawer *page* rather than the document inside it.
+  const frame = page.frames().find((f) => f !== page.mainFrame() && f.url().includes("shot.png"))!;
+  const armed = async (): Promise<boolean> =>
+    frame.evaluate(() => document.querySelector("img")!.classList.contains("armed"));
+
+  // Unarmed, the picture hands touches to the browser: pan and pinch-zoom work.
+  const gesture = async (): Promise<string> =>
+    frame.evaluate(() => getComputedStyle(document.querySelector("img")!).touchAction);
+  expect(await gesture()).not.toBe("none");
+  expect(await armed()).toBe(false);
+
+  // A drag over an unarmed picture does nothing at all — it must not open a composer,
+  // and it must not draw a box.
+  await frame.evaluate(() => {
+    const image = document.querySelector("img")!;
+    const box = image.getBoundingClientRect();
+    const send = (type: string, x: number, y: number) =>
+      image.dispatchEvent(
+        new PointerEvent(type, { clientX: x, clientY: y, bubbles: true, pointerId: 1, pointerType: "mouse", button: 0 }),
+      );
+    send("pointerdown", box.left + 8, box.top + 8);
+    send("pointermove", box.left + 40, box.top + 24);
+    send("pointerup", box.left + 40, box.top + 24);
+  });
+  await expect(page.locator("#comment-bar")).toBeHidden();
+
+  // Pressing the button opens the composer *and* arms the picture.
+  await page.locator("#comment-fab").click();
+  await expect(page.locator("#comment-bar")).toBeVisible();
+  // The button steps aside for the composer: one action in that corner at a time.
+  await expect(page.locator("#comment-fab")).toBeHidden();
+  await expect.poll(armed).toBe(true);
+  expect(await gesture()).toBe("none");
+
+  // Now a drag is a selection, and it reaches the composer.
+  await frame.evaluate(() => {
+    const image = document.querySelector("img")!;
+    const box = image.getBoundingClientRect();
+    const send = (type: string, x: number, y: number) =>
+      image.dispatchEvent(
+        new PointerEvent(type, { clientX: x, clientY: y, bubbles: true, pointerId: 1, pointerType: "mouse", button: 0 }),
+      );
+    send("pointerdown", box.left + 4, box.top + 4);
+    send("pointermove", box.left + 40, box.top + 24);
+    send("pointerup", box.left + 40, box.top + 24);
+  });
+  await expect(page.locator("#comment-preview")).toBeVisible();
+  await expect(page.locator("#comment-addr")).toContainText("shot.png");
+});
+
+test("artifacts: pressing the comment button with nothing selected comments on the file", async ({ page }) => {
+  await stubApi(page);
+  await page.route("**/api/environment", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ artifactsBaseUrl: "https://artifacts.example", pageVersion: "t" }),
+    }),
+  );
+  await page.route("**/api/c/*/artifacts", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([{ key: "pi/notes.md", wrote: 1, edited: 0, markdown: false, image: false }]),
+    }),
+  );
+  const posted: unknown[] = [];
+  await page.route("**/api/c/*/comments", (route) => {
+    if (route.request().method() === "POST") {
+      posted.push(route.request().postDataJSON());
+      return route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true, id: "c1", submissionId: 5 }),
+      });
+    }
+    return route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+  });
+  await page.route("https://artifacts.example/**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "text/html",
+      body: `<!doctype html><html><body data-file="pi/notes.md"><pre>text</pre>
+        <script>${SWIPE_SCRIPT}</script></body></html>`,
+    }),
+  );
+
+  await page.goto("/7/");
+  await page.locator("#artifacts-toggle").click();
+  await page.locator("#artifact-list li").first().click();
+
+  await page.locator("#comment-fab").click();
+  await expect(page.locator("#comment-addr")).toContainText("the whole file");
+
+  await page.locator("#comment-text").fill("this document is out of date");
+  await page.locator("#comment-send").click();
+
+  await expect.poll(() => posted.length).toBe(1);
+  const body = posted[0] as { file: string; region?: unknown; line?: unknown; quote?: unknown };
+  expect(body.file).toBe("pi/notes.md");
+  // No position at all — not a region, not a line, not a quote. That is what makes it a
+  // comment on the file rather than on a place in it.
+  expect(body.region).toBeUndefined();
+  expect(body.line).toBeUndefined();
+  expect(body.quote).toBeUndefined();
 });

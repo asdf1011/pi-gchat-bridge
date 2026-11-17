@@ -425,7 +425,6 @@ export const REGION_SCRIPT = `
     var MIN_SIDE = 8;        // a tap is not a selection (see MIN_REGION_SIDE in comments.ts)
     var drag = null;         // { x, y } where the finger went down, in client coordinates
     var marquee = null;      // the box being drawn
-    var endedAt = 0;         // when a real drag finished, so the click it causes is not mistaken for a tap
 
     /** The drag so far, in the picture's own pixels, or null when it is not a selection. */
     function regionOf(from, to) {
@@ -469,10 +468,19 @@ export const REGION_SCRIPT = `
      * takes one *measurement*: the picture's size, nothing more, and the parent draws the
      * affordance that says "drag across the picture to comment on part of it".
      */
-    document.addEventListener("click", function () {
-      // A drag also produces a click on release. That one is the end of a selection, not a
-      // tap, and answering it would replace the comment box with the hint.
-      if (drag || Date.now() - endedAt < 400) return;
+    /**
+     * Tell the drawer this document can take a rectangle.
+     *
+     * Sent once, when the picture has loaded, rather than on a tap: what the drawer needs
+     * is a fact about the document, and the comment button is on screen from the moment
+     * the document is — waiting for a tap to discover it would mean the button either
+     * appears late or is offered for documents that cannot use it.
+     *
+     * naturalWidth travels in the message because the drawer had no other way of knowing
+     * the picture's size; it does not decide anything now, and is kept because it is one
+     * cheap field and it is what a future zoom-to-100 percent would want.
+     */
+    function announce() {
       parent.postMessage(
         {
           t: "pi-artifact-image",
@@ -482,9 +490,32 @@ export const REGION_SCRIPT = `
         },
         "*"
       );
+    }
+    if (image.complete) announce();
+    else image.addEventListener("load", announce, { once: true });
+
+    /**
+     * Whether a drag should draw a rectangle right now.
+     *
+     * The parent owns this decision — the comment button presses it — and it arrives as
+     * a message, because a framed document cannot read the page that frames it. Until
+     * it says so the picture belongs to the browser: panning, pinching and the drawer's
+     * swipe all work, and a drag across it does nothing at all.
+     */
+    var armed = false;
+
+    window.addEventListener("message", function (event) {
+      var data = event.data;
+      if (!data || data.t !== "pi-artifact-arm") return;
+      armed = data.armed === true;
+      image.classList.toggle("armed", armed);
+      // Arming clears anything half-drawn: the state that allowed the box has changed,
+      // and a box left on screen would look like a selection that no longer exists.
+      if (!armed) clear();
     });
 
     image.addEventListener("pointerdown", function (event) {
+      if (!armed) return;
       // Primary button or a finger; a right-click is the browser's menu.
       if (typeof event.button === "number" && event.button !== 0) return;
       // One finger only: a second is a pinch, and touch-action: none on the picture
@@ -527,7 +558,6 @@ export const REGION_SCRIPT = `
       // A press that ended where it began is a tap: no region, and no message — the
       // click that follows offers the hint instead.
       if (!region) return;
-      endedAt = Date.now();
       parent.postMessage(
         {
           t: "pi-artifact-region",
@@ -1313,12 +1343,18 @@ function imageDocument(input: {
      capped too, so a tall one does not need a scroll to see what it is. */
   img { max-width: 100%; max-height: 100%; object-fit: contain;
         image-rendering: auto; background: #8881; border-radius: .4rem; }
-  /* The picture is the gesture surface, so the browser must not claim a drag for
-     scrolling or for a back-swipe: touch-action: none hands every touch to the region
-     script, which is the only way a rectangle can be drawn on a phone. Vertical
-     scrolling of a picture too tall for the frame is the cost, and the drawer opens a
-     picture fitted rather than scrolling it (see the sizing above). */
-  img.crop-target { touch-action: none; cursor: crosshair; user-select: none;
+  /* The picture is *not* the gesture surface until somebody says they are commenting.
+     Taking every touch away from the browser is what makes a rectangle possible on a
+     phone, and it is also what made panning and pinching impossible: one finger cannot
+     mean both "select" and "pan", and a pinched page that cannot be zoomed is a page
+     that cannot be read. So the arming decides. Unarmed, the picture behaves like a
+     picture — pan, pinch-zoom, double-tap — and the drawer's own gestures (swipe to
+     page, scroll) work as they always did.
+
+     Armed, the browser is told to keep its hands off: touch-action none hands every
+     touch to the region script, and the cursor says what a drag will do. */
+  img { touch-action: auto; }
+  img.crop-target.armed { touch-action: none; cursor: crosshair; user-select: none;
         -webkit-user-select: none; -webkit-user-drag: none; }
   /* The rectangle being dragged. Fixed, because the script works in client
      coordinates; pointer-events: none, because the box sits under the finger that is

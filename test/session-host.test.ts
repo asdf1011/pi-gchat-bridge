@@ -510,3 +510,49 @@ test("a region of a PDF is cropped from the page it names", { skip: !hasPdf && "
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a comment with no position at all is about the whole file", async () => {
+  // Pressing the comment button with nothing selected. A position the viewer could not
+  // express before: the file, not a place in it. It carries no anchors, so nothing about
+  // it can drift — and refusing it would have made the button do nothing on a file whose
+  // text is not selectable.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-seam-wholefile-"));
+  try {
+    const file = path.join(root, "notes.md");
+    fs.writeFileSync(file, "# hi\n");
+    const added: unknown[] = [];
+    const seam = inProcessSessionHost({
+      host: fakeHost({
+        conversations: [1],
+        addedComments: added,
+        view: {
+          entries: [
+            { id: 3, model: [{ content: [{ type: "toolCall", name: "write", arguments: { path: file } }] }] },
+          ],
+          docs: {},
+        },
+      }),
+      roots: [fs.realpathSync(root)],
+      artifactRepoFor: () => fs.realpathSync(root),
+    });
+
+    const created = await seam.addComment(1, {
+      file: "notes.md",
+      selection: {},
+      text: "this whole document is out of date",
+    });
+    assert.ok("comment" in created, `expected a comment, got ${JSON.stringify(created)}`);
+    assert.deepEqual(created.comment.anchors, [], "no anchors: there is no line");
+    assert.equal(created.comment.region, undefined, "and no rectangle");
+    assert.equal(created.comment.state, "visible", "nothing about it can drift");
+    assert.deepEqual(created.comment.positions, []);
+
+    // And it is not confused with a selection that failed to parse: a quote that is only
+    // whitespace is still a whole-file comment, not an error.
+    const blank = await seam.addComment(1, { file: "notes.md", selection: { quote: "   " }, text: "still the file" });
+    assert.ok("comment" in blank);
+    assert.deepEqual(blank.comment.anchors, []);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

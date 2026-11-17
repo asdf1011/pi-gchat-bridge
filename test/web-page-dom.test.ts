@@ -1434,7 +1434,13 @@ async function openFirstArtifact(h: Harness): Promise<void> {
 }
 
 
-test("a selection opens the composer without taking focus", async () => {
+test("the composer opens from the button, and takes focus because a person asked", async () => {
+  // This replaces "a selection opens the composer without taking focus". Both halves
+  // changed on purpose: a selection no longer opens anything, and the composer *does*
+  // take focus — because the only way it opens now is somebody pressing the comment
+  // button, which is an explicit "I want to write". The old no-focus rule existed
+  // because a selection raised the keyboard mid-read and collapsed the very selection
+  // being commented on; there is no longer a selection-driven path for it to protect.
   let h: Harness | undefined;
   try {
     h = await loadPage({
@@ -1450,20 +1456,28 @@ test("a selection opens the composer without taking focus", async () => {
     assert.equal(bar.hidden, true, "nothing selected yet");
 
     await fromFrame(h, { t: "pi-artifact-select", file: "notes.md", quote: "the kitten was a stowaway" });
+    assert.equal(bar.hidden, true, "a selection on its own opens nothing");
+
+    (doc.getElementById("comment-fab") as HTMLButtonElement).click();
 
     assert.equal(bar.hidden, false, "the composer is offered");
     assert.match(doc.getElementById("comment-addr")!.textContent ?? "", /notes\.md/);
-
-    // The rule this test exists for: focusing the field here raises the mobile
-    // keyboard, and raising the keyboard collapses the selection, so the reader can
-    // never drag the native grabbers to select more words.
-    assert.notEqual(doc.activeElement, doc.getElementById("comment-text"), "the field must not steal focus");
+    assert.equal(
+      doc.activeElement,
+      doc.getElementById("comment-text"),
+      "pressing the button is what asks for the keyboard",
+    );
   } finally {
     h?.close();
   }
 });
 
-test("adjusting the selection updates the address but keeps what was typed", async () => {
+test("a selection that changes after the composer opened does not rewrite its address", async () => {
+  // The old behaviour followed the selection while it was being adjusted. That cannot
+  // survive the new model: the comment is about what was selected *when the button was
+  // pressed*, and a selection reported afterwards may be a different one entirely — a
+  // stray tap in the document, a handle dragged out of habit. Re-pointing a comment the
+  // reader has already started writing is the worse failure.
   let h: Harness | undefined;
   try {
     h = await loadPage({
@@ -1476,19 +1490,25 @@ test("adjusting the selection updates the address but keeps what was typed", asy
     const doc = h.dom.window.document;
     const field = doc.getElementById("comment-text") as HTMLTextAreaElement;
     await fromFrame(h, { t: "pi-artifact-select", file: "notes.md", quote: "crumbs" });
+    (doc.getElementById("comment-fab") as HTMLButtonElement).click();
     field.value = "instead of crumbs, ";
 
-    // A handle drag: same file, a longer quote.
     await fromFrame(h, { t: "pi-artifact-select", file: "notes.md", quote: "instead of crumbs, mutant mice" });
 
     assert.equal(field.value, "instead of crumbs, ", "a drag must not wipe the draft");
-    assert.match(doc.getElementById("comment-quote")!.textContent ?? "", /mutant mice/);
+    assert.match(doc.getElementById("comment-quote")!.textContent ?? "", /crumbs/);
+    assert.doesNotMatch(doc.getElementById("comment-quote")!.textContent ?? "", /mutant mice/);
   } finally {
     h?.close();
   }
 });
 
-test("deselecting closes the composer, unless a draft is in it", async () => {
+test("deselecting never closes a composer somebody opened", async () => {
+  // This used to be "deselecting closes the composer, unless a draft is in it", and the
+  // change is deliberate: the composer is now only ever opened by pressing the comment
+  // button, which is an act of intent. A selection collapsing afterwards — which is what
+  // tapping into the text field does on some browsers — is not a reason to undo it, with
+  // or without a draft in it.
   let h: Harness | undefined;
   try {
     h = await loadPage({
@@ -1500,16 +1520,18 @@ test("deselecting closes the composer, unless a draft is in it", async () => {
     await openFirstArtifact(h);
     const doc = h.dom.window.document;
     const bar = doc.getElementById("comment-bar")!;
-    const field = doc.getElementById("comment-text") as HTMLTextAreaElement;
 
     await fromFrame(h, { t: "pi-artifact-select", file: "notes.md", quote: "crumbs" });
-    await fromFrame(h, { t: "pi-artifact-clear", file: "notes.md" });
-    assert.equal(bar.hidden, true, "an empty composer closes with the selection");
+    assert.equal(bar.hidden, true, "a selection on its own opens nothing");
+    (doc.getElementById("comment-fab") as HTMLButtonElement).click();
+    assert.equal(bar.hidden, false);
 
-    await fromFrame(h, { t: "pi-artifact-select", file: "notes.md", quote: "crumbs" });
-    field.value = "half a thought";
     await fromFrame(h, { t: "pi-artifact-clear", file: "notes.md" });
-    assert.equal(bar.hidden, false, "a draft is never thrown away by a stray tap");
+    assert.equal(bar.hidden, false, "an empty composer stays open, because a person opened it");
+
+    // And what it is about does not change when the selection goes: the address was
+    // written when the button was pressed.
+    assert.match(doc.getElementById("comment-quote")!.textContent ?? "", /crumbs/);
   } finally {
     h?.close();
   }
@@ -1544,11 +1566,12 @@ test("a stream the browser has given up on is reopened by the page", async () =>
   }
 });
 
-test("the composer takes focus only when the click asked for it", async () => {
-  // Focus follows intent. Selecting text in the document no longer opens this bar at all; the button
-  // beside the selection sends `intent: "comment"`, and that is the reader saying they want to write
-  // — so focusing (and raising the keyboard) is right. A selection message without the intent keeps
-  // the old rule, which is that the field must not steal focus mid-read.
+test("a document cannot open the composer, however it labels its selection", async () => {
+  // The old rule was "focus only when the click asked for it", with `intent: "comment"`
+  // as the signal. That signal came from inside the frame, which is the untrusted side:
+  // an artifact's own script could set it and make the composer steal focus mid-read.
+  // Opening the composer is now the page's decision alone, taken from a press, so there
+  // is no message that can do it.
   let h: Harness | undefined;
   try {
     h = await loadPage({
@@ -1560,15 +1583,16 @@ test("the composer takes focus only when the click asked for it", async () => {
     await openFirstArtifact(h);
     const doc = h.dom.window.document;
     const field = doc.getElementById("comment-text") as HTMLTextAreaElement;
-    // The bar lives inside the artifacts pane, and jsdom refuses to focus an element it considers
-    // unrendered. Opening the pane is what the reader has already done by the time they select text.
-    (doc.getElementById("artifacts") as HTMLElement).hidden = false;
 
-    await fromFrame(h, { t: "pi-artifact-select", file: "notes.md", quote: "crumbs" });
-    assert.notEqual(doc.activeElement, field, "a bare selection never focuses");
-
-    await fromFrame(h, { t: "pi-artifact-select", file: "notes.md", quote: "crumbs", intent: "comment" });
-    assert.equal(doc.activeElement, field, "a deliberate comment does");
+    for (const message of [
+      { t: "pi-artifact-select", file: "notes.md", quote: "crumbs" },
+      { t: "pi-artifact-select", file: "notes.md", quote: "crumbs", intent: "comment" },
+      { t: "pi-artifact-select-touch", message: { file: "notes.md", quote: "crumbs", intent: "comment" } },
+    ]) {
+      await fromFrame(h, message);
+      assert.equal(doc.getElementById("comment-bar")!.hidden, true, `opened by ${message.t}`);
+      assert.notEqual(doc.activeElement, field);
+    }
   } finally {
     h?.close();
   }
@@ -2906,14 +2930,19 @@ test("a tool run shows alongside the words that announced it", async () => {
   }
 });
 
-// --- The touch affordance ----------------------------------------------------
+// --- The comment button -------------------------------------------------------
 //
-// On a phone the document draws nothing: the platform's own selection menu sits above
-// the page in a layer no page can draw over, so the action moves here and *waits* for
-// that menu to go. These pin the waiting, because "appears immediately" is the bug the
-// delay exists to avoid, and "appears eventually" is the whole point.
+// One persistent action, bottom right, on every artifact. It replaced a bar that appeared
+// when text was selected, and the reason matters: appearing-on-selection made the
+// selection do two jobs, put the action where a phone's own selection menu draws, and
+// left no way to comment on a file as a whole. These pin the new contract:
+//
+//   - selecting text starts nothing;
+//   - the button starts a comment about whatever is selected, or about the file;
+//   - on a picture it also arms the picture, and the composer and the button never show
+//     at once.
 
-test("the touch bar appears only after the selection has settled", async () => {
+test("the comment button is on screen from the moment a document is, and not before", async () => {
   let h: Harness | undefined;
   try {
     h = await loadPage({
@@ -2922,124 +2951,21 @@ test("the touch bar appears only after the selection has settled", async () => {
       artifacts: drawerFiles,
       conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
     });
+    const doc = h.dom.window.document;
+    const fab = doc.getElementById("comment-fab")!;
+
+    // The list is not a document: there is nothing to comment on.
+    assert.equal(fab.hidden, true);
+
     await openFirstArtifact(h);
-    const bar = h.dom.window.document.getElementById("selection-bar")!;
-    assert.equal(bar.hidden, true, "nothing before a selection");
-
-    await fromFrame(h, {
-      t: "pi-artifact-select-touch",
-      message: { file: "notes.md", line: 3, quote: "scattered values", intent: "comment" },
-    });
-
-    // Still hidden right away: this is the window in which the platform menu is up, and
-    // a bar underneath it is the reported bug.
-    assert.equal(bar.hidden, true, "not immediately — the system menu is still showing");
-
-    await new Promise((resolve) => setTimeout(resolve, 900));
-    assert.equal(bar.hidden, false, "and then it appears");
-    assert.match(bar.textContent ?? "", /scattered values/);
+    assert.equal(fab.hidden, false, "offered as soon as a document is open");
   } finally {
     h?.close();
   }
 });
 
-test("a selection dismissed during the wait never shows the bar", async () => {
-  // The bar is on a timer, so the timer has to be cancellable — otherwise a bar arrives
-  // for a selection that no longer exists, offering to comment on nothing.
-  let h: Harness | undefined;
-  try {
-    h = await loadPage({
-      pathname: "/7/",
-      artifactsBaseUrl: "http://127.0.0.1:8082",
-      artifacts: drawerFiles,
-      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
-    });
-    await openFirstArtifact(h);
-    const bar = h.dom.window.document.getElementById("selection-bar")!;
-
-    await fromFrame(h, {
-      t: "pi-artifact-select-touch",
-      message: { file: "notes.md", line: 3, quote: "gone in a moment", intent: "comment" },
-    });
-    await fromFrame(h, { t: "pi-artifact-clear", file: "notes.md" });
-
-    await new Promise((resolve) => setTimeout(resolve, 900));
-    assert.equal(bar.hidden, true, "the pending appearance was cancelled");
-  } finally {
-    h?.close();
-  }
-});
-
-test("re-selecting restarts the wait, and shows the latest text", async () => {
-  let h: Harness | undefined;
-  try {
-    h = await loadPage({
-      pathname: "/7/",
-      artifactsBaseUrl: "http://127.0.0.1:8082",
-      artifacts: drawerFiles,
-      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
-    });
-    await openFirstArtifact(h);
-    const bar = h.dom.window.document.getElementById("selection-bar")!;
-
-    await fromFrame(h, {
-      t: "pi-artifact-select-touch",
-      message: { file: "notes.md", line: 3, quote: "first attempt", intent: "comment" },
-    });
-    await new Promise((resolve) => setTimeout(resolve, 400));
-    await fromFrame(h, {
-      t: "pi-artifact-select-touch",
-      message: { file: "notes.md", line: 3, quote: "the wider selection", intent: "comment" },
-    });
-
-    // The second selection restarted the clock, so it is still waiting.
-    assert.equal(bar.hidden, true);
-    await new Promise((resolve) => setTimeout(resolve, 900));
-    assert.equal(bar.hidden, false);
-    assert.match(bar.textContent ?? "", /the wider selection/);
-    assert.doesNotMatch(bar.textContent ?? "", /first attempt/, "the quote follows the latest selection");
-  } finally {
-    h?.close();
-  }
-});
-
-test("a selection being adjusted keeps the bar up rather than re-waiting", async () => {
-  // Dragging a selection handle sends a fresh selection every few dozen milliseconds. If
-  // each one restarted the wait, the bar would blink out from under the finger and come
-  // back after it stopped — and a drag that outlasts the timer would never offer it at
-  // all. The delay is for the platform's menu on the *first* selection, not for every
-  // movement of one that is already being commented on.
-  let h: Harness | undefined;
-  try {
-    h = await loadPage({
-      pathname: "/7/",
-      artifactsBaseUrl: "http://127.0.0.1:8082",
-      artifacts: drawerFiles,
-      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
-    });
-    await openFirstArtifact(h);
-    const bar = h.dom.window.document.getElementById("selection-bar")!;
-
-    await fromFrame(h, {
-      t: "pi-artifact-select-touch",
-      message: { file: "notes.md", line: 3, quote: "first", intent: "comment" },
-    });
-    await new Promise((resolve) => setTimeout(resolve, 900));
-    assert.equal(bar.hidden, false);
-
-    // The handle moves: still the same gesture, so still offered.
-    await fromFrame(h, {
-      t: "pi-artifact-select-touch",
-      message: { file: "notes.md", line: 3, quote: "first and more", intent: "comment" },
-    });
-    assert.equal(bar.hidden, false, "no second wait over a selection already offered");
-    assert.match(bar.textContent ?? "", /first and more/, "but it follows the text");
-  } finally {
-    h?.close();
-  }
-});
-
-test("opening the composer puts the touch bar away", async () => {
+test("selecting text starts nothing: the button is what starts a comment", async () => {
+  // The regression this exists for: selecting text to read it summoned a comment prompt.
   let h: Harness | undefined;
   try {
     h = await loadPage({
@@ -3050,17 +2976,127 @@ test("opening the composer puts the touch bar away", async () => {
     });
     await openFirstArtifact(h);
     const doc = h.dom.window.document;
+
     await fromFrame(h, {
       t: "pi-artifact-select-touch",
-      message: { file: "notes.md", line: 3, quote: "something", intent: "comment" },
+      message: { file: "notes.md", line: 3, quote: "scattered values", intent: "comment" },
     });
-    await new Promise((resolve) => setTimeout(resolve, 900));
-    assert.equal(doc.getElementById("selection-bar")!.hidden, false);
+    // No delay, no bar, no composer: a selection is remembered and nothing more.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(doc.getElementById("comment-bar")!.hidden, true, "nothing opened on its own");
+    assert.equal(doc.getElementById("comment-fab")!.hidden, false, "the button is untouched");
 
-    (doc.getElementById("selection-comment") as HTMLButtonElement).click();
-    // Two boxes competing for the same strip is worse than either alone.
-    assert.equal(doc.getElementById("selection-bar")!.hidden, true);
-    assert.equal(doc.getElementById("comment-bar")!.hidden, false, "the composer opened instead");
+    // Pressing it is what opens the composer, about the selection that was there.
+    (doc.getElementById("comment-fab") as HTMLButtonElement).click();
+    assert.equal(doc.getElementById("comment-bar")!.hidden, false);
+    assert.match(doc.getElementById("comment-addr")!.textContent ?? "", /notes\.md/);
+    assert.match(doc.getElementById("comment-quote")!.textContent ?? "", /scattered values/);
+  } finally {
+    h?.close();
+  }
+});
+
+test("pressing the button with nothing selected comments on the whole file", async () => {
+  // A position the viewer could not express at all before: the file, not a place in it.
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      pathname: "/7/",
+      artifactsBaseUrl: "http://127.0.0.1:8082",
+      artifacts: drawerFiles,
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+    });
+    await openFirstArtifact(h);
+    const doc = h.dom.window.document;
+
+    (doc.getElementById("comment-fab") as HTMLButtonElement).click();
+    assert.equal(doc.getElementById("comment-bar")!.hidden, false);
+    assert.match(doc.getElementById("comment-addr")!.textContent ?? "", /the whole file/);
+    assert.equal(doc.getElementById("comment-quote")!.hidden, true, "nothing quoted");
+    assert.equal(doc.getElementById("comment-preview")!.hidden, true, "and nothing cropped");
+  } finally {
+    h?.close();
+  }
+});
+
+test("a selection cleared after the composer opened does not change what it is about", async () => {
+  // Tapping into the text field collapses the document's selection on some browsers.
+  // That means "I am typing now", not "forget what I chose".
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      pathname: "/7/",
+      artifactsBaseUrl: "http://127.0.0.1:8082",
+      artifacts: drawerFiles,
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+    });
+    await openFirstArtifact(h);
+    const doc = h.dom.window.document;
+
+    await fromFrame(h, {
+      t: "pi-artifact-select-touch",
+      message: { file: "notes.md", line: 3, quote: "kept", intent: "comment" },
+    });
+    (doc.getElementById("comment-fab") as HTMLButtonElement).click();
+    (doc.getElementById("comment-text") as HTMLTextAreaElement).value = "half a thought";
+
+    await fromFrame(h, { t: "pi-artifact-clear", file: "notes.md" });
+    assert.equal(doc.getElementById("comment-bar")!.hidden, false, "the draft survives");
+    assert.match(doc.getElementById("comment-addr")!.textContent ?? "", /notes\.md/);
+  } finally {
+    h?.close();
+  }
+});
+
+test("pressing the button again puts it down, and the button comes back", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      pathname: "/7/",
+      artifactsBaseUrl: "http://127.0.0.1:8082",
+      artifacts: drawerFiles,
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+    });
+    await openFirstArtifact(h);
+    const doc = h.dom.window.document;
+    const fab = doc.getElementById("comment-fab") as HTMLButtonElement;
+
+    fab.click();
+    assert.equal(doc.getElementById("comment-bar")!.hidden, false);
+    // Hidden while composing: the composer is the same action continued, and two of
+    // them would compete for the same corner.
+    assert.equal(fab.hidden, true, "the button steps out of the way");
+
+    // Pressing it again is the way out on a device with no Escape key.
+    fab.click();
+    assert.equal(doc.getElementById("comment-bar")!.hidden, true);
+    assert.equal(fab.hidden, false, "and it is on offer again");
+  } finally {
+    h?.close();
+  }
+});
+
+test("closing the drawer closes the composer and puts the button away", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({
+      pathname: "/7/",
+      artifactsBaseUrl: "http://127.0.0.1:8082",
+      artifacts: drawerFiles,
+      conversations: [{ conversationId: 7, chatKey: "k", model: "m" }],
+    });
+    await openFirstArtifact(h);
+    const doc = h.dom.window.document;
+    (doc.getElementById("comment-fab") as HTMLButtonElement).click();
+    assert.equal(doc.getElementById("comment-bar")!.hidden, false);
+
+    // Back to the list: the composer's subject has been put away, and so is the offer to
+    // comment on it.
+    (doc.getElementById("artifacts-back") as HTMLButtonElement).click();
+    await h.settle();
+    assert.equal(doc.getElementById("artifacts")!.classList.contains("showing-doc"), false);
+    assert.equal(doc.getElementById("comment-bar")!.hidden, true);
+    assert.equal(doc.getElementById("comment-fab")!.hidden, true);
   } finally {
     h?.close();
   }

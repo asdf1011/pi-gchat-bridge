@@ -21,7 +21,8 @@ export function imageDocumentFor(key: string): string {
   body { margin: 0; display: flex; align-items: center; justify-content: center;
          padding: 1rem; background: Canvas; color: CanvasText; }
   img { max-width: 100%; max-height: 100%; object-fit: contain; background: #8881; }
-  img.crop-target { touch-action: none; cursor: crosshair; user-select: none; -webkit-user-select: none; }
+  img { touch-action: auto; }
+  img.crop-target.armed { touch-action: none; cursor: crosshair; user-select: none; -webkit-user-select: none; }
   .marquee { position: fixed; pointer-events: none; border: 2px solid #4c9aff; background: #4c9aff33; }
 </style></head>
 <body data-file="${key}">
@@ -49,7 +50,8 @@ export function pdfPageDocumentFor(key: string, page: number, pageCount: number)
   body { margin: 0; display: flex; align-items: center; justify-content: center;
          padding: 1rem; background: Canvas; color: CanvasText; }
   img { max-width: 100%; max-height: 100%; object-fit: contain; background: #8881; }
-  img.crop-target { touch-action: none; cursor: crosshair; user-select: none; -webkit-user-select: none; }
+  img { touch-action: auto; }
+  img.crop-target.armed { touch-action: none; cursor: crosshair; user-select: none; -webkit-user-select: none; }
   .marquee { position: fixed; pointer-events: none; border: 2px solid #4c9aff; background: #4c9aff33; }
   .pages { position: fixed; bottom: 0; left: 0; right: 0; display: flex; gap: .5rem;
            align-items: center; justify-content: center; padding: .35rem; background: Canvas; }

@@ -665,39 +665,37 @@
     padding: .6rem .75rem; display: flex; flex-direction: column; gap: .45rem;
     max-height: 70%; overflow: auto; }
   #comment-bar[hidden], #comment-sheet[hidden] { display: none; }
-  /* The touch affordance: one row, at the foot of the drawer. It replaces the small
-     floating button the desktop build draws beside the selection, because on a phone
-     that space belongs to the system's own selection menu. Kept to a single line so it
-     costs the document as little height as possible while a selection is active. */
-  /* The comment affordance: one row, directly under the drawer's header. It used to sit
-     at the foot of the drawer, on the reasoning that a phone's bottom edge is the strip
-     just above the keyboard. What that missed is the layer the platform draws while text
-     is selected: the menu and its drag handles hang off the selection in the middle of the
-     text, and the handles reach down *below* the last line — which is the bottom of the
-     document, which is where this bar was. So the action sat in the one place the system
-     UI reliably visits, and was reported as missing rather than as covered.
+  /* The comment button: one persistent action, bottom right of the document, styled
+     like the new-conversation button so the two read as the same kind of thing.
 
-     The top is the side nothing the platform draws for a selection reaches. It is a fixed
-     strip under the header, not something anchored to the selection, so it is in the same
-     place for every selection rather than moving under the finger — and the header above it
-     is the drawer's own chrome, so the bar cannot collide with it either way. The quoted
-     text is ellipsised, so it costs one line whatever was selected. */
-  #selection-bar { position: absolute; left: 0; right: 0; top: 0; z-index: 3;
-    display: flex; align-items: stretch; gap: .4rem;
-    padding: max(.4rem, env(safe-area-inset-top)) .5rem .4rem;
-    background: Canvas; border-bottom: 1px solid #8886; box-shadow: 0 6px 24px #0002; }
-  #selection-bar[hidden] { display: none; }
+     It used to be a bar that *appeared* when text was selected, and that was wrong for a
+     reason worth recording: appearing-on-selection makes the selection do two jobs. On a
+     phone it puts the action in the one place the platform draws its own selection menu
+     and drag handles, so it was either covered or had to be moved to a strip at the top
+     that had nothing to do with what was selected. And selecting text to read it summoned
+     a comment prompt, which is not what selecting means.
+
+     So the button is always there, and it is what starts a comment. Whatever is selected
+     when it is pressed is what the comment is about; nothing selected means the file
+     itself. Hidden while the composer is open, because the composer is the same action
+     continued and two of them would compete for the same corner. */
+  #comment-fab { position: absolute; right: .9rem; bottom: .9rem; z-index: 4;
+    width: 2.75rem; height: 2.75rem; padding: 0; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    border: 1px solid #8886; background: var(--bubble-me); color: inherit;
+    cursor: pointer; box-shadow: 0 2px 10px #0003; }
+  #comment-fab[hidden] { display: none; }
+  /* Pressed, on a document that can take a rectangle: the button stays down while the
+     picture is armed, so the one bit of state that changes what a drag means is visible
+     rather than remembered. */
+  #comment-fab[aria-pressed="true"] { background: #4c9aff; color: #fff; border-color: #4c9aff; }
   /* A finger has no hover, and highlighting on touch leaves the button looking stuck
      after the tap. The brief dim is the acknowledgement instead. */
-  #selection-comment:active { background: #8883; }
-  #selection-comment { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: .45rem;
-    padding: .5rem .7rem; text-align: left; font-size: .9em; }
-  /* The quoted text is ellipsised, not wrapped: a bar that grows to three lines covers
-     the document it is describing. */
-  #selection-comment .what { flex: none; font-weight: 600; }
-  #selection-comment .on { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
-    white-space: nowrap; opacity: .7; font-weight: 400; }
-  #selection-dismiss { flex: none; padding: .5rem .7rem; }
+  #comment-fab:active { transform: scale(.94); }
+  @media (prefers-reduced-motion: no-preference) {
+    #comment-fab { transition: transform .08s ease-out, background .12s ease-out; }
+  }
+  #comment-fab svg { width: 1.3rem; height: 1.3rem; display: block; }
   #comment-bar .addr, #comment-sheet .addr { font: .78em var(--mono, monospace); opacity: .75;
     display: flex; gap: .5rem; align-items: baseline; }
   #comment-bar .addr span, #comment-sheet .addr span { flex: 1; min-width: 0; overflow: hidden;
@@ -911,21 +909,19 @@
            it. Frames are *created* here, one per document, and never reloaded: moving to
            another artifact is a matter of which frame sits in the middle, not of changing
            what a visible frame loads. -->
-      <!-- Composing a comment on a selection, from inside the framed document.
+      <!-- Composing a comment, started from inside the framed document.
            The document can only *report* a selection; this is where it becomes
            a message, because this origin is the one allowed to send. -->
-      <!-- On a touch device the document draws no button: the system selection menu and
-           its drag handles own the space around the text, and no web API lets a page add
-           itself to that menu. So the action lives here instead — outside the document,
-           at the top of the drawer, where nothing the platform draws for a selection
-           reaches (at the bottom it sat under the handles, which hang off the last line). -->
-      <div id="selection-bar" hidden>
-        <button type="button" id="selection-comment">
-          <span class="what">Comment</span>
-          <span class="on"></span>
-        </button>
-        <button type="button" id="selection-dismiss" title="Dismiss" aria-label="Dismiss">✕</button>
-      </div>
+      <!-- The one way to start a comment, on every artifact. A speech-bubble outline
+           rather than the word: it is an icon-sized target in a corner, and a label
+           would not fit. Whatever is selected when it is pressed is what the comment is
+           about; nothing selected means the whole file. -->
+      <button type="button" id="comment-fab" hidden title="Add a comment" aria-label="Add a comment">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 8.9 8.9 0 0 1-3.8-.9L3 20.5l1.5-4.5a8.4 8.4 0 0 1-1-4 8.4 8.4 0 0 1 8.4-8 8.4 8.4 0 0 1 9 7.5z"/>
+        </svg>
+      </button>
       <div id="artifact-doc-scroll">
         <div id="artifact-track"></div>
       </div>
@@ -3077,8 +3073,6 @@ window.addEventListener('resize', () => {
 // origin is the string "null", which no check can distinguish).
 
 const commentBar = document.getElementById('comment-bar');
-const selectionBar = document.getElementById('selection-bar');
-const selectionOn = document.querySelector('#selection-comment .on');
 const commentAddr = document.getElementById('comment-addr');
 const commentQuote = document.getElementById('comment-quote');
 /* The selected part of a picture, as the comment will attach it. */
@@ -3152,8 +3146,21 @@ function showCommentBar(selection) {
   // A rectangle is written bare rather than after a `#`: `shot.png#x120,y64 320×180`
   // reads like a line address and is not one. Everything else keeps the hash, because
   // a line address is what a reader already knows.
-  const separator = selection.region ? ' ' : selection.line === undefined ? ' — ' : '#';
-  commentAddr.textContent = (selection.file || '') + separator + where;
+  // A file-level comment has no position at all, so the address is just the file and
+  // says so in words — `notes.md — the whole file` — rather than a trailing separator
+  // over nothing.
+  const wholeFile =
+    selection.region === undefined && selection.line === undefined && !selection.quote;
+  const separator = wholeFile
+    ? ' — '
+    : selection.region
+      ? ' '
+      : selection.line === undefined
+        ? ' — '
+        : '#';
+  commentAddr.textContent = wholeFile
+    ? (selection.file || '') + ' — the whole file'
+    : (selection.file || '') + separator + where;
   commentQuote.hidden = !selection.quote;
   commentQuote.textContent = selection.quote || '';
   // The selected part of the picture, shown here so the reader can see what is about to
@@ -3167,8 +3174,9 @@ function showCommentBar(selection) {
     commentError.hidden = true;
   }
   commentBar.hidden = false;
-  // The bar and the composer would otherwise compete for the same strip.
-  hideSelectionBar();
+  // One action at a time in the same corner: the composer *is* the comment button
+  // continued, so two of them would compete for the space and for the tap.
+  setFabVisible(false);
   // Focus follows intent. The document only sends `intent: "comment"` when somebody clicked the
   // affordance beside their selection — an explicit "I want to write something" — and focusing then
   // is right: it opens the keyboard, which is what they asked for. Selection alone never focuses,
@@ -3193,74 +3201,117 @@ function showCommentBar(selection) {
  * the way — two boxes competing for the same strip would be worse than either alone.
  */
 /**
- * How long to wait before offering the comment action.
+ * The comment button: the one way to start a comment, on every artifact.
  *
- * Selecting text on a phone raises the platform's own menu — Copy, Select all, Share —
- * in a layer *above* the page. Nothing a page draws can go over it: not a higher
- * z-index, not anchoring to `visualViewport`, not safe-area insets. So the only move
- * available is not to be there while it is, and to arrive once it has gone.
+ * It replaced a bar that *appeared* when text was selected, and the reasons are worth
+ * keeping because they are not obvious from the code that replaced them:
  *
- * The page cannot see that menu, so this is a wait for the selection to stop changing
- * plus enough time for the menu to animate out. Too short and the bar arrives under
- * the menu; too long and it feels disconnected from the selection that caused it.
- * Both Google Docs and Medium solve it the same way — their toolbars appear a beat
- * after the selection settles — which is why this number is a little over half a
- * second rather than instant.
+ *   - Appearing-on-selection makes the selection do two jobs. Selecting text to *read*
+ *     it summoned a comment prompt, which is not what selecting means.
+ *   - On a phone the only place such a bar could go was the strip the platform's own
+ *     selection menu and drag handles occupy, so it was covered or had to move to a
+ *     place unrelated to what had been selected.
+ *   - A persistent button can be *pressed with nothing selected*, which is the only way
+ *     to say "a comment about this file" — a position the viewer previously could not
+ *     express at all.
  *
- * It applies to a **replacement**: a selection that arrives while this bar is already
- * on screen means the menu it was waiting for has been and gone, and the one gesture
- * left is dragging a handle. Waiting *again* there would take the bar away under the
- * finger and bring it back after every adjustment, which reads as flicker — and, when
- * the handle drag outlasts the timer, as a Comment action that never appears at all.
+ * What it does depends on the kind of document:
+ *
+ *   - nothing selected, any file → a comment on the file itself.
+ *   - text selected → a comment on that text, exactly as before.
+ *   - a picture or a PDF page → the composer opens *and* the picture is armed, so a
+ *     drag drawn after pressing is the rectangle the comment carries. Arming is what
+ *     lets `touch-action` go back to the browser's: panning and pinching work until
+ *     somebody says they are commenting, which is the whole reason the mode exists.
  */
-const SELECTION_BAR_DELAY_MS = 700;
+const commentFab = document.getElementById('comment-fab');
 
-/** Pending appearance of the touch affordance. */
-let selectionBarTimer;
+/** Whether the picture in the drawer is armed to take a rectangle. */
+let regionArmed = false;
 
-function hideSelectionBar() {
-  if (selectionBarTimer) {
-    clearTimeout(selectionBarTimer);
-    selectionBarTimer = undefined;
-  }
-  selectionBar.hidden = true;
+/**
+ * Whether the comment button is on offer at all.
+ *
+ * Only with a document open: there is nothing to comment on in the list. It is shown
+ * for every kind of artifact, including ones the viewer shows as source — a comment on
+ * a whole file needs no position and no viewer support.
+ */
+function setFabVisible(visible) {
+  commentFab.hidden = !visible;
 }
 
-function showSelectionBar(selection) {
-  if (selectionBarTimer) {
-    clearTimeout(selectionBarTimer);
-    selectionBarTimer = undefined;
+/** Reflect the armed state, and tell the document so it can take gestures or not. */
+function setRegionArmed(armed) {
+  regionArmed = armed;
+  commentFab.setAttribute('aria-pressed', armed ? 'true' : 'false');
+  commentFab.title = armed
+    ? 'Drag across the document to select the part to comment on'
+    : 'Add a comment';
+  // The document owns its own `touch-action` and cursor, because it is a different
+  // frame with its own stylesheet: this page cannot reach in to change them, and the
+  // message is how the arming reaches the thing that has to act on it.
+  const frame = currentFrame;
+  if (frame && frame.contentWindow) {
+    try {
+      frame.contentWindow.postMessage({ t: 'pi-artifact-arm', armed }, '*');
+    } catch {
+      // A frame mid-navigation has no window to talk to yet; the arming is re-sent when
+      // the composer opens, which is the next thing that needs it.
+    }
   }
+}
+
+/**
+ * Start a comment about whatever is currently selected — or about the file.
+ *
+ * `pendingSelection` is kept up to date by the document's own messages: a source view
+ * reports lines, a rendered document reports text, a picture reports nothing (there is
+ * no text selection in a picture — its selection is a rectangle, drawn *after* arming).
+ */
+function startComment() {
+  const selection = pendingSelection;
+  // A document that can take a rectangle arms itself, so the drag that follows is the
+  // selection — *whether or not something was already selected*. On a picture there is no
+  // text to select, so pressing the button is always the start of a drag, and a
+  // whole-file comment on a picture is made by pressing and not dragging.
+  //
+  // Everything else composes immediately: its selection already exists as text.
+  if (isRegionCapable(currentKey())) setRegionArmed(true);
+
   if (!selection) {
-    selectionBar.hidden = true;
+    // Nothing selected: a comment on the file. `file` is the only position it has, and
+    // the host records it with no anchors — see `addComment`. A drag after this replaces
+    // it with a rectangle, which is the more specific thing the reader then chose.
+    showCommentBar({ file: currentKey(), intent: 'comment' });
     return;
   }
-  pendingSelection = selection;
-  // A draft in progress is somebody already writing; do not cover it with a prompt to
-  // start writing.
-  if (!commentBar.hidden) {
-    selectionBar.hidden = true;
-    return;
-  }
-  const quote = (selection.quote || '').replace(/\s+/g, ' ').trim();
-  selectionOn.textContent = quote ? '“' + quote.slice(0, 80) + (quote.length > 80 ? '…' : '') + '”' : '';
-  // Already offered, and this is the same gesture still moving: update what it says and
-  // leave it where it is (see SELECTION_BAR_DELAY_MS for why re-waiting is the bug).
-  if (!selectionBar.hidden) return;
-  // Otherwise hide and show on a delay: a *first* selection means the platform menu has
-  // just appeared, and the bar must not be visible underneath it.
-  selectionBar.hidden = true;
-  selectionBarTimer = setTimeout(() => {
-    selectionBarTimer = undefined;
-    // Re-checked at fire time: the selection may have been dismissed while waiting, and
-    // a bar for a selection that no longer exists is worse than no bar.
-    if (!pendingSelection || !commentBar.hidden) return;
-    selectionBar.hidden = false;
-  }, SELECTION_BAR_DELAY_MS);
+  showCommentBar({ ...selection, intent: 'comment' });
 }
+
+/** Whether this artifact is commented on by drawing a rectangle over it. */
+function isRegionCapable(key) {
+  const frame = framesByKey.get(key) || currentFrame;
+  if (!frame) return false;
+  // Set by the drawer when it made the frame: a picture or a rendered PDF page.
+  return frame.dataset.image === '1' || frame.dataset.pdf === '1';
+}
+
+commentFab.onclick = () => {
+  // Pressed while composing: put it down. A second press on an armed picture disarms it
+  // and closes the composer, which is the one way out on a device with no Escape key.
+  if (!commentBar.hidden) {
+    setRegionArmed(false);
+    closeCommentBar();
+    return;
+  }
+  startComment();
+};
 
 function closeCommentBar() {
-  hideSelectionBar();
+  // Disarming is part of closing: the composer is what the arming was for, so a picture
+  // left armed with no composer would keep eating gestures for a comment nobody is
+  // writing.
+  setRegionArmed(false);
   pendingSelection = null;
   commentBar.hidden = true;
   commentText.value = '';
@@ -3268,6 +3319,9 @@ function closeCommentBar() {
   // bytes alive in memory and shows a stale rectangle the next time the bar opens.
   commentPreview.hidden = true;
   commentPreview.removeAttribute('src');
+  // Back on offer, if a document is open. Nothing is being written any more, so the
+  // action that starts writing belongs here again.
+  setFabVisible(Boolean(currentKey()));
 }
 
 function closeThread() {
@@ -3460,20 +3514,27 @@ window.addEventListener('message', (event) => {
   const data = event.data;
   if (!data || typeof data !== 'object') return;
   if (data.t === 'pi-artifact-select' && typeof data.file === 'string') {
-    showCommentBar(data);
+    // A text selection, on any device. Remembered, never acted on: the comment button is
+    // what starts a comment, and it takes whatever is selected when it is pressed. The
+    // desktop build used to open the composer here directly, which is the behaviour that
+    // made selecting text to read it feel like being interrupted.
+    pendingSelection = data;
   } else if (data.t === 'pi-artifact-region') {
     // A rectangle dragged over a picture. Only the frame on screen counts: a parked
     // frame's document is not what the reader is pointing at.
     if (imageFrameFor(event.source)) commentOnRegion(data);
   } else if (data.t === 'pi-artifact-image') {
-    // The picture finished loading, or was tapped. Either way the drawer now knows it is
-    // looking at a commentable picture and can say so — a tap is most of what a reader
-    // does with one, and silence would read as "this file is not commentable".
-    if (imageFrameFor(event.source)) showImageHint(typeof data.file === 'string' ? data.file : '');
+    // The picture finished loading, or was tapped. Either way the drawer knows it is
+    // looking at a document that can take a rectangle, which is what decides whether
+    // pressing the comment button arms it.
+    if (imageFrameFor(event.source)) setFabVisible(true);
   } else if (data.t === 'pi-artifact-select-touch') {
-    // A touch device: the document drew nothing and sent the selection here instead.
+    // A document reporting a selection from a touch device. It is remembered, not acted
+    // on: the comment button is what starts the comment, and it takes whatever is
+    // selected when it is pressed. Nothing appearing here is the point — selecting text
+    // to read it must not summon anything.
     const picked = data.message && typeof data.message.file === 'string' ? data.message : null;
-    showSelectionBar(picked);
+    if (picked) pendingSelection = picked;
   } else if (data.t === 'pi-artifact-drag') {
     // The finger is still down: move the pane with it.
     dragArtifactPane(typeof data.dx === 'number' ? data.dx : 0);
@@ -3492,19 +3553,14 @@ window.addEventListener('message', (event) => {
   } else if (data.t === 'pi-artifact-open' && typeof data.id === 'string') {
     void openThread(data.id);
   } else if (data.t === 'pi-artifact-clear') {
-    // The selection is gone, so the touch affordance has nothing to offer. This
-    // arrives on every device — the document sends it whenever `describe()` comes
-    // back empty — which makes it the one place that reliably forgets a selection,
-    // rather than a second message to keep in step.
-    hideSelectionBar();
-    // The reader dismissed the selection. Close the composer, but never over a
-    // draft, and never while the field has focus — tapping the field itself can
-    // collapse the document's selection on some browsers, and that tap means
-    // "I am typing now", not "forget this".
-    if (commentBar.hidden) return;
-    if (document.activeElement === commentText) return;
-    if (commentText.value.trim() !== '') return;
-    closeCommentBar();
+    // The selection is gone, so there is nothing for the comment button to attach to —
+    // the comment is now about the file. Sent by the document whenever it has no
+    // selection, on every device, so it is the one place a stale selection is forgotten.
+    //
+    // Deliberately *not* a reason to close the composer: the reader may have tapped
+    // into the text field, which collapses the document's selection and means "I am
+    // typing now". What was already chosen stays chosen — its address is in the bar.
+    pendingSelection = null;
   }
 });
 
@@ -3547,17 +3603,6 @@ commentBar.addEventListener('pointerdown', (event) => {
   setTimeout(() => commentText.focus(), 0);
 });
 
-document.getElementById('selection-comment').onclick = () => {
-  if (!pendingSelection) return;
-  // The same entry point the desktop button uses, with the same meaning: the reader
-  // has said they want to write, so the composer may take focus and raise the keyboard.
-  const selection = { ...pendingSelection, intent: 'comment' };
-  hideSelectionBar();
-  showCommentBar(selection);
-};
-document.getElementById('selection-dismiss').onclick = () => {
-  hideSelectionBar();
-};
 document.getElementById('comment-send').onclick = () => void sendComment();
 document.getElementById('comment-cancel').onclick = () => closeCommentBar();
 document.getElementById('comment-sheet-close').onclick = () => closeThread();

@@ -320,20 +320,6 @@ function imageFrameFor(source) {
 }
 
 /**
- * The hint that a picture is commentable, and the one thing a tap can say.
- *
- * A drag is a selection and a tap is not, which is right for the gesture but leaves a
- * reader who taps a picture with no sign that anything is possible. So the bar appears
- * saying what to do, and gets out of the way as soon as a rectangle is drawn.
- */
-function showImageHint(file) {
-  hideSelectionBar();
-  if (!commentBar.hidden) return;
-  selectionOn.textContent = file + ' — drag across the picture to comment on part of it';
-  selectionBar.hidden = false;
-}
-
-/**
  * A rectangle the reader dragged over a picture.
  *
  * This is the one selection the host cannot derive for itself: a source view reports a
@@ -347,7 +333,14 @@ function commentOnRegion(message) {
   const region = message && message.region;
   if (!region || typeof region !== 'object') return;
   if (typeof message.file !== 'string' || message.file === '') return;
-  hideSelectionBar();
+  // A rectangle replaces whatever was selected: the reader armed the picture and drew on
+  // it, which is a more specific choice than a stray text selection made earlier.
+  //
+  // Only while a comment is being written. A drag drawn with no composer open cannot be
+  // a selection — the picture is not armed, so the document does not offer one — but a
+  // stale message from a frame could still arrive, and opening a composer for it would
+  // start a comment nobody asked for.
+  if (commentBar.hidden) return;
   // Which page this rectangle is on. The *document* says, in its message, because it is
   // the only party that knows: a page turn navigates the frame, and cross-origin the
   // parent cannot read where the frame ended up. `pageOfFrame` is the fallback for a
@@ -489,6 +482,9 @@ function showArtifact(key, markdown, push = true, image = false, from = 'right',
   showKey(key, markdown, image, pdf);
   closeCommentBar();
   closeThread();
+  // A document is open, so there is something to comment on. Every artifact offers it,
+  // including the ones shown as source: a whole-file comment needs no viewer support.
+  setFabVisible(true);
   artifactsNewTab.dataset.key = key;
   artifactsNewTab.dataset.markdown = markdown ? '1' : '';
   artifactsNewTab.dataset.image = image ? '1' : '';
@@ -514,6 +510,10 @@ function showKey(key, markdown, image, pdf) {
 /** The list state, without touching transcript. */
 function applyListState() {
   artifactsPanel.classList.remove('showing-doc');
+  // Nothing is open, so there is nothing to comment on. The composer closes with it:
+  // its subject is the document that has just been put away.
+  closeCommentBar();
+  setFabVisible(false);
   artifactsTitle.textContent = 'Artifacts';
   artifactsTitle.removeAttribute('title');
   artifactsBack.hidden = true;

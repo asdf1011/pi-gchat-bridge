@@ -221,6 +221,45 @@ drawer shows **page 1, rendered** — not "looks binary", which is what it used 
   leads the address because it is the first thing that locates the rectangle — page 3
   and page 1 are different places, and no amount of coordinates recovers which.
 
+### Starting a comment
+
+**One button, bottom right, on every artifact.** It replaced a bar that *appeared* when
+text was selected, and the reasons are worth keeping:
+
+- Appearing-on-selection made the selection do two jobs. Selecting text to read it
+  summoned a comment prompt.
+- On a phone the only place such a bar could go was the strip the platform's own
+  selection menu and drag handles occupy, so it was covered — or had to be moved to a
+  place unrelated to what was selected.
+- A persistent button can be pressed **with nothing selected**, which is the only way to
+  say "a comment about this file". That is now a real position: no region, no anchors.
+
+What it does depends on what is selected when it is pressed:
+
+- **nothing** → a comment on the file itself (`notes.md — the whole file`).
+- **text** → a comment on that text, as before.
+- **a picture or a PDF page** → the composer opens *and* the picture is armed, so a drag
+  drawn after pressing is the rectangle the comment carries.
+
+The button is hidden while the composer is open — the composer is the same action
+continued, and two of them would compete for the same corner. Pressing it again closes
+the composer and disarms, which is the way out on a device with no Escape key.
+
+### Arming, and why gestures work again
+
+`touch-action: none` on a picture is what makes a rectangle possible on a phone, and it
+is also what made **panning and pinching impossible** — one finger cannot mean both
+"select" and "pan", and a page that cannot be zoomed is a page that cannot be read.
+
+So the picture belongs to the browser until somebody says they are commenting. The
+arming arrives as a message (`pi-artifact-arm`), because the document is a different
+frame and the page cannot reach in to change its stylesheet. Unarmed: pan, pinch-zoom,
+double-tap and the drawer's own swipe all work, and a drag does nothing. Armed: the CSS
+class makes every touch the region script's, and the cursor says what a drag will do.
+
+This is why the arming is *not* driven by a selection. A selection is a thing you do
+while reading; arming is a statement of intent, and only a press can make it.
+
 ### Commenting on part of a picture
 
 A picture has no lines, so the unit is a rectangle dragged over it. The gesture
@@ -295,6 +334,8 @@ the part of a picture a person drew is the one fact here that cannot be re-deriv
   is a separate decision rather than a missing branch.
 - **`BRIDGE_WEB_ENGINE=link`** publishes the comment operations over the chord
   link (see `link-contract.ts`); the other adapter-side operations still do not.
+- **One action at a time on a picture.** Pressing the button arms the document; there is
+  no per-page or per-element arming, so a swipe to the next artifact disarms.
 - **Replying has no idempotency key.** A double-click on "Reply" can start two
   turns; the comment's own turn is keyed, the replies are not.
 - **The agent cannot resolve**, and cannot see resolved state at all — by design

@@ -589,6 +589,37 @@ export function inProcessSessionHost(options: InProcessOptions): SessionHost {
         return { comment: { ...stored, state: "visible", positions: [] } };
       }
 
+      // A comment on the *file itself* — no rectangle, no line, no quote.
+      //
+      // This is what pressing the comment button without selecting anything means, and
+      // it has to be recorded rather than refused: "this file, as a whole" is a real
+      // thing to say about a document, and it was previously the one position a reviewer
+      // could not express. It carries no anchors, so `classifyComments` reports it
+      // visible for as long as the file exists — there is nothing that could drift.
+      //
+      // Checked after the region branch, because a selection that *looks* empty but
+      // carries a rectangle is a region comment with a bad rectangle, and that deserves
+      // its own refusal rather than silently becoming a whole-file note.
+      if (
+        input.selection.region === undefined &&
+        input.selection.line === undefined &&
+        (input.selection.quote === undefined || input.selection.quote.trim() === "")
+      ) {
+        const id = newCommentId();
+        const atRevision = await currentRevision(repo).catch(() => undefined);
+        const stored = {
+          id,
+          file: input.file,
+          anchors: [],
+          text,
+          at: Date.now(),
+          ...(input.author === undefined ? {} : { author: input.author }),
+          ...(atRevision === undefined ? {} : { atRevision }),
+        };
+        await host.addComment(conversationId, stored);
+        return { comment: { ...stored, state: "visible", positions: [] } };
+      }
+
       // The annotation is the authority: the viewer says which lines a person
       // dragged across, and this decides which revisions those lines came from
       // and what they said. A stale viewer gets a refusal.

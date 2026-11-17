@@ -476,8 +476,13 @@ export function modelText(comment: Printable, options: { path: string }): string
   // does not. When the host could not resolve a real path the two are the same
   // string, and repeating it buried the part a reader scans for.
   const where = options.path === comment.file ? address : `${address} (${options.path})`;
+  // A whole-file comment has no address suffix to name a part, so it says so in words.
+  // Otherwise the message reads `someone commented on a.sh` with no indication of
+  // whether that means the file or some position in it that failed to print — and a
+  // model that guesses "a position" will hunt for one that does not exist.
+  const wholeFile = comment.anchors.length === 0 && comment.charStart === undefined;
   return [
-    `${who} commented on ${where}${tag}`,
+    `${who} commented on ${wholeFile ? `the whole of ${where}` : where}${tag}`,
     quoteBlock(comment.quote).trimEnd(),
     comment.text.trim(),
   ]
