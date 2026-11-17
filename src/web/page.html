@@ -767,7 +767,21 @@
        row still lines up. */
     #send-group button { padding: 0 .9rem; }
     #send-group #send-menu { padding: 0 .65rem; }
-    #artifacts { position: fixed; inset: 0; width: 100%; border-left: 0; }
+    /* Anchored to the *top*, with a height the keyboard cannot change.
+       
+       `inset: 0` made the drawer's height the viewport's, and the keyboard shortens the
+       viewport from the bottom — so the frame shrank, the document reflowed, and the picture
+       under the reader moved at the moment they opened the comment box. Worse, it stayed
+       moved: the frame kept the new height after the keyboard closed.
+       
+       `lvh` is the *large* viewport height — the height with the browser's own chrome
+       collapsed — and it is the one viewport unit the virtual keyboard does not change. So
+       the drawer keeps one size, the document inside it never reflows, and the keyboard
+       simply covers the foot of it, which is where the composer already is. `top` rather
+       than `bottom` for the same reason: an element pinned to all four sides grows and
+       shrinks from both ends, and the top edge moving is the movement being avoided. */
+    #artifacts { position: fixed; top: 0; left: 0; right: 0; width: 100%; height: 100lvh;
+      border-left: 0; }
     #artifacts-resize { display: none; }
     #new-chat { right: .75rem; bottom: .75rem; }
   }
@@ -3138,6 +3152,46 @@ function commentAddress(selection) {
  * bar is about: the words already typed stay, because the reader may be nudging a
  * handle mid-sentence.
  */
+/**
+ * Focus a field without letting the browser scroll the page to reach it.
+ *
+ * **This is an iOS Safari problem, and `preventScroll` does not solve it.** On iOS, tapping an
+ * input always scrolls the page so the input is centred in the *visual* viewport — and that
+ * movement can carry even fixed-position elements off screen. `preventScroll` addresses the
+ * normal scroll-into-view path, which is not the one iOS uses here.
+ *
+ * The composer sits at the foot of the document pane, and that pane is what holds the framed
+ * document — so the scroll went to the pane, which moved the picture under the reader. It also
+ * *stayed* moved when the keyboard was dismissed, because the pane keeps its new position.
+ *
+ * The technique is the one Adobe's `usePreventScroll` documents: move the field far above the
+ * top of the page *before* focusing, so Safari has nothing to scroll to; focus it; then take the
+ * transform off two frames later, once the decision has been made. Their comment on the cause is
+ * the clearest statement of it: "When tapping on an input, the page always scrolls so that the
+ * input is centered in the visual viewport. This may cause even fixed position elements to
+ * scroll off the screen."
+ *
+ * The field is left visible — the transform is removed after focus, so nothing flickers. Only
+ * the browser's *decision* is made while it is off screen.
+ */
+function focusWithoutScrolling(field) {
+  const was = field.style.transform;
+  field.style.transform = 'translateY(-2000px)';
+  try {
+    // `preventScroll` as well, for the browsers that honour it: it costs nothing and spares
+    // the transform entirely on Chrome and Firefox.
+    field.focus({ preventScroll: true });
+  } finally {
+    // Two frames: iOS needs the focus to have settled before the element comes back, or it
+    // reconsiders and scrolls anyway.
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        field.style.transform = was;
+      }),
+    );
+  }
+}
+
 function showCommentBar(selection) {
   const opening = commentBar.hidden || !pendingSelection;
   pendingSelection = selection;
@@ -3177,12 +3231,11 @@ function showCommentBar(selection) {
   // One action at a time in the same corner: the composer *is* the comment button
   // continued, so two of them would compete for the space and for the tap.
   setFabVisible(false);
-  // Focus follows intent. The document only sends `intent: "comment"` when somebody clicked the
-  // affordance beside their selection — an explicit "I want to write something" — and focusing then
-  // is right: it opens the keyboard, which is what they asked for. Selection alone never focuses,
-  // because that raises the keyboard mid-read and collapses the very selection being commented on.
+  // Focus follows intent: only the comment button opens this, and pressing it means "I want to
+  // write", so the keyboard opening is what was asked for. Throttled through
+  // `focusWithoutScrolling`, which is what keeps iOS from scrolling the document away.
   if (selection.intent === 'comment') {
-    commentText.focus();
+    focusWithoutScrolling(commentText);
   }
 }
 
@@ -3605,7 +3658,7 @@ commentBar.addEventListener('pointerdown', (event) => {
   if (!target || target === commentText || target.tagName === 'TEXTAREA' || target.tagName === 'BUTTON') return;
   // Defer, so the tap does not land inside the newly focused field and move the
   // caret to wherever the finger was.
-  setTimeout(() => commentText.focus(), 0);
+  setTimeout(() => focusWithoutScrolling(commentText), 0);
 });
 
 document.getElementById('comment-send').onclick = () => void sendComment();
