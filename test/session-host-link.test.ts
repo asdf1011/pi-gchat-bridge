@@ -403,3 +403,35 @@ test("a tool allowlist rides the wire and reaches `configure`", async () => {
     "the allowlist narrows the offered tools, rather than being stored and ignored",
   );
 });
+
+test("a region comment crosses the link with its rectangle intact", async () => {
+  // The bug this guards, found in production: the client-side payload of `addComment`
+  // listed the line fields and not `region`, so a comment on part of a picture reached
+  // the host as "no line, no quote" and was refused. Both ends handled regions; the
+  // wire between them dropped one, and nothing tested the round trip.
+  //
+  // Asserted on the *shape the far side receives*, not on the reply: a missing field is
+  // invisible in a refusal that reads like a viewer bug.
+  const { inProcess, linked } = await bothEnds();
+  const created = await linked.getOrCreate("threads/region", { model: { provider: "deepseek", modelId: "flash" } });
+  const seen: unknown[] = [];
+  const original = inProcess.addComment.bind(inProcess);
+  (inProcess as { addComment: unknown }).addComment = async (id: number, input: unknown) => {
+    seen.push(input);
+    return original(id, input as Parameters<typeof original>[1]);
+  };
+
+  const created2 = await linked.addComment(created.conversationId, {
+    file: "conversation/1/shot.png",
+    selection: {
+      region: { x: 4, y: 8, width: 16, height: 12, imageWidth: 48, imageHeight: 32, page: 2 },
+    },
+    text: "this button is in the wrong place",
+    author: "henry",
+  });
+
+  // Whatever the host decided, the rectangle arrived — which is the whole assertion.
+  const arrived = (seen[0] as { selection: { region?: Record<string, number> } }).selection.region;
+  assert.deepEqual(arrived, { x: 4, y: 8, width: 16, height: 12, imageWidth: 48, imageHeight: 32, page: 2 });
+  assert.ok("comment" in created2 || "error" in created2, "the call answered either way");
+});

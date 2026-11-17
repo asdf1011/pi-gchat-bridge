@@ -380,6 +380,11 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
               ...(input.selection.endLine === undefined ? {} : { endLine: input.selection.endLine }),
               ...(input.selection.charStart === undefined ? {} : { charStart: input.selection.charStart }),
               ...(input.selection.charEnd === undefined ? {} : { charEnd: input.selection.charEnd }),
+              // A picture's position. Without this the client-side payload dropped the
+              // rectangle before it ever reached the wire, so every region comment
+              // arrived at the host as "no line, no quote" — which reads like a viewer
+              // bug and is a missing field in the adapter.
+              ...(input.selection.region === undefined ? {} : { region: input.selection.region }),
               text: input.text,
               ...(input.author === undefined ? {} : { author: input.author }),
             },
