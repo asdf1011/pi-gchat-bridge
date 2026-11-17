@@ -283,11 +283,54 @@ export const SWIPE_SCRIPT = `
   // still be judged from where it had got to.
   (function () {
     var DISTANCE = 60;       // how far a swipe has to travel to count (a tap is ~0)
-    var DRAG_START = 8;      // where the document starts following the finger
     var RATIO = 1.5;         // horizontal must beat vertical by this much
     var SLOW = 800;          // longer than this is a drag, not a flick
     var start = null;
     var last = null;
+    /**
+     * Whether a horizontal drag is the *page's* to claim right now.
+     *
+     * Two things can own a horizontal movement on this surface, and only one of them can
+     * have it. While a rectangle is being selected, the drag is drawing that box. While
+     * the picture is zoomed in, the drag pans it. In both cases the document consumes the
+     * gesture, and paging must not begin underneath it — which is what made a drag feel
+     * like a coin toss between moving the picture and moving to the next artifact.
+     *
+     * The document is also the only party that can answer: it knows whether it is armed,
+     * and only it knows how much of the picture is left to pan. So it reports both, and
+     * this script simply obeys.
+     */
+    var pageLocked = false;
+    /** Which way the document still has somewhere to go. */
+    var pannable = { left: false, right: false };
+
+    /**
+     * Whether the document owns a drag whose finger moves dx pixels horizontally.
+     *
+     * Armed means it owns every horizontal drag: the reader is drawing a rectangle, and a
+     * rectangle has no direction. Zoomed means it owns the drag only while the picture has
+     * somewhere to go that way — a finger moving right scrolls the picture's content right,
+     * which needs content to the left (pannable.left). When there is none the picture is
+     * pinned to that edge and the gesture is the drawer's: that is the whole of the rule,
+     * page only when we cannot drag any further.
+     */
+    function owned(dx) {
+      if (!pageLocked) return false;
+      // Armed: no direction, the rectangle owns it.
+      if (pannable.armed) return true;
+      return dx > 0 ? pannable.left : pannable.right;
+    }
+
+    window.addEventListener("message", function (event) {
+      var data = event.data;
+      if (!data) return;
+      if (data.t !== "pi-artifact-page-locked") return;
+      // Only this document's own report. A lock from anywhere else would be about another
+      // frame, and obeying it would stop paging for no reason a reader could see.
+      if (event.source !== window) return;
+      pageLocked = data.locked === true;
+      pannable = data.sides || { left: false, right: false };
+    });
 
     function pointOf(event) {
       // changedTouches is where a touch really is; clientX is 0 on some browsers
@@ -317,6 +360,10 @@ export const SWIPE_SCRIPT = `
       function abort() {
         parent.postMessage({ t: "pi-artifact-drag-end", commit: false }, "*");
       }
+      // The document owned this gesture, so it never was a page turn. Released with
+      // commit false like any other abort, because the pane may have been nudged before
+      // the ownership was known.
+      if (owned(dx)) return abort();
       if (absX < DISTANCE) return abort();
       if (absX < absY * RATIO) return abort();   // mostly vertical: a scroll
       if (Date.now() - from.at > SLOW) return abort();
@@ -356,10 +403,15 @@ export const SWIPE_SCRIPT = `
       var dy = point.y - start.y;
       var absX = Math.abs(dx);
       var absY = Math.abs(dy);
+      // The document owns this direction, so the pane does not follow the finger at all. The
+      // old slop test used to decide this by accident — the pane only moved once the drag was
+      // horizontal enough — but a selection or a pan is horizontal too, so the slop cannot
+      // tell them apart. The document can, and says so.
+      if (owned(dx)) return;
       // Past the slop, and clearly more horizontal than vertical. Both conditions
       // have to hold before anything moves: a diagonal drag that keeps scrolling
       // must not drag the document sideways while it does.
-      if (absX < DRAG_START || absX < absY * RATIO) return;
+      if (absX < 8 || absX < absY * RATIO) return;
       parent.postMessage({ t: "pi-artifact-drag", dx: dx }, "*");
     }, { passive: true });
 
@@ -381,6 +433,7 @@ export const SWIPE_SCRIPT = `
     document.addEventListener("wheel", function (event) {
       if (Math.abs(event.deltaX) <= Math.abs(event.deltaY)) { travel = 0; return; }
       if (event.ctrlKey) return;              // ctrl+wheel is zoom
+      if (owned(event.deltaX)) { travel = 0; return; } // the document owns this direction
       var selection = window.getSelection && window.getSelection();
       if (selection && !selection.isCollapsed) return;
       travel += event.deltaX;
@@ -518,21 +571,106 @@ export const REGION_SCRIPT = `
     var pinch = null;       // { distance, zoom } captured when the second finger landed
     var pan = null;         // { x, y, left, top } for a one-finger drag while zoomed
 
+    /**
+     * Tell the page whether a horizontal drag is the document's, or the drawer's.
+     *
+     * The drawer pages between artifacts on a horizontal swipe, and this document can also
+     * own a horizontal drag — drawing a rectangle when armed, panning when zoomed in. Only
+     * one of the two can have it, and the document is the only party that knows which.
+     *
+     * "Can we drag any further" is the reader's phrasing and it is the right rule: while
+     * the picture still has somewhere to pan in that direction, the drag pans it; once it
+     * is against the edge, the same drag pages. That is why this is not simply "armed or
+     * zoomed" — a zoomed picture scrolled to its left edge has nothing left to give.
+     */
+    var report = { sides: { left: false, right: false } };
+
+    /** Which way the picture still has somewhere to go, and whether a box is being drawn. */
+    var sides = { left: false, right: false, armed: false };
+
+    function reportPageLock() {
+      var locked = armed;
+      var scroller = document.scrollingElement;
+      if (!locked && zoom > 1 && scroller) {
+        var maxLeft = scroller.scrollWidth - scroller.clientWidth;
+        // Direction matters, and this is the whole rule: "page only when we cannot drag any
+        // further" means the picture keeps the gesture while there is room to move *that
+        // way*. A picture scrolled hard against its right edge has nowhere to go right, so
+        // dragging right is the drawer's — while dragging left still pans.
+        //
+        // The script reports both sides so the swipe can pick the one the finger is going.
+        sides = {
+          left: scroller.scrollLeft > 1,
+          right: scroller.scrollLeft < maxLeft - 1,
+          armed: false
+        };
+        locked = sides.left || sides.right;
+      } else {
+        // Zoomed out (or unarmed): nothing to pan, so the drawer owns horizontal drags
+        // unless a rectangle is being drawn.
+        sides = { left: false, right: false, armed: armed };
+      }
+      // Both ways round. window reaches the swipe script, a sibling IIFE in this same
+      // document, so a message is how the two talk and parent alone would skip it. parent
+      // reaches the drawer, which stops the strip moving even if a stale drag message is
+      // already in flight.
+      window.postMessage({ t: "pi-artifact-page-locked", locked: locked, sides: sides }, "*");
+      parent.postMessage({ t: "pi-artifact-page-locked", locked: locked, sides: sides }, "*");
+    }
+
+    /**
+     * How big the picture is at fit, before any transform.
+     *
+     * Measured with the transform off and remembered. Reading offsetWidth while scaled gives
+     * the unscaled box, which is fine — but reading it while the *stage* has an explicit
+     * width does not: the picture is a flex item with max-width 100 percent, so sizing its
+     * container to the scaled picture makes it collapse to zero, and every later
+     * measurement is zero too. That is the loop this avoids.
+     */
+    var fitted = null;
+
+    function measureFit() {
+      var was = image.style.transform;
+      image.style.transform = "";
+      fitted = { width: image.offsetWidth, height: image.offsetHeight };
+      image.style.transform = was;
+      return fitted;
+    }
+
     function applyZoom() {
       image.style.transform = zoom === 1 ? "" : "scale(" + zoom + ")";
-      if (!stage) return;
-      // The transform does not change the layout box, so the *scrollable* area has to be
-      // grown by hand or a zoomed picture cannot be panned to its edges. offsetWidth and
-      // offsetHeight rather than a client rect: the rect already includes the transform,
-      // so reading it here would size the stage to the scaled picture, and the next call
-      // would scale that again.
-      var width = image.offsetWidth;
-      var height = image.offsetHeight;
-      stage.style.width = zoom === 1 ? "" : Math.round(width * zoom) + "px";
-      stage.style.height = zoom === 1 ? "" : Math.round(height * zoom) + "px";
-      stage.style.minWidth = zoom === 1 ? "100%" : Math.round(width * zoom) + "px";
-      stage.style.minHeight = zoom === 1 ? "100%" : Math.round(height * zoom) + "px";
+      if (stage) {
+        if (zoom === 1) {
+          stage.style.width = "";
+          stage.style.height = "";
+          stage.style.minWidth = "";
+          stage.style.minHeight = "";
+        } else {
+          // The transform does not change the layout box, so the *scrollable* area has to be
+          // grown by hand or a zoomed picture cannot be panned to its edges.
+          var fit = fitted || measureFit();
+          var width = Math.round(fit.width * zoom);
+          var height = Math.round(fit.height * zoom);
+          stage.style.width = width + "px";
+          stage.style.height = height + "px";
+          stage.style.minWidth = width + "px";
+          stage.style.minHeight = height + "px";
+        }
+      }
+      // After a layout, not during one: the lock depends on scrollWidth, which is only
+      // right once the browser has laid the new stage size out.
+      requestAnimationFrame(reportPageLock);
     }
+
+    // The fit is measured once the picture has a size of its own, and re-measured when the
+    // window changes: a rotation or a drawer resize gives a different "fitted".
+    function remeasure() {
+      fitted = null;
+      if (zoom === 1) measureFit();
+    }
+    if (image.complete) remeasure();
+    else image.addEventListener("load", remeasure, { once: true });
+    window.addEventListener("resize", remeasure);
 
     /**
      * Zoom about a point, so the thing under the fingers stays under them.
@@ -600,6 +738,9 @@ export const REGION_SCRIPT = `
         document.scrollingElement.scrollLeft = pan.left - (event.clientX - pan.x);
         document.scrollingElement.scrollTop = pan.top - (event.clientY - pan.y);
         event.preventDefault();
+        // Reaching an edge is what hands the gesture to the drawer, so the answer changes
+        // mid-gesture and has to be re-reported rather than decided at the start.
+        reportPageLock();
       }
     });
 
@@ -659,6 +800,10 @@ export const REGION_SCRIPT = `
       if (!data || data.t !== "pi-artifact-arm") return;
       armed = data.armed === true;
       image.classList.toggle("armed", armed);
+      // The class goes on the document too: arming is about the whole page being selectable,
+      // not about the picture element. See the stylesheet for why.
+      document.documentElement.classList.toggle("armed", armed);
+      document.body.classList.toggle("armed", armed);
       // Arming clears anything half-drawn: the state that allowed the box has changed,
       // and a box left on screen would look like a selection that no longer exists.
       if (!armed) clear();
@@ -668,9 +813,16 @@ export const REGION_SCRIPT = `
       pointers = {};
       pinch = null;
       pan = null;
+      // Armed, a horizontal drag draws a rectangle: the drawer must not page underneath it.
+      reportPageLock();
     });
 
-    image.addEventListener("pointerdown", function (event) {
+    // The whole document, not just the picture: once the button has been pressed the reader
+    // is choosing an area of *the page*, and a drag that begins in the margin beside a
+    // letterboxed picture obviously meant the picture. Listening on the image alone left a
+    // drag that started anywhere else doing nothing at all — it could not draw a rectangle,
+    // and (because the page is locked while armed) it could not page either.
+    document.addEventListener("pointerdown", function (event) {
       if (!armed) return;
       // Primary button or a finger; a right-click is the browser's menu.
       if (typeof event.button === "number" && event.button !== 0) return;
@@ -678,8 +830,11 @@ export const REGION_SCRIPT = `
       // means the browser will not take it back.
       if (event.pointerType === "touch" && drag) return;
       event.preventDefault();
+      // Capture on the *document*, now that a drag may start anywhere: capturing on the
+      // image would only work for presses it received, and would also lose a drag that
+      // wandered off the picture mid-stroke.
       try {
-        image.setPointerCapture(event.pointerId);
+        document.documentElement.setPointerCapture(event.pointerId);
       } catch (e) {
         // Capture is an optimisation; the handlers below work without it.
       }
@@ -693,7 +848,7 @@ export const REGION_SCRIPT = `
       document.body.appendChild(marquee);
     });
 
-    image.addEventListener("pointermove", function (event) {
+    document.addEventListener("pointermove", function (event) {
       if (!drag || !marquee) return;
       var left = Math.min(drag.x, event.clientX);
       var top = Math.min(drag.y, event.clientY);
@@ -738,10 +893,10 @@ export const REGION_SCRIPT = `
       );
     }
 
-    image.addEventListener("pointerup", end);
+    document.addEventListener("pointerup", end);
     // A gesture the system claims (a scroll that turns into a back-swipe) ends here and
     // never at pointerup, so the box is taken down rather than left on the picture.
-    image.addEventListener("pointercancel", clear);
+    document.addEventListener("pointercancel", clear);
   })();
 `;
 
@@ -1530,7 +1685,15 @@ function imageDocument(input: {
      Armed, the browser is told to keep its hands off: touch-action none hands every
      touch to the region script, and the cursor says what a drag will do. */
   img { touch-action: auto; }
-  img.crop-target.armed { touch-action: none; cursor: crosshair; user-select: none;
+  /* Armed, the *whole document* is the gesture surface, not just the picture.
+     
+     Taking touches only from the img left a drag that began in the margin beside a
+     letterboxed picture owned by nobody: it could not draw a rectangle (the image never saw
+     the pointerdown) and it could not page (the drawer had been told the document owns
+     horizontal drags). Nothing happened at all, which is the worst of the three answers. */
+  html.armed, body.armed { touch-action: none; }
+  body.armed { cursor: crosshair; }
+  html.armed img, img.crop-target.armed { touch-action: none; cursor: crosshair; user-select: none;
         -webkit-user-select: none; -webkit-user-drag: none; }
   /* The rectangle being dragged. Fixed, because the script works in client
      coordinates; pointer-events: none, because the box sits under the finger that is

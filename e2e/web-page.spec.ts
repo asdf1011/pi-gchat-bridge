@@ -1514,6 +1514,95 @@ test("artifacts: swiping across an image pages too", async ({ page, context }) =
   await expect(page.locator("#artifacts-title")).toHaveText("two.png");
 });
 
+  test("a drag that draws a rectangle does not also page", async ({ page, context }) => {
+    // The two gestures compete: a horizontal drag is both "draw the selection" and "go to
+    // the next artifact". A real touch produces pointer *and* touch events, so both scripts
+    // see the same finger.
+    //
+    // What actually stops the page: arming puts `touch-action: none` on the whole document,
+    // so the browser stops delivering touch events to the swipe script at all. Verified by
+    // removing that rule — this test then fails, because the drag pages instead. The
+    // page-lock message is the second barrier behind it, for a gesture already in flight
+    // when the button was pressed; it is not what holds here, and saying so keeps anyone
+    // from deleting the CSS as "belt and braces we do not need".
+    await stubApi(page);
+    await page.route("**/api/environment", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ artifactsBaseUrl: "https://artifacts.example", pageVersion: "t" }),
+      }),
+    );
+    await page.route("**/api/c/*/artifacts", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([
+          { key: "pi/one.png", wrote: 1, edited: 0, markdown: false, image: true },
+          { key: "pi/two.png", wrote: 1, edited: 0, markdown: false, image: true },
+        ]),
+      }),
+    );
+    await page.route("**/api/c/*/comments", (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
+    );
+    const png = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAYAAACinX6EAAAAJUlEQVR42u3NMQEAAAgDoC251a3gLwSgcyfTVFVVVVVVVVVVVVX1tQFrwAPhpO4WAAAAAElFTkSuQmCC",
+      "base64",
+    );
+    await page.route("https://artifacts.example/**", (route) => {
+      const url = route.request().url();
+      const name = url.includes("two.png") ? "two.png" : "one.png";
+      if (url.includes("?raw") || url.includes("region=")) {
+        return route.fulfill({ status: 200, contentType: "image/png", body: png });
+      }
+      return route.fulfill({ status: 200, contentType: "text/html", body: imageDocumentFor(`pi/${name}`) });
+    });
+
+    await page.goto("/7/");
+    await page.locator("#artifacts-toggle").click();
+    await page.locator("#artifact-list li").first().click();
+    await expect(page.locator("#artifacts-title")).toHaveText("one.png");
+
+    const cdp = await context.newCDPSession(page);
+    /** One horizontal finger stroke across the visible document. */
+    const swipe = async (): Promise<void> => {
+      const box = (await currentFrame(page).boundingBox())!;
+      const y = box.y + box.height / 2;
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: box.x + box.width * 0.85, y }] });
+      // A diagonal stroke, not a flat one: a real selection is a rectangle, and a purely
+      // horizontal drag has no height — below the minimum, and refused as a tap.
+      for (let i = 1; i <= 10; i += 1) {
+        await cdp.send("Input.dispatchTouchEvent", {
+          type: "touchMove",
+          touchPoints: [{ x: box.x + box.width * (0.85 - 0.07 * i), y: y + i * 6 }],
+        });
+        await page.waitForTimeout(12);
+      }
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      await page.waitForTimeout(350);
+    };
+
+    // Unarmed, the stroke pages. That is the drawer's gesture and must keep working.
+    await swipe();
+    await expect(page.locator("#artifacts-title")).toHaveText("two.png");
+
+    // Back to the first, and arm it. The list is behind the document, so ← is the way
+    // there — the same control a reader uses.
+    await page.locator("#artifacts-back").click();
+    await page.locator("#artifact-list li").first().click();
+    await expect(page.locator("#artifacts-title")).toHaveText("one.png");
+    await page.locator("#comment-fab").click();
+    const frame = page.frames().find((f) => f !== page.mainFrame() && f.url().includes("one.png"))!;
+    await expect.poll(() => frame.evaluate(() => document.body.classList.contains("armed"))).toBe(true);
+
+    // The same stroke now draws the rectangle, and must not page.
+    await swipe();
+    // eslint-disable-next-line no-console
+    await expect(page.locator("#artifacts-title")).toHaveText("one.png");
+    await expect(page.locator("#comment-preview")).toBeVisible();
+  });
+
 test("artifacts: a step does not reload anything already on screen", async ({ page, context }) => {
   // The architecture the flicker forced: one frame per document, never reloaded, with
   // the visible one changing as a matter of *position*. The old design reloaded the

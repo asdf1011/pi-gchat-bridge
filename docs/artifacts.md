@@ -245,6 +245,27 @@ The button is hidden while the composer is open — the composer is the same act
 continued, and two of them would compete for the same corner. Pressing it again closes
 the composer and disarms, which is the way out on a device with no Escape key.
 
+### Dragging: selection beats paging
+
+A horizontal drag means two things — "draw the rectangle" and "go to the next artifact" —
+and a real touch produces pointer *and* touch events, so both scripts see the same finger.
+
+**Arming puts `touch-action: none` on the whole document**, so the browser stops delivering
+touch events to the swipe script altogether. That is what actually settles the conflict, and
+it is why the rule is on `html`/`body` rather than on the `img`: a drag that began in the
+margin beside a letterboxed picture used to be owned by nobody — it could not draw a
+rectangle (the image never saw the pointerdown) and it could not page (the drawer had been
+told the document owns horizontal drags). Nothing happened at all.
+
+Behind that there is a second barrier, for the case the CSS cannot cover: a gesture already
+in flight when the button was pressed. The document reports `pi-artifact-page-locked` with
+which sides it can still pan, and the swipe script pages only when the direction the finger
+is going is not one of them — "page only when we cannot drag any further". While armed all
+directions are the rectangle's, because a rectangle has no direction.
+
+Worth knowing which of the two is doing the work: removing the CSS makes the browser test
+fail; removing the message does not. The CSS is the mechanism, the message is the fallback.
+
 ### Zooming looks at the picture, not at the drawer
 
 Zoom is the picture document's own — a scale transform on the `<img>`, driven by two

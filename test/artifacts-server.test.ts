@@ -936,3 +936,30 @@ test("the picture document never asks the browser to zoom it", async () => {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a zoomed picture keeps the drag until it has none left in that direction", async () => {
+  // The reader's rule, and the whole point of the page-lock message: page to the next
+  // artifact only when the picture cannot be dragged any further *that way*. The document
+  // reports which sides still have somewhere to go; the swipe script only pages when the
+  // direction the finger is travelling is not one of them.
+  //
+  // Driven through the real script text rather than the arithmetic alone, because the bug
+  // this guards is the two scripts disagreeing about direction — `owned()` takes the
+  // finger's dx, and "left" means content to the left exists.
+  const root = tempDir();
+  const harness = await serve(root, ["shot.png"]);
+  try {
+    fs.writeFileSync(path.join(root, "shot.png"), PNG_BYTES);
+    const html = await (await fetch(`${harness.base}/c/1/shot.png`)).text();
+    // The report carries the sides, and the swipe asks about the direction it is going.
+    assert.match(html, /left: scroller\.scrollLeft > 1/);
+    assert.match(html, /right: scroller\.scrollLeft < maxLeft - 1/);
+    assert.ok(html.includes("function owned(dx)"), "the swipe asks per direction");
+    assert.match(html, /return dx > 0 \? pannable\.left : pannable\.right/);
+    // And armed means every horizontal drag is the rectangle's, with no direction at all.
+    assert.match(html, /if \(pannable\.armed\) return true/);
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

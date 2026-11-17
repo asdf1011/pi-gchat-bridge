@@ -3535,6 +3535,11 @@ window.addEventListener('message', (event) => {
     // to read it must not summon anything.
     const picked = data.message && typeof data.message.file === 'string' ? data.message : null;
     if (picked) pendingSelection = picked;
+  } else if (data.t === 'pi-artifact-page-locked') {
+    // The document in the middle says whether a horizontal drag is its own. Set before the
+    // drag messages that follow it, so the strip never starts moving for a gesture the
+    // document is already consuming.
+    pageLockedByDocument = data.locked === true;
   } else if (data.t === 'pi-artifact-drag') {
     // The finger is still down: move the pane with it.
     dragArtifactPane(typeof data.dx === 'number' ? data.dx : 0);
