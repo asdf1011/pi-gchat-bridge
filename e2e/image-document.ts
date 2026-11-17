@@ -16,14 +16,18 @@ export function imageDocumentFor(key: string): string {
   return `<!doctype html><html><head><meta charset="utf-8">
 <style>
   :root { color-scheme: light dark; }
+  /* The real document's rules, in the real document's order. A stale duplicate here is not
+     a cosmetic problem: an old body rule left over from the centring era shrank the
+     scrollable width, and the browser test then measured a bug that only existed in the
+     fixture. */
   html { touch-action: pan-y; }
   html, body { height: 100%; box-sizing: border-box; }
-  body { margin: 0; display: flex; align-items: center; justify-content: center;
+  body { margin: 0; height: 100%; overflow: auto; overscroll-behavior: contain;
          padding: 1rem; background: Canvas; color: CanvasText; }
-  img { max-width: 100%; max-height: 100%; object-fit: contain; background: #8881; }
-  body { margin: 0; height: 100%; overflow: auto; overscroll-behavior: contain; }
-  .stage { min-width: 100%; min-height: 100%; display: flex; align-items: center; justify-content: center; padding: 1rem; box-sizing: border-box; }
-  img { touch-action: auto; transform-origin: center center; }
+  .stage { min-width: 100%; min-height: 100%; display: flex; padding: 1rem; box-sizing: border-box; }
+  .stage > img { margin: auto; }
+  img { max-width: 100%; max-height: 100%; object-fit: contain; background: #8881;
+        touch-action: auto; transform-origin: top left; will-change: transform; }
   img.crop-target.armed { touch-action: none; cursor: crosshair; user-select: none; -webkit-user-select: none; }
   html.armed, body.armed { touch-action: none; }
   body.armed { cursor: crosshair; }
@@ -55,8 +59,9 @@ export function pdfPageDocumentFor(key: string, page: number, pageCount: number)
          padding: 1rem; background: Canvas; color: CanvasText; }
   img { max-width: 100%; max-height: 100%; object-fit: contain; background: #8881; }
   body { margin: 0; height: 100%; overflow: auto; overscroll-behavior: contain; }
-  .stage { min-width: 100%; min-height: 100%; display: flex; align-items: center; justify-content: center; padding: 1rem; box-sizing: border-box; }
-  img { touch-action: auto; transform-origin: center center; }
+  .stage { min-width: 100%; min-height: 100%; display: flex; padding: 1rem; box-sizing: border-box; }
+  .stage > img { margin: auto; }
+  img { touch-action: auto; transform-origin: top left; will-change: transform; }
   img.crop-target.armed { touch-action: none; cursor: crosshair; user-select: none; -webkit-user-select: none; }
   html.armed, body.armed { touch-action: none; }
   body.armed { cursor: crosshair; }

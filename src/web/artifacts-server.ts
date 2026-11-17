@@ -630,31 +630,84 @@ export const REGION_SCRIPT = `
     var fitted = null;
 
     function measureFit() {
-      var was = image.style.transform;
+      // Every inline size has to be released, not just the transform: applyZoom pins the
+      // picture to its fitted width, so measuring while that is set would measure the pinned
+      // box and call it the fit. Re-measuring then happens after a resize, which is exactly
+      // when the two differ.
+      var was = {
+        transform: image.style.transform,
+        width: image.style.width,
+        height: image.style.height,
+        maxWidth: image.style.maxWidth,
+        maxHeight: image.style.maxHeight
+      };
       image.style.transform = "";
+      image.style.width = "";
+      image.style.height = "";
+      image.style.maxWidth = "";
+      image.style.maxHeight = "";
       fitted = { width: image.offsetWidth, height: image.offsetHeight };
-      image.style.transform = was;
+      image.style.transform = was.transform;
+      image.style.width = was.width;
+      image.style.height = was.height;
+      image.style.maxWidth = was.maxWidth;
+      image.style.maxHeight = was.maxHeight;
       return fitted;
     }
 
     function applyZoom() {
-      image.style.transform = zoom === 1 ? "" : "scale(" + zoom + ")";
-      if (stage) {
-        if (zoom === 1) {
+      if (stage && zoom !== 1) {
+        // Pin the picture at its fitted size *before* resizing anything around it.
+        //
+        // This is the whole bug the first version had: the img is max-width 100 percent of
+        // its container, so growing the stage to fit times zoom let the picture lay out
+        // larger than fit (up to its natural size), and the transform then scaled that. The
+        // stage and the picture disagreed about how big the picture was, so the scroll
+        // extent was wrong and the picture could not be dragged to its edges — it ran out of
+        // room before the content did.
+        //
+        // A fixed width in the fitted pixels makes the picture's layout box exactly what the
+        // stage was sized from, and the transform becomes the only thing that changes its
+        // size. That is also why the measurement is taken while this is still auto.
+        var fit = fitted || measureFit();
+        image.style.width = fit.width + "px";
+        image.style.height = fit.height + "px";
+        image.style.maxWidth = "none";
+        image.style.maxHeight = "none";
+        // No auto margins while zoomed. The picture's layout box stays at its fitted size and
+        // the transform does the growing, so an auto margin would centre that small box in a
+        // stage already sized to the scaled picture: hundreds of pixels of slack on each
+        // side, which the reader can scroll into and which is not picture. Top-left
+        // alignment plus a top-left transform origin makes the stage and the drawn picture
+        // the same rectangle.
+        image.style.margin = "0";
+        image.style.transform = "scale(" + zoom + ")";
+        // The stage is exactly the drawn picture, with no padding of its own: the stage's
+        // box is what the browser scrolls, so any slack in it is scroll room past the
+        // picture's edge — visible as a band of empty space the reader can drag into.
+        var width = Math.round(fit.width * zoom);
+        var height = Math.round(fit.height * zoom);
+        stage.style.width = width + "px";
+        stage.style.height = height + "px";
+        stage.style.minWidth = width + "px";
+        stage.style.minHeight = height + "px";
+        stage.style.padding = "0";
+      } else {
+        // Back to fit: every inline size handed out above is released, so the picture is
+        // laid out by the stylesheet again and the stage is the window.
+        image.style.transform = "";
+        image.style.width = "";
+        image.style.height = "";
+        image.style.maxWidth = "";
+        image.style.maxHeight = "";
+        image.style.margin = "";
+        image.style.transformOrigin = "";
+        if (stage) {
           stage.style.width = "";
           stage.style.height = "";
           stage.style.minWidth = "";
           stage.style.minHeight = "";
-        } else {
-          // The transform does not change the layout box, so the *scrollable* area has to be
-          // grown by hand or a zoomed picture cannot be panned to its edges.
-          var fit = fitted || measureFit();
-          var width = Math.round(fit.width * zoom);
-          var height = Math.round(fit.height * zoom);
-          stage.style.width = width + "px";
-          stage.style.height = height + "px";
-          stage.style.minWidth = width + "px";
-          stage.style.minHeight = height + "px";
+          stage.style.padding = "";
         }
       }
       // After a layout, not during one: the lock depends on scrollWidth, which is only
@@ -1661,9 +1714,23 @@ function imageDocument(input: {
          font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
   /* A centring box, so a picture smaller than the window sits in the middle and a zoomed
      one can still be scrolled from its top-left. min-width and min-height rather than
-     height, so it grows with the picture instead of clipping it. */
+     height, so it grows with the picture instead of clipping it.
+     
+     Centring is why the safe keyword matters. Plain center puts equal space on both sides of
+     an item bigger than its container, and the overflow on the start side cannot be
+     scrolled to: a flex container's scrollable area begins at its own origin, not at the
+     child's. That is exactly the reported symptom — zoomed in, the top and left could never
+     be reached. Safe center falls back to start alignment once the item no longer fits, so
+     there is no space beyond the origin to lose. */
   .stage { min-width: 100%; min-height: 100%; display: flex;
-           align-items: center; justify-content: center; padding: 1rem; box-sizing: border-box; }
+           padding: 1rem; box-sizing: border-box; }
+  /* Centred by margin auto rather than by justify-content, and the difference is not
+     stylistic: a flex container's scrollable area begins at its own origin, so an item
+     larger than the container with justify-content center overflows the start side into
+     space that cannot be scrolled to. That is the reported bug — zoomed in, the top and left
+     could never be reached. An auto margin gives way instead, collapsing to zero once the
+     item no longer fits, so nothing ever sits outside the origin. */
+  .stage > img { margin: auto; }
   /* Fitted, not stretched: a screenshot wider than the drawer is the ordinary case,
      and scaling it down to fit is what makes it readable at a glance. The height is
      capped too, so a tall one does not need a scroll to see what it is.
@@ -1673,7 +1740,7 @@ function imageDocument(input: {
      will-change keeps the gesture off the compositor's slow path. */
   img { max-width: 100%; max-height: 100%; object-fit: contain;
         image-rendering: auto; background: #8881; border-radius: .4rem;
-        transform-origin: center center; will-change: transform; }
+        transform-origin: top left; will-change: transform; }
   /* The picture is *not* the gesture surface until somebody says they are commenting.
      Taking every touch away from the browser is what makes a rectangle possible on a
      phone, and it is also what made panning and pinching impossible: one finger cannot

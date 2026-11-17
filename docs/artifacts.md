@@ -280,6 +280,14 @@ frame, so the chrome stays put.
 
 - **About a point, not the centre.** A pinch holds the thing under the fingers still; a
   scale about the centre drifts away from what the reader is looking at.
+- **The scrollable area is the drawn picture, exactly.** This is not automatic and it went
+  wrong three ways, all of them producing the same symptom — zoomed in, the top and left
+  unreachable. The stage is sized to the picture at its *fitted* size times the zoom (a
+  transform does not change the layout box); the picture's layout box is pinned to the
+  fitted pixels so growing the stage cannot make it lay out larger; and it is centred by
+  `margin: auto` rather than `justify-content`, because a flex container centres an
+  oversized item by overflowing it on the *start* side, which its scroll area cannot reach.
+  A centre transform origin has the same problem for the same reason.
 - **The scroll extent is given to the stage by hand**, because a transform does not
   change the layout box — without it a zoomed picture could not be panned to its edges.
 - **`overscroll-behavior: contain`** stops a pan reaching the picture's edge from

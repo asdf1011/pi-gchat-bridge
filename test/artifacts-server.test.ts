@@ -254,7 +254,11 @@ test("the image document is sized so the picture is centred, not pushed down", a
     // a transform-scaled picture needs something that grows with it, and the body cannot
     // be both that and the thing the zoom scrolls.
     assert.match(html, /<div class="stage">/);
-    assert.match(html, /display: flex;\s*align-items: center; justify-content: center/);
+    // Centred by an auto margin on the picture, not by `justify-content`. A flex container
+    // centres a too-large item by overflowing it on the *start* side, which its scrollable
+    // area cannot reach — so a zoomed picture's top-left was unreachable. Reported, and
+    // fixed by letting the margin collapse to zero instead.
+    assert.match(html, /\.stage > img \{ margin: auto; \}/);
     // And it is *fitted*: a screenshot wider than the drawer must scale down, not
     // scroll sideways.
     assert.match(html, /max-width: 100%; max-height: 100%; object-fit: contain/);
@@ -925,7 +929,7 @@ test("the picture document never asks the browser to zoom it", async () => {
     assert.doesNotMatch(imageDocumentCss, /pinch-zoom/, "the browser must not zoom this frame");
 
     // The zoom that replaces it: a scale on the picture, and the gestures that drive it.
-    assert.match(imageDocumentCss, /transform-origin: center center/);
+    assert.match(imageDocumentCss, /will-change: transform/);
     assert.ok(html.includes("function zoomAbout"), "zoom happens in the document");
     assert.ok(html.includes("event.ctrlKey"), "a trackpad's pinch is handled");
     assert.ok(html.includes("distanceBetween"), "two fingers are handled");
@@ -958,6 +962,37 @@ test("a zoomed picture keeps the drag until it has none left in that direction",
     assert.match(html, /return dx > 0 \? pannable\.left : pannable\.right/);
     // And armed means every horizontal drag is the rectangle's, with no direction at all.
     assert.match(html, /if \(pannable\.armed\) return true/);
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a zoomed picture is pinned to its fitted size, so the scroll extent is right", async () => {
+  // The bug: growing the stage to fit*zoom let the img lay out larger than fit — it is
+  // `max-width: 100%` of its container, so a bigger container gives a bigger picture — and
+  // the transform then scaled *that*. Stage and picture disagreed about the picture's size,
+  // so the scroll extent was too small and the picture could not be dragged to its edges:
+  // it ran out of room before the content did, and the top and left were unreachable.
+  //
+  // The fix is that the picture's layout box is pinned to the fitted pixels while zoomed,
+  // so the transform is the only thing changing its size and the stage can be sized from
+  // the same number.
+  const root = tempDir();
+  const harness = await serve(root, ["shot.png"]);
+  try {
+    fs.writeFileSync(path.join(root, "shot.png"), PNG_BYTES);
+    const html = await (await fetch(`${harness.base}/c/1/shot.png`)).text();
+
+    // Measuring releases every inline size, including the pin — otherwise a re-measure
+    // while zoomed reports the pinned box as "the fit".
+    assert.match(html, /function measureFit\(\)/);
+    assert.match(html, /image\.style\.maxWidth = ""/);
+    // Zoom pins the layout box before sizing the stage from the *same* measurement.
+    assert.match(html, /image\.style\.width = fit\.width \+ "px"/);
+    assert.match(html, /var width = Math\.round\(fit\.width \* zoom\)/);
+    // And unzooming releases all of it, so the stylesheet lays the picture out again.
+    assert.match(html, /image\.style\.width = "";/);
   } finally {
     await harness.close();
     fs.rmSync(root, { recursive: true, force: true });

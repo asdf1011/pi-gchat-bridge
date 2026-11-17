@@ -2896,7 +2896,7 @@ test("artifacts: zooming a picture changes only the picture, not the drawer", as
     route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
   );
   const png = Buffer.from(
-    "iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAYAAACinX6EAAAAJUlEQVR42u3NMQEAAAgDoC251a3gLwSgcyfTVFVVVVVVVVVVVVX1tQFrwAPhpO4WAAAAAElFTkSuQmCC",
+    "iVBORw0KGgoAAAANSUhEUgAAASwAAADICAYAAABS39xVAAAEFklEQVR42u3coQ0AMQwEQRfm/uWukhZMAqIb8HTAvbTMqe4+m29mVh+Px+O98sqAPB5PsHg8Hk+weDyeYBmQx+MJFo/H4wkWj8cTLAPyeDzB4vF4PMHi8XghwTIMj8f7xRMsHo8nWDwejydYPB5PsAzI4/EEi8fj8QSLx+MJlgF5PJ5g8Xg8nmDxeLyUYBmGx+O5JeTxeDzB4vF4gmVAHo8nWDwejydYPB5PsAzI4/EEi8fj8QSLx+MJlgF5PJ433Xk8Hs8tIY/HEywD8ng8weLxeDzB4vF4gmVAHo8nWDwejydYPB5PsAzI4/EEi8fj8bzpzuPx3BL6ITweT7B4PB5PsHg8nmD5ITweT7B4PB5PsHg8nmDxeDyeYPF4PMEyII/H86Y7j8fjuSXk8XiCZUAejydYPB6PJ1g8Hk+wDMjj8QSLx+PxBIvH4wmWAXk8nmDxeDyeN915PJ5bQgPyeDzB4vF4PMHi8XiCZUAejydYPB6PJ1g8Hk+wDMjj8QSLx+PxBIvH43nT3dA8Hs8tIY/H4wkWj8cTLD+Ex+MJFo/H4wkWj8cTLB6PxxMsHo8nWAbk8XiCxePxeN505/F4bgkNyOPxBIvH4/EEi8fjCZYBeTyeYPF4PJ5g8Xg8wTIgj8cTLB6PxxMsHo/nTXdD83g8t4Q8Ho8nWDweT7AMyOPxBIvH4/EEi8fjCZYBeTyeYPF4PJ5g8Xg8wfJDeDyeN915PB7PLSGPxxMsP4TH4wkWj8fjCRaPxxMsHo/HEywejydYBuTxeILF4/F4gsXj8bzpbhgej+eWkMfj8QSLx+MJlgF5PJ5g8Xg8nmDxeDzBMiCPxxMsHo/HEywejydYBuTxeN505/F4PLeEPB5PsAzI4/EEi8fj8QSLx+MJlgF5PJ5g8Xg8nmDxeDzB8kN4PJ5g8Xg8njfdeTyeW0I/hMfjCRaPx+MJFo/HEywej8cTLB6PJ1gG5PF4gsXj8XiCxePxBMuAPB7Pm+48Ho/nlpDH4wmWAXk8nmDxeDyeYPF4PMEyII/HEywej8cTLB6PJ1gG5PF4gsXj8XjedOfxeG4JDcjj8QSLx+PxBIvH4wmWAXk8nmDxeDyeYPF4PMHyQ3g8nmDxeDyeYPF4PG+6G5rH47kl5PF4PMHi8XiCxePxeILF4/EEy4A8Hk+weDweT7B4PJ5gGZDH4wkWj8fjedOdx+O5JTQgj8cTLB6PxxMsHo8nWAbk8XiCxePxeILF4/EEy4A8Hk+weDweT7B4PJ433Q3N4/HcEvJ4PJ5g8Xg8wTIgj8cTLB6PxxMsHo8nWH4Ij8cTLB6PxxMsHo8nWH4Ij8fzpjuPx+O5JeTxeILF4/F4gsXj8QTLgDweT7B4PB5PsHg8nmAZkMfjCRaPx+MJFo/Hi/EuGZCmc8GO1dUAAAAASUVORK5CYII=",
     "base64",
   );
   await page.route("https://artifacts.example/**", (route) => {
@@ -2910,7 +2910,11 @@ test("artifacts: zooming a picture changes only the picture, not the drawer", as
   await page.locator("#artifact-list li").first().click();
   const frame = page.frames().find((f) => f !== page.mainFrame() && f.url().includes("shot.png"))!;
   await expect
-    .poll(() => frame.evaluate(() => document.readyState === "complete" && Boolean(document.querySelector("img"))) .catch(() => false))
+    .poll(() =>
+      frame
+        .evaluate(() => document.readyState === "complete" && Boolean(document.querySelector("img")))
+        .catch(() => false),
+    )
     .toBe(true);
 
   const frameBox = await page.locator("#artifact-track iframe:not([hidden])").boundingBox();
@@ -2939,31 +2943,153 @@ test("artifacts: zooming a picture changes only the picture, not the drawer", as
     }
   });
 
-  // The picture grew...
   const scale = await frame.evaluate(() => {
     const t = getComputedStyle(document.querySelector("img")!).transform;
     return t === "none" ? 1 : Number(/matrix\(([^,]+)/.exec(t)?.[1] ?? "1");
   });
   expect(scale).toBeGreaterThan(1);
 
-  // ...and nothing outside the frame moved.
+  // Nothing outside the frame moved.
   //
-  // What this can and cannot prove, stated so the test is not read as stronger than it
-  // is: a synthesised ctrl+wheel drives the *document's* handler, so this covers the zoom
-  // path, the transform and the boundary between them. It cannot prove that a real
-  // two-finger pinch leaves the visual viewport alone — a synthetic wheel never reaches the
-  // browser's own pinch-zoom, so restoring `pinch-zoom` to the stylesheet still passes
-  // here. That half is pinned by `artifacts-server.test.ts` asserting the image document's
-  // CSS never cedes zoom to the browser, and confirmed by hand on a phone.
+  // What this can and cannot prove, stated so the test is not read as stronger than it is:
+  // a synthesised ctrl+wheel drives the *document's* handler, so this covers the zoom path,
+  // the transform and the boundary between them. It cannot prove that a real two-finger
+  // pinch leaves the visual viewport alone — a synthetic wheel never reaches the browser's
+  // own pinch-zoom. That half is pinned by `artifacts-server.test.ts` asserting the image
+  // document's CSS never cedes zoom to the browser, and confirmed by hand on a phone.
   const after = await page.evaluate(() => ({
     scale: window.visualViewport ? window.visualViewport.scale : 1,
     width: window.visualViewport ? window.visualViewport.width : window.innerWidth,
   }));
   expect(after).toEqual(before);
 
-  // The chrome is in the same place, and still there: the drawer's title and the comment
-  // button are the two things a reader taps that the visual-viewport zoom would have moved.
   expect(await page.locator("#artifacts-title").boundingBox()).toEqual(headerBox);
   expect(await page.locator("#comment-fab").boundingBox()).toEqual(fabBox);
   expect(await page.locator("#artifact-track iframe:not([hidden])").boundingBox()).toEqual(frameBox);
+});
+
+test("artifacts: a zoomed picture can be dragged to every edge", async ({ page }) => {
+  // The reported bug, in a picture: once zoomed, the top and left could not be reached.
+  // Three causes, all of the same kind — something added slack or cut off the side that a
+  // scrollable area cannot reach:
+  //
+  //   1. growing the stage let the `img` lay out larger than fit, so stage and picture
+  //      disagreed about the picture's size;
+  //   2. `justify-content: center` put the overflow on the start side, outside the
+  //      scrollable origin;
+  //   3. a centre transform origin did the same to the scaled picture.
+  //
+  // The assertions are in terms of the *drawn* picture: the scrollable area must be it.
+  await stubApi(page);
+  await page.route("**/api/environment", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ artifactsBaseUrl: "https://artifacts.example", pageVersion: "t" }),
+    }),
+  );
+  await page.route("**/api/c/*/artifacts", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([{ key: "pi/out/shot.png", wrote: 1, edited: 0, markdown: false, image: true }]),
+    }),
+  );
+  await page.route("**/api/c/*/comments", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
+  );
+  // A 300x200 fixture: the 64x32 one used elsewhere cannot overflow this frame at any
+  // allowed zoom, so "drag to every edge" would not be a question. Checkerboard, so it
+  // compresses to about a kilobyte and can be inlined.
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAASwAAADICAYAAABS39xVAAAEFklEQVR42u3coQ0AMQwEQRfm/uWukhZMAqIb8HTAvbTMqe4+m29mVh+Px+O98sqAPB5PsHg8Hk+weDyeYBmQx+MJFo/H4wkWj8cTLAPyeDzB4vF4PMHi8XghwTIMj8f7xRMsHo8nWDwejydYPB5PsAzI4/EEi8fj8QSLx+MJlgF5PJ5g8Xg8nmDxeLyUYBmGx+O5JeTxeDzB4vF4gmVAHo8nWDwejydYPB5PsAzI4/EEi8fj8QSLx+MJlgF5PJ433Xk8Hs8tIY/HEywD8ng8weLxeDzB4vF4gmVAHo8nWDwejydYPB5PsAzI4/EEi8fj8bzpzuPx3BL6ITweT7B4PB5PsHg8nmD5ITweT7B4PB5PsHg8nmDxeDyeYPF4PMEyII/H86Y7j8fjuSXk8XiCZUAejydYPB6PJ1g8Hk+wDMjj8QSLx+PxBIvH4wmWAXk8nmDxeDyeN915PJ5bQgPyeDzB4vF4PMHi8XiCZUAejydYPB6PJ1g8Hk+wDMjj8QSLx+PxBIvH43nT3dA8Hs8tIY/H4wkWj8cTLD+Ex+MJFo/H4wkWj8cTLB6PxxMsHo8nWAbk8XiCxePxeN505/F4bgkNyOPxBIvH4/EEi8fjCZYBeTyeYPF4PJ5g8Xg8wTIgj8cTLB6PxxMsHo/nTXdD83g8t4Q8Ho8nWDweT7AMyOPxBIvH4/EEi8fjCZYBeTyeYPF4PJ5g8Xg8wfJDeDyeN915PB7PLSGPxxMsP4TH4wkWj8fjCRaPxxMsHo/HEywejydYBuTxeILF4/F4gsXj8bzpbhgej+eWkMfj8QSLx+MJlgF5PJ5g8Xg8nmDxeDzBMiCPxxMsHo/HEywejydYBuTxeN505/F4PLeEPB5PsAzI4/EEi8fj8QSLx+MJlgF5PJ5g8Xg8nmDxeDzB8kN4PJ5g8Xg8njfdeTyeW0I/hMfjCRaPx+MJFo/HEywej8cTLB6PJ1gG5PF4gsXj8XiCxePxBMuAPB7Pm+48Ho/nlpDH4wmWAXk8nmDxeDyeYPF4PMEyII/HEywej8cTLB6PJ1gG5PF4gsXj8XjedOfxeG4JDcjj8QSLx+PxBIvH4wmWAXk8nmDxeDyeYPF4PMHyQ3g8nmDxeDyeYPF4PG+6G5rH47kl5PF4PMHi8XiCxePxeILF4/EEy4A8Hk+weDweT7B4PJ5gGZDH4wkWj8fjedOdx+O5JTQgj8cTLB6PxxMsHo8nWAbk8XiCxePxeILF4/EEy4A8Hk+weDweT7B4PJ433Q3N4/HcEvJ4PJ5g8Xg8wTIgj8cTLB6PxxMsHo8nWH4Ij8cTLB6PxxMsHo8nWH4Ij8fzpjuPx+O5JeTxeILF4/F4gsXj8QTLgDweT7B4PB5PsHg8nmAZkMfjCRaPx+MJFo/Hi/EuGZCmc8GO1dUAAAAASUVORK5CYII=",
+    "base64",
+  );
+  await page.route("https://artifacts.example/**", (route) => {
+    const url = route.request().url();
+    if (url.includes("?raw")) return route.fulfill({ status: 200, contentType: "image/png", body: png });
+    return route.fulfill({ status: 200, contentType: "text/html", body: imageDocumentFor("pi/out/shot.png") });
+  });
+
+  await page.goto("/7/");
+  await page.locator("#artifacts-toggle").click();
+  await page.locator("#artifact-list li").first().click();
+  const frame = page.frames().find((f) => f !== page.mainFrame() && f.url().includes("shot.png"))!;
+  await expect
+    .poll(() =>
+      frame
+        .evaluate(() => document.readyState === "complete" && Boolean(document.querySelector("img")))
+        .catch(() => false),
+    )
+    .toBe(true);
+
+  // Zoom well past the frame on both axes.
+  await frame.evaluate(() => {
+    const image = document.querySelector("img")!;
+    const r = image.getBoundingClientRect();
+    for (let i = 0; i < 10; i += 1) {
+      image.dispatchEvent(
+        new WheelEvent("wheel", {
+          deltaY: -80,
+          ctrlKey: true,
+          clientX: r.left + r.width / 2,
+          clientY: r.top + r.height / 2,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    }
+  });
+
+  const extent = await frame.evaluate(() => {
+    const s = document.scrollingElement!;
+    const image = document.querySelector("img")!;
+    const r = image.getBoundingClientRect();
+    const body = getComputedStyle(document.body);
+    return {
+      drawnWidth: Math.round(r.width),
+      drawnHeight: Math.round(r.height),
+      maxLeft: s.scrollWidth - s.clientWidth,
+      maxTop: s.scrollHeight - s.clientHeight,
+      winWidth: s.clientWidth,
+      winHeight: s.clientHeight,
+      // The document's padding is legitimately part of the scrollable area — and only one
+      // side of it extends the *width*: the near side sits at the scroll origin, the far
+      // side adds to the extent. Counting both double-counts it by exactly one gutter.
+      padLeft: parseFloat(body.paddingLeft),
+      padTop: parseFloat(body.paddingTop),
+    };
+  });
+  expect(extent.drawnWidth).toBeGreaterThan(extent.winWidth);
+  expect(extent.drawnHeight).toBeGreaterThan(extent.winHeight);
+  // The scrollable area is the drawn picture plus the document's padding, on each axis.
+  // Anything more is slack a reader can drag into; anything less is picture they cannot
+  // reach — which is the bug.
+  expect(Math.abs(extent.maxLeft + extent.winWidth - extent.drawnWidth - extent.padLeft)).toBeLessThanOrEqual(1);
+  expect(Math.abs(extent.maxTop + extent.winHeight - extent.drawnHeight - extent.padTop)).toBeLessThanOrEqual(1);
+
+  // And both corners really are reachable: at the extremes the picture's own edge sits at
+  // the window's edge rather than short of it.
+  const corners = await frame.evaluate(() => {
+    const s = document.scrollingElement!;
+    const image = document.querySelector("img")!;
+    s.scrollLeft = 0;
+    s.scrollTop = 0;
+    const topLeft = image.getBoundingClientRect();
+    s.scrollLeft = s.scrollWidth;
+    s.scrollTop = s.scrollHeight;
+    const bottomRight = image.getBoundingClientRect();
+    return {
+      topLeft: { left: Math.round(topLeft.left), top: Math.round(topLeft.top) },
+      bottomRight: { right: Math.round(bottomRight.right), bottom: Math.round(bottomRight.bottom) },
+      winWidth: s.clientWidth,
+      winHeight: s.clientHeight,
+    };
+  });
+  // The top-left of the picture is reachable: no more than the padding away from the origin.
+  expect(corners.topLeft.left).toBeLessThanOrEqual(16);
+  expect(corners.topLeft.top).toBeLessThanOrEqual(16);
+  // And its bottom-right is at the window's edge, not short of it.
+  expect(corners.bottomRight.right).toBeGreaterThanOrEqual(corners.winWidth - 16);
+  expect(corners.bottomRight.bottom).toBeGreaterThanOrEqual(corners.winHeight - 16);
 });
