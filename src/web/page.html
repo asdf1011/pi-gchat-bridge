@@ -767,20 +767,23 @@
        row still lines up. */
     #send-group button { padding: 0 .9rem; }
     #send-group #send-menu { padding: 0 .65rem; }
-    /* Anchored to the *top*, with a height the keyboard cannot change.
+    /* Anchored to the *top*, at the height of what is actually on screen.
        
-       `inset: 0` made the drawer's height the viewport's, and the keyboard shortens the
-       viewport from the bottom — so the frame shrank, the document reflowed, and the picture
-       under the reader moved at the moment they opened the comment box. Worse, it stayed
-       moved: the frame kept the new height after the keyboard closed.
+       `inset: 0` pinned the drawer to all four edges, so its height was the viewport's — and
+       the keyboard shortens the viewport from the bottom. The frame shrank, the framed
+       document reflowed, and the picture under the reader moved at the moment they opened the
+       comment box. The frame kept the smaller height afterwards, so it stayed moved.
        
-       `lvh` is the *large* viewport height — the height with the browser's own chrome
-       collapsed — and it is the one viewport unit the virtual keyboard does not change. So
-       the drawer keeps one size, the document inside it never reflows, and the keyboard
-       simply covers the foot of it, which is where the composer already is. `top` rather
-       than `bottom` for the same reason: an element pinned to all four sides grows and
-       shrinks from both ends, and the top edge moving is the movement being avoided. */
-    #artifacts { position: fixed; top: 0; left: 0; right: 0; width: 100%; height: 100lvh;
+       `dvh` is the height that follows what is visible, and `top` keeps the top edge where it
+       is, so a shorter viewport takes the height off the *bottom* only. The keyboard covers
+       the foot of the drawer, which is where the composer already sits.
+       
+       It was `lvh` for a few minutes, and that was worse than the bug: `lvh` is the height
+       with the browser's chrome *hidden*, so on a phone the drawer ran off the bottom of the
+       screen and took the comment button with it — it sits at `bottom: .9rem` of a box taller
+       than the display. `dvh` is the honest unit: it is what is on screen, chrome or no
+       chrome, and it moves for the keyboard as well, which the anchoring already handles. */
+    #artifacts { position: fixed; top: 0; left: 0; right: 0; width: 100%; height: 100dvh;
       border-left: 0; }
     #artifacts-resize { display: none; }
     #new-chat { right: .75rem; bottom: .75rem; }
