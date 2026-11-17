@@ -513,34 +513,19 @@ export const REGION_SCRIPT = `
     }
 
     /**
-     * The picture's size, which is all a tap can say.
-     *
-     * A tap is not a selection — swiping pages, and a stray touch must not start a box —
-     * but a tap is also most of what a reader does with a picture, and without an answer
-     * to it the drawer could not tell them the picture is commentable at all. So a tap
-     * takes one *measurement*: the picture's size, nothing more, and the parent draws the
-     * affordance that says "drag across the picture to comment on part of it".
-     */
-    /**
      * Tell the drawer this document can take a rectangle.
      *
-     * Sent once, when the picture has loaded, rather than on a tap: what the drawer needs
-     * is a fact about the document, and the comment button is on screen from the moment
-     * the document is — waiting for a tap to discover it would mean the button either
-     * appears late or is offered for documents that cannot use it.
+     * Sent once, when the picture has loaded. What the drawer needs is a fact about the
+     * document — whether pressing the comment button should arm it — and the button is on
+     * screen from the moment the document is, so a message deferred until a tap would offer
+     * it late, or for documents that cannot use it.
      *
-     * naturalWidth travels in the message because the drawer had no other way of knowing
-     * the picture's size; it does not decide anything now, and is kept because it is one
-     * cheap field and it is what a future zoom-to-100 percent would want.
+     * Nothing else travels: the picture's size is already known to the zoom, which measures
+     * it in this document, and the drawer has no use for it.
      */
     function announce() {
       parent.postMessage(
-        {
-          t: "pi-artifact-image",
-          file: document.body.getAttribute("data-file") || "",
-          width: image.naturalWidth || 0,
-          height: image.naturalHeight || 0
-        },
+        { t: "pi-artifact-image", file: document.body.getAttribute("data-file") || "" },
         "*"
       );
     }
@@ -583,8 +568,6 @@ export const REGION_SCRIPT = `
      * is against the edge, the same drag pages. That is why this is not simply "armed or
      * zoomed" — a zoomed picture scrolled to its left edge has nothing left to give.
      */
-    var report = { sides: { left: false, right: false } };
-
     /** Which way the picture still has somewhere to go, and whether a box is being drawn. */
     var sides = { left: false, right: false, armed: false };
 

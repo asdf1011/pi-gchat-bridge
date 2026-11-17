@@ -414,6 +414,11 @@ function watchFrameLoads(frame) {
     // Counted as ours, because it is the drawer's own document moving within itself.
     if (frame.dataset.pdf === '1' && frame === currentFrame) {
       frameLoadsCaused = frameLoadsSeen;
+      // The new page is a new *document*, and it starts out unarmed. A turn made while a
+      // comment was being written would otherwise leave the composer open over a page that
+      // no longer takes a rectangle. `regionArmed` is the page's record of what the reader
+      // asked for, so the new page is told the same thing.
+      setRegionArmed(regionArmed);
       return;
     }
     frameLoadsCaused = frameLoadsSeen;

@@ -618,10 +618,14 @@
   #artifact-doc { position: absolute; inset: 0; overflow: hidden; background: Canvas;
     visibility: hidden; display: flex; flex-direction: column; }
   #artifacts.showing-doc #artifact-doc { visibility: visible; display: flex; }
-  /* The window: it clips, and it scrolls. The track is pinned to its top so the frames
-     fill the window at rest; the overflow exists for the case the bar creates, where the
-     window is one row shorter than the frame it holds and a document already scrolled
-     could no longer reach its end. `flex: 1` + `min-height: 0` is what keeps it honest. */
+  /* The window: it clips, and it scrolls. The track is pinned to its top so the frames fill
+     the window at rest.
+     
+     The comment bar does *not* take a row from this. It is absolutely positioned against the
+     pane, so it overlays the document; this comment used to say the opposite, and believing
+     it is what led to a wrong diagnosis of the keyboard bug. `flex: 1` + `min-height: 0` are
+     here so the window can give up height when the *pane* does — which the drawer now
+     prevents for the keyboard by anchoring its own height, so this is a fallback. */
   #artifact-doc-scroll { flex: 1; min-height: 0; overflow: auto; }
   /* The track is the width of the drawer and each pane is one track wide, so
      translateX(-100%) moves exactly one document along. Every pane is `flex: none`
@@ -3277,8 +3281,9 @@ function setRegionArmed(armed) {
     try {
       frame.contentWindow.postMessage({ t: 'pi-artifact-arm', armed }, '*');
     } catch {
-      // A frame mid-navigation has no window to talk to yet; the arming is re-sent when
-      // the composer opens, which is the next thing that needs it.
+      // A frame mid-navigation has no window yet. The arming is re-sent when the frame
+      // finishes loading (see `watchFrameLoads`), which is the navigation this could have
+      // been racing.
     }
   }
 }
