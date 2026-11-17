@@ -1,83 +1,40 @@
 /**
- * The image wrapper document, for tests that need the real gesture.
+ * The artifact documents, for tests that need the real gesture.
  *
- * Built from the same pieces the artifact origin interpolates (`REGION_SCRIPT`,
- * `SWIPE_SCRIPT`), so a test drives the code that ships rather than a stub with no
- * handlers — the failure mode that made swiping a picture look tested while doing
- * nothing on a phone.
+ * **These call the server's own builders.** They used to be hand-written copies of the
+ * document markup and CSS, and they drifted twice: once carrying duplicate rules from an
+ * earlier layout that made a browser test measure a bug existing only in the fixture, and
+ * once still advertising `pinch-zoom` after the real document had stopped. Both produced
+ * confident green tests about a page nobody had ever shipped.
  *
- * Written here rather than fetched from the server because the page under test is
- * stubbed at the network: no bridge, no artifact origin, only `page.route`.
+ * The copy existed because the page under test is stubbed at the network — no bridge, no
+ * artifact origin, only `page.route` — so there was no server to ask. But the *builders* need
+ * no server: `imageDocument` is a pure function from a key and a nonce to HTML, and it is
+ * exported for exactly this. The tests now serve what the origin serves, and a change to the
+ * document shape reaches them without anyone remembering to copy it across.
  */
-import { REGION_SCRIPT, SWIPE_SCRIPT } from "../src/web/artifacts-server.js";
+import { imageDocument, pageControls } from "../src/web/artifacts-server.js";
 
+/** The document the artifact origin serves for a picture. */
 export function imageDocumentFor(key: string): string {
   const name = key.split("/").at(-1) ?? key;
-  return `<!doctype html><html><head><meta charset="utf-8">
-<style>
-  :root { color-scheme: light dark; }
-  /* The real document's rules, in the real document's order. A stale duplicate here is not
-     a cosmetic problem: an old body rule left over from the centring era shrank the
-     scrollable width, and the browser test then measured a bug that only existed in the
-     fixture. */
-  html { touch-action: pan-y; }
-  html, body { height: 100%; box-sizing: border-box; }
-  body { margin: 0; height: 100%; overflow: auto; overscroll-behavior: contain;
-         padding: 1rem; background: Canvas; color: CanvasText; }
-  .stage { min-width: 100%; min-height: 100%; display: flex; padding: 1rem; box-sizing: border-box; }
-  .stage > img { margin: auto; }
-  img { max-width: 100%; max-height: 100%; object-fit: contain; background: #8881;
-        touch-action: auto; transform-origin: top left; will-change: transform; }
-  img.crop-target.armed { touch-action: none; cursor: crosshair; user-select: none; -webkit-user-select: none; }
-  html.armed, body.armed { touch-action: none; }
-  body.armed { cursor: crosshair; }
-  .marquee { position: fixed; pointer-events: none; border: 2px solid #4c9aff; background: #4c9aff33; }
-</style></head>
-<body data-file="${key}">
-<div class="stage"><img class="crop-target" src="${name}?raw" alt="${key}" draggable="false"></div>
-<script>${SWIPE_SCRIPT}</script>
-<script>${REGION_SCRIPT}</script>
-</body></html>`;
+  return imageDocument({ key, href: `${name}?raw`, nonce: "test-nonce" });
 }
 
 /**
- * The PDF page document, as the artifact origin builds it for `?page=N`.
+ * The document the artifact origin serves for one page of a PDF.
  *
- * Same gesture surface as a picture — that is the whole point, since a page is a picture
- * once rendered — plus the paging strip, so a test can turn a page the way a reader does
- * and check that a comment lands on the page it was drawn on.
+ * The paging strip is built by the server (`pageControls`), so a test that clicks "next page"
+ * is clicking the control that ships rather than a plausible-looking stand-in.
  */
 export function pdfPageDocumentFor(key: string, page: number, pageCount: number): string {
   const name = key.split("/").at(-1) ?? key;
-  const at = (n: number) => `${name}?page=${n}`;
-  return `<!doctype html><html><head><meta charset="utf-8">
-<style>
-  :root { color-scheme: light dark; }
-  html { touch-action: pan-y; }
-  html, body { height: 100%; box-sizing: border-box; }
-  body { margin: 0; display: flex; align-items: center; justify-content: center;
-         padding: 1rem; background: Canvas; color: CanvasText; }
-  img { max-width: 100%; max-height: 100%; object-fit: contain; background: #8881; }
-  body { margin: 0; height: 100%; overflow: auto; overscroll-behavior: contain; }
-  .stage { min-width: 100%; min-height: 100%; display: flex; padding: 1rem; box-sizing: border-box; }
-  .stage > img { margin: auto; }
-  img { touch-action: auto; transform-origin: top left; will-change: transform; }
-  img.crop-target.armed { touch-action: none; cursor: crosshair; user-select: none; -webkit-user-select: none; }
-  html.armed, body.armed { touch-action: none; }
-  body.armed { cursor: crosshair; }
-  .marquee { position: fixed; pointer-events: none; border: 2px solid #4c9aff; background: #4c9aff33; }
-  .pages { position: fixed; bottom: 0; left: 0; right: 0; display: flex; gap: .5rem;
-           align-items: center; justify-content: center; padding: .35rem; background: Canvas; }
-</style></head>
-<body data-file="${key}">
-<nav class="pages">${
-    page > 1 ? `<a href="${at(page - 1)}" rel="prev">← page ${page - 1}</a>` : "<a aria-disabled=\"true\">←</a>"
-  }<span>page ${page} of ${pageCount}</span>${
-    page < pageCount ? `<a href="${at(page + 1)}" rel="next">page ${page + 1} →</a>` : "<a aria-disabled=\"true\">→</a>"
-  }</nav>
-<div class="stage"><img class="crop-target" src="${name}?page=${page}&amp;png" alt="${key}" draggable="false"></div>
-<p class="note">page ${page} of ${pageCount}</p>
-<script>${SWIPE_SCRIPT}</script>
-<script>${REGION_SCRIPT}</script>
-</body></html>`;
+  return imageDocument({
+    key,
+    href: `${name}?page=${page}&png`,
+    note: `page ${page} of ${pageCount}`,
+    // The strip the server builds, so a test clicking "next page" clicks the real control.
+    controls: pageControls(key, page, pageCount),
+    nonce: "test-nonce",
+  });
 }

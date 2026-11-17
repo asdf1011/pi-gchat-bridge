@@ -98,6 +98,10 @@ test("every surface file is one of the ones we know about", () => {
     // two surfaces — the artifact origin's `?page=N&png` and the seam's
     // `cropArtifactRegion` — and it knows about neither, taking a path and a page number.
     "web/pdf.ts",
+    // The client scripts the artifact documents carry: `.js` files read at startup, and the
+    // reader that composes them. Here for the same reason as `crop.ts` and `pdf.ts` — reached
+    // from the artifact origin, and knowing nothing about the seam.
+    "web/client-scripts.ts",
     "web/routes.ts",
     "web/sink.ts",
   ]);
