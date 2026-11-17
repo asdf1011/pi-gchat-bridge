@@ -3093,3 +3093,56 @@ test("artifacts: a zoomed picture can be dragged to every edge", async ({ page }
   expect(corners.bottomRight.right).toBeGreaterThanOrEqual(corners.winWidth - 16);
   expect(corners.bottomRight.bottom).toBeGreaterThanOrEqual(corners.winHeight - 16);
 });
+
+test("artifacts: the comment button does not raise the keyboard", async ({ page }) => {
+  // Pressing the button arms the document; the next gesture is a drag across the picture. If
+  // the composer took focus, the keyboard would cover the lower half of the screen — which is
+  // where the reader was about to select. The control hid the thing it was for.
+  await stubApi(page);
+  await page.route("**/api/environment", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ artifactsBaseUrl: "https://artifacts.example", pageVersion: "t" }),
+    }),
+  );
+  await page.route("**/api/c/*/artifacts", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([{ key: "pi/out/shot.png", wrote: 1, edited: 0, markdown: false, image: true }]),
+    }),
+  );
+  await page.route("**/api/c/*/comments", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
+  );
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAYAAACinX6EAAAAJUlEQVR42u3NMQEAAAgDoC251a3gLwSgcyfTVFVVVVVVVVVVVVX1tQFrwAPhpO4WAAAAAElFTkSuQmCC",
+    "base64",
+  );
+  await page.route("https://artifacts.example/**", (route) => {
+    const url = route.request().url();
+    if (url.includes("?raw")) return route.fulfill({ status: 200, contentType: "image/png", body: png });
+    return route.fulfill({ status: 200, contentType: "text/html", body: imageDocumentFor("pi/out/shot.png") });
+  });
+
+  await page.goto("/7/");
+  await page.locator("#artifacts-toggle").click();
+  await page.locator("#artifact-list li").first().click();
+  await expect(page.locator("#comment-fab")).toBeVisible();
+
+  await page.locator("#comment-fab").click();
+  await expect(page.locator("#comment-bar")).toBeVisible();
+
+  // The composer is up and the field is not focused: nothing has taken the keyboard.
+  const focused = await page.evaluate(() => document.activeElement?.id ?? "");
+  expect(focused).not.toBe("comment-text");
+
+  // The document is armed, which is what the reader is about to use.
+  const frame = page.frames().find((f) => f !== page.mainFrame() && f.url().includes("shot.png"))!;
+  await expect.poll(() => frame.evaluate(() => document.body.classList.contains("armed"))).toBe(true);
+
+  // Tapping the field is the "I am typing now" gesture, and that focus does happen.
+  await page.locator("#comment-text").click();
+  await expect(page.locator("#comment-text")).toBeFocused();
+});

@@ -3155,46 +3155,6 @@ function commentAddress(selection) {
  * bar is about: the words already typed stay, because the reader may be nudging a
  * handle mid-sentence.
  */
-/**
- * Focus a field without letting the browser scroll the page to reach it.
- *
- * **This is an iOS Safari problem, and `preventScroll` does not solve it.** On iOS, tapping an
- * input always scrolls the page so the input is centred in the *visual* viewport — and that
- * movement can carry even fixed-position elements off screen. `preventScroll` addresses the
- * normal scroll-into-view path, which is not the one iOS uses here.
- *
- * The composer sits at the foot of the document pane, and that pane is what holds the framed
- * document — so the scroll went to the pane, which moved the picture under the reader. It also
- * *stayed* moved when the keyboard was dismissed, because the pane keeps its new position.
- *
- * The technique is the one Adobe's `usePreventScroll` documents: move the field far above the
- * top of the page *before* focusing, so Safari has nothing to scroll to; focus it; then take the
- * transform off two frames later, once the decision has been made. Their comment on the cause is
- * the clearest statement of it: "When tapping on an input, the page always scrolls so that the
- * input is centered in the visual viewport. This may cause even fixed position elements to
- * scroll off the screen."
- *
- * The field is left visible — the transform is removed after focus, so nothing flickers. Only
- * the browser's *decision* is made while it is off screen.
- */
-function focusWithoutScrolling(field) {
-  const was = field.style.transform;
-  field.style.transform = 'translateY(-2000px)';
-  try {
-    // `preventScroll` as well, for the browsers that honour it: it costs nothing and spares
-    // the transform entirely on Chrome and Firefox.
-    field.focus({ preventScroll: true });
-  } finally {
-    // Two frames: iOS needs the focus to have settled before the element comes back, or it
-    // reconsiders and scrolls anyway.
-    requestAnimationFrame(() =>
-      requestAnimationFrame(() => {
-        field.style.transform = was;
-      }),
-    );
-  }
-}
-
 function showCommentBar(selection) {
   const opening = commentBar.hidden || !pendingSelection;
   pendingSelection = selection;
@@ -3234,12 +3194,18 @@ function showCommentBar(selection) {
   // One action at a time in the same corner: the composer *is* the comment button
   // continued, so two of them would compete for the space and for the tap.
   setFabVisible(false);
-  // Focus follows intent: only the comment button opens this, and pressing it means "I want to
-  // write", so the keyboard opening is what was asked for. Throttled through
-  // `focusWithoutScrolling`, which is what keeps iOS from scrolling the document away.
-  if (selection.intent === 'comment') {
-    focusWithoutScrolling(commentText);
-  }
+  // Focus is deliberately *not* taken here.
+  //
+  // It used to be, on the reasoning that pressing the comment button means "I want to write",
+  // so the keyboard should open. That is true for a comment on selected text — you have
+  // already chosen what you are commenting on, and typing is the next step. It is wrong for
+  // an image or a PDF page, which is the common case now: pressing the button *arms* the
+  // document, and the next thing the reader does is drag a rectangle. Raising the keyboard
+  // first covers the lower half of the screen, which is exactly where they were about to
+  // point — so the control hid the thing it was for.
+  //
+  // The field still takes focus when the reader taps it: `pointerdown` on the bar focuses it
+  // (see below), and that tap is the unambiguous "I am typing now".
 }
 
 /**
@@ -3655,16 +3621,28 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // The bar is the only thing that may focus the field, and only when tapped:
-// `pointerdown` on the chrome, never an automatic focus.
+// `pointerdown` on the chrome, never an automatic focus. Opening the composer leaves the
+// keyboard down, because on a picture the next gesture is a drag and the keyboard would cover
+// the region being selected; tapping the field is the unambiguous "I am typing now".
 commentBar.addEventListener('pointerdown', (event) => {
   const target = event.target;
   if (!target || target === commentText || target.tagName === 'TEXTAREA' || target.tagName === 'BUTTON') return;
   // Defer, so the tap does not land inside the newly focused field and move the
   // caret to wherever the finger was.
-  setTimeout(() => focusWithoutScrolling(commentText), 0);
+  setTimeout(() => commentText.focus(), 0);
 });
 
 document.getElementById('comment-send').onclick = () => void sendComment();
+// Enter sends, Shift-Enter makes a newline — the chat box's own rule, and now more useful than
+// before: the composer no longer takes focus by itself, so somebody who taps into it is typing
+// and expects the keyboard's return key to finish the job. IME composition is left alone.
+commentText.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter') return;
+  if (event.shiftKey || event.ctrlKey || event.metaKey) return;
+  if (event.isComposing) return;
+  event.preventDefault();
+  void sendComment();
+});
 document.getElementById('comment-cancel').onclick = () => closeCommentBar();
 document.getElementById('comment-sheet-close').onclick = () => closeThread();
 document.getElementById('comment-reply-send').onclick = () => void replyInThread();

@@ -1434,13 +1434,15 @@ async function openFirstArtifact(h: Harness): Promise<void> {
 }
 
 
-test("the composer opens from the button, and takes focus because a person asked", async () => {
-  // This replaces "a selection opens the composer without taking focus". Both halves
-  // changed on purpose: a selection no longer opens anything, and the composer *does*
-  // take focus — because the only way it opens now is somebody pressing the comment
-  // button, which is an explicit "I want to write". The old no-focus rule existed
-  // because a selection raised the keyboard mid-read and collapsed the very selection
-  // being commented on; there is no longer a selection-driven path for it to protect.
+test("the composer opens without taking focus, so the keyboard stays down", async () => {
+  // The rule, after three revisions: a selection opens nothing; the button opens the
+  // composer; and the composer does **not** focus its field.
+  //
+  // Focusing on open was tried and removed. On a picture or a PDF page the button *arms* the
+  // document and the next gesture is a drag — so raising the keyboard covered the lower half
+  // of the screen, which is exactly where the reader was about to select. The control hid
+  // the thing it was for. The field still focuses when tapped, which is the unambiguous
+  // "I am typing now".
   let h: Harness | undefined;
   try {
     h = await loadPage({
@@ -1453,6 +1455,7 @@ test("the composer opens from the button, and takes focus because a person asked
     assert.deepEqual(h.errors, []);
     const doc = h.dom.window.document;
     const bar = doc.getElementById("comment-bar")!;
+    const field = doc.getElementById("comment-text") as HTMLTextAreaElement;
     assert.equal(bar.hidden, true, "nothing selected yet");
 
     await fromFrame(h, { t: "pi-artifact-select", file: "notes.md", quote: "the kitten was a stowaway" });
@@ -1462,11 +1465,7 @@ test("the composer opens from the button, and takes focus because a person asked
 
     assert.equal(bar.hidden, false, "the composer is offered");
     assert.match(doc.getElementById("comment-addr")!.textContent ?? "", /notes\.md/);
-    assert.equal(
-      doc.activeElement,
-      doc.getElementById("comment-text"),
-      "pressing the button is what asks for the keyboard",
-    );
+    assert.notEqual(doc.activeElement, field, "no keyboard until the reader asks for one");
   } finally {
     h?.close();
   }
