@@ -2781,3 +2781,100 @@ test("artifacts: pressing the comment button with nothing selected comments on t
   expect(body.line).toBeUndefined();
   expect(body.quote).toBeUndefined();
 });
+
+test("artifacts: zooming a picture changes only the picture, not the drawer", async ({ page }) => {
+  // The reported bug, and the reason the browser's own pinch-zoom is disabled in the
+  // picture document: pinch scales the *visual viewport*, which belongs to the top-level
+  // page — so pinching a picture zoomed the header and the comment button too. The zoom is
+  // now a transform inside the frame, and this asserts the boundary: the picture grows,
+  // the chat page's viewport does not move at all.
+  await stubApi(page);
+  await page.route("**/api/environment", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ artifactsBaseUrl: "https://artifacts.example", pageVersion: "t" }),
+    }),
+  );
+  await page.route("**/api/c/*/artifacts", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([{ key: "pi/out/shot.png", wrote: 1, edited: 0, markdown: false, image: true }]),
+    }),
+  );
+  await page.route("**/api/c/*/comments", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
+  );
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAYAAACinX6EAAAAJUlEQVR42u3NMQEAAAgDoC251a3gLwSgcyfTVFVVVVVVVVVVVVX1tQFrwAPhpO4WAAAAAElFTkSuQmCC",
+    "base64",
+  );
+  await page.route("https://artifacts.example/**", (route) => {
+    const url = route.request().url();
+    if (url.includes("?raw")) return route.fulfill({ status: 200, contentType: "image/png", body: png });
+    return route.fulfill({ status: 200, contentType: "text/html", body: imageDocumentFor("pi/out/shot.png") });
+  });
+
+  await page.goto("/7/");
+  await page.locator("#artifacts-toggle").click();
+  await page.locator("#artifact-list li").first().click();
+  const frame = page.frames().find((f) => f !== page.mainFrame() && f.url().includes("shot.png"))!;
+  await expect
+    .poll(() => frame.evaluate(() => document.readyState === "complete" && Boolean(document.querySelector("img"))) .catch(() => false))
+    .toBe(true);
+
+  const frameBox = await page.locator("#artifact-track iframe:not([hidden])").boundingBox();
+  const headerBox = await page.locator("#artifacts-title").boundingBox();
+  const fabBox = await page.locator("#comment-fab").boundingBox();
+  const before = await page.evaluate(() => ({
+    scale: window.visualViewport ? window.visualViewport.scale : 1,
+    width: window.visualViewport ? window.visualViewport.width : window.innerWidth,
+  }));
+
+  // Zoom the picture from inside the frame, the way a trackpad pinch arrives.
+  await frame.evaluate(() => {
+    const image = document.querySelector("img")!;
+    const box = image.getBoundingClientRect();
+    for (let i = 0; i < 3; i += 1) {
+      image.dispatchEvent(
+        new WheelEvent("wheel", {
+          deltaY: -80,
+          ctrlKey: true,
+          clientX: box.left + box.width / 2,
+          clientY: box.top + box.height / 2,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    }
+  });
+
+  // The picture grew...
+  const scale = await frame.evaluate(() => {
+    const t = getComputedStyle(document.querySelector("img")!).transform;
+    return t === "none" ? 1 : Number(/matrix\(([^,]+)/.exec(t)?.[1] ?? "1");
+  });
+  expect(scale).toBeGreaterThan(1);
+
+  // ...and nothing outside the frame moved.
+  //
+  // What this can and cannot prove, stated so the test is not read as stronger than it
+  // is: a synthesised ctrl+wheel drives the *document's* handler, so this covers the zoom
+  // path, the transform and the boundary between them. It cannot prove that a real
+  // two-finger pinch leaves the visual viewport alone — a synthetic wheel never reaches the
+  // browser's own pinch-zoom, so restoring `pinch-zoom` to the stylesheet still passes
+  // here. That half is pinned by `artifacts-server.test.ts` asserting the image document's
+  // CSS never cedes zoom to the browser, and confirmed by hand on a phone.
+  const after = await page.evaluate(() => ({
+    scale: window.visualViewport ? window.visualViewport.scale : 1,
+    width: window.visualViewport ? window.visualViewport.width : window.innerWidth,
+  }));
+  expect(after).toEqual(before);
+
+  // The chrome is in the same place, and still there: the drawer's title and the comment
+  // button are the two things a reader taps that the visual-viewport zoom would have moved.
+  expect(await page.locator("#artifacts-title").boundingBox()).toEqual(headerBox);
+  expect(await page.locator("#comment-fab").boundingBox()).toEqual(fabBox);
+  expect(await page.locator("#artifact-track iframe:not([hidden])").boundingBox()).toEqual(frameBox);
+});

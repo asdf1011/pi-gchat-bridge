@@ -250,7 +250,11 @@ test("the image document is sized so the picture is centred, not pushed down", a
     fs.writeFileSync(path.join(root, "shot.png"), PNG_BYTES);
     const html = await (await fetch(`${harness.base}/c/1/shot.png`)).text();
     assert.match(html, /html, body \{ height: 100%; box-sizing: border-box; \}/);
-    assert.match(html, /display: flex; align-items: center; justify-content: center/);
+    // Centring moved from `body` to the stage when the body became the scrolling window:
+    // a transform-scaled picture needs something that grows with it, and the body cannot
+    // be both that and the thing the zoom scrolls.
+    assert.match(html, /<div class="stage">/);
+    assert.match(html, /display: flex;\s*align-items: center; justify-content: center/);
     // And it is *fitted*: a screenshot wider than the drawer must scale down, not
     // scroll sideways.
     assert.match(html, /max-width: 100%; max-height: 100%; object-fit: contain/);
@@ -892,6 +896,41 @@ test("a PDF that cannot be opened is refused, not served as garbage", { skip: !p
     fs.writeFileSync(path.join(root, "broken.pdf"), "this is not a pdf\n");
     assert.equal((await fetch(`${harness.base}/c/1/broken.pdf`)).status, 404);
     assert.equal((await fetch(`${harness.base}/c/1/broken.pdf?page=1&png`)).status, 404);
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the picture document never asks the browser to zoom it", async () => {
+  // The reported bug: pinching a picture zoomed the *drawer* — header, comment button and
+  // all — because a browser's pinch-zoom scales the visual viewport, which belongs to the
+  // top-level page, not to this iframe. Zoom has to be this document's own.
+  //
+  // So `pinch-zoom` must not appear in the image document's own touch-action, and the
+  // script must carry the transform-based zoom instead. The scale itself is proven in the
+  // browser test; this is the assertion that the page never cedes zoom to the browser.
+  const root = tempDir();
+  const harness = await serve(root, ["shot.png"]);
+  try {
+    fs.writeFileSync(path.join(root, "shot.png"), PNG_BYTES);
+    const html = await (await fetch(`${harness.base}/c/1/shot.png`)).text();
+
+    // The picture document's own rule. (The source view may still say `pan-y pinch-zoom`:
+    // it has no zoom of its own, and text benefits from the browser's.)
+    // Comments out: the word appears in the prose explaining why it is gone.
+    const imageDocumentCss = html
+      .slice(0, html.indexOf("</style>"))
+      .replace(/\/\*[\s\S]*?\*\//g, "");
+    assert.doesNotMatch(imageDocumentCss, /pinch-zoom/, "the browser must not zoom this frame");
+
+    // The zoom that replaces it: a scale on the picture, and the gestures that drive it.
+    assert.match(imageDocumentCss, /transform-origin: center center/);
+    assert.ok(html.includes("function zoomAbout"), "zoom happens in the document");
+    assert.ok(html.includes("event.ctrlKey"), "a trackpad's pinch is handled");
+    assert.ok(html.includes("distanceBetween"), "two fingers are handled");
+    // And the scrolling window can contain its own pan rather than passing it to the drawer.
+    assert.match(imageDocumentCss, /overscroll-behavior: contain/);
   } finally {
     await harness.close();
     fs.rmSync(root, { recursive: true, force: true });

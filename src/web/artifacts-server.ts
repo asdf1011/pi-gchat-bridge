@@ -494,6 +494,156 @@ export const REGION_SCRIPT = `
     if (image.complete) announce();
     else image.addEventListener("load", announce, { once: true });
 
+    // --- Zooming the picture, and nothing else --------------------------------
+    //
+    // The browser's own pinch-zoom is deliberately off (see the stylesheet): it scales the
+    // *visual viewport*, which belongs to the top-level page, so pinching a picture zoomed
+    // the drawer's header and the comment button along with it. What a reader wants is to
+    // look closely at the picture, so the zoom is applied here, as a transform on the img,
+    // and the frame — and everything around it — stays exactly where it is.
+    //
+    // Two input paths, because the devices differ:
+    //   - **two pointers** (touch screens) — track distance and midpoint;
+    //   - **ctrl + wheel** (trackpads and desktops) — the conventional pinch, and what a
+    //     keyboard-driven magnification sends.
+    //
+    // Double-tap and double-click toggle a comfortable 2x, which is the gesture people
+    // reach for on a phone before they reach for two fingers.
+
+    var stage = document.querySelector(".stage");
+    var MIN_ZOOM = 1;
+    var MAX_ZOOM = 8;
+    var zoom = 1;
+    var pointers = {};      // pointerId -> {x, y}, so a pinch knows how far apart they are
+    var pinch = null;       // { distance, zoom } captured when the second finger landed
+    var pan = null;         // { x, y, left, top } for a one-finger drag while zoomed
+
+    function applyZoom() {
+      image.style.transform = zoom === 1 ? "" : "scale(" + zoom + ")";
+      if (!stage) return;
+      // The transform does not change the layout box, so the *scrollable* area has to be
+      // grown by hand or a zoomed picture cannot be panned to its edges. offsetWidth and
+      // offsetHeight rather than a client rect: the rect already includes the transform,
+      // so reading it here would size the stage to the scaled picture, and the next call
+      // would scale that again.
+      var width = image.offsetWidth;
+      var height = image.offsetHeight;
+      stage.style.width = zoom === 1 ? "" : Math.round(width * zoom) + "px";
+      stage.style.height = zoom === 1 ? "" : Math.round(height * zoom) + "px";
+      stage.style.minWidth = zoom === 1 ? "100%" : Math.round(width * zoom) + "px";
+      stage.style.minHeight = zoom === 1 ? "100%" : Math.round(height * zoom) + "px";
+    }
+
+    /**
+     * Zoom about a point, so the thing under the fingers stays under them.
+     *
+     * Scaling about the centre is right for a slider and wrong for a pinch: the reader is
+     * looking at a particular corner. The scroll position is adjusted by the ratio the
+     * point moves, which is the same arithmetic a map uses.
+     */
+    function zoomAbout(next, clientX, clientY) {
+      var clamped = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, next));
+      if (clamped === zoom) return;
+      var before = zoom;
+      // Where the point sits relative to the scroll window, before and after scaling.
+      var rect = image.getBoundingClientRect();
+      var offsetX = clientX - rect.left;
+      var offsetY = clientY - rect.top;
+      zoom = clamped;
+      applyZoom();
+      var after = image.getBoundingClientRect();
+      document.scrollingElement.scrollLeft += after.left + offsetX * (zoom / before) - clientX;
+      document.scrollingElement.scrollTop += after.top + offsetY * (zoom / before) - clientY;
+    }
+
+    function distanceBetween(a, b) {
+      return Math.hypot(a.x - b.x, a.y - b.y);
+    }
+
+    function midpointOf(a, b) {
+      return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    }
+
+    document.addEventListener("pointerdown", function (event) {
+      if (armed) return;                       // armed means selecting, not zooming
+      pointers[event.pointerId] = { x: event.clientX, y: event.clientY };
+      var ids = Object.keys(pointers);
+      if (ids.length === 2) {
+        // A second finger is a pinch. It also cancels a pan: the gesture that started as
+        // one finger moving is now two fingers scaling.
+        pan = null;
+        pinch = { distance: distanceBetween(pointers[ids[0]], pointers[ids[1]]), zoom: zoom };
+      } else if (ids.length === 1 && zoom > 1) {
+        // Panning is only meaningful when zoomed in; at 1x the browser's own scrolling
+        // (and the drawer's swipe) own the gesture.
+        pan = { x: event.clientX, y: event.clientY,
+                left: document.scrollingElement.scrollLeft, top: document.scrollingElement.scrollTop };
+      }
+    });
+
+    document.addEventListener("pointermove", function (event) {
+      if (!pointers[event.pointerId]) return;
+      pointers[event.pointerId] = { x: event.clientX, y: event.clientY };
+      if (armed) return;
+
+      var ids = Object.keys(pointers);
+      if (pinch && ids.length >= 2) {
+        var distance = distanceBetween(pointers[ids[0]], pointers[ids[1]]);
+        if (pinch.distance > 0) {
+          var mid = midpointOf(pointers[ids[0]], pointers[ids[1]]);
+          zoomAbout(pinch.zoom * (distance / pinch.distance), mid.x, mid.y);
+        }
+        event.preventDefault();
+        return;
+      }
+      if (pan && ids.length === 1) {
+        document.scrollingElement.scrollLeft = pan.left - (event.clientX - pan.x);
+        document.scrollingElement.scrollTop = pan.top - (event.clientY - pan.y);
+        event.preventDefault();
+      }
+    });
+
+    function lift(event) {
+      delete pointers[event.pointerId];
+      if (Object.keys(pointers).length < 2) pinch = null;
+      if (Object.keys(pointers).length === 0) pan = null;
+    }
+    document.addEventListener("pointerup", lift);
+    document.addEventListener("pointercancel", lift);
+
+    // A trackpad's pinch arrives as ctrl+wheel, and so does a keyboard zoom. passive
+    // false, because the browser's own page zoom has to be prevented for this to work.
+    document.addEventListener("wheel", function (event) {
+      if (armed || !event.ctrlKey) return;
+      event.preventDefault();
+      // A trackpad sends many small deltas and a mouse wheel sends one coarse click, so the
+      // per-event factor is clamped: without it a single notch of a mouse wheel jumps
+      // straight to the maximum, which reads as "zoom is broken" rather than "too fast".
+      var factor = Math.exp(-event.deltaY * 0.01);
+      factor = Math.max(0.7, Math.min(1.4, factor));
+      zoomAbout(zoom * factor, event.clientX, event.clientY);
+    }, { passive: false });
+
+    // Double-tap or double-click: the gesture people reach for first. 1x and 2x, so it is
+    // a toggle in both directions rather than a ladder nobody can get out of.
+    function toggleZoom(clientX, clientY) {
+      if (armed) return;
+      if (zoom > 1) {
+        // Back to fit, and back to the top-left: a picture reset to 1x but scrolled to
+        // where it was when zoomed shows an empty corner and reads as still broken.
+        zoom = MIN_ZOOM;
+        applyZoom();
+        document.scrollingElement.scrollLeft = 0;
+        document.scrollingElement.scrollTop = 0;
+        return;
+      }
+      zoomAbout(2, clientX, clientY);
+    }
+    image.addEventListener("dblclick", function (event) {
+      event.preventDefault();
+      toggleZoom(event.clientX, event.clientY);
+    });
+
     /**
      * Whether a drag should draw a rectangle right now.
      *
@@ -512,6 +662,12 @@ export const REGION_SCRIPT = `
       // Arming clears anything half-drawn: the state that allowed the box has changed,
       // and a box left on screen would look like a selection that no longer exists.
       if (!armed) clear();
+      // Arming also gives up any gesture in progress: touch-action none is about to take
+      // the touches, so a pinch under way would end mid-scale and leave the picture stuck
+      // at a size nobody chose.
+      pointers = {};
+      pinch = null;
+      pan = null;
     });
 
     image.addEventListener("pointerdown", function (event) {
@@ -1325,24 +1481,44 @@ function imageDocument(input: {
   /* Same light/dark contract as every other document here, so the picture sits on
      the drawer's colour rather than on a white field. */
   :root { color-scheme: light dark; }
-  /* Vertical pans stay the browser's — scrolling a long file is the point — but a
-     the X axis is this document's. Without it a sideways drag is claimed by the
-     platform (on iOS, as a back-navigation gesture) and the swipe script never sees
-     an end to judge. pan-y keeps scrolling; taking x away from the browser is what
-     makes a swipe mean something. */
-  html { touch-action: pan-y pinch-zoom; }
+  /* No page zoom of this document, ever.
+     
+     Pinch-zoom here was a bug with a non-obvious cause: this document lives in an
+     iframe, but a browser's pinch-zoom scales the *visual viewport*, which belongs to
+     the top-level page. So pinching a picture zoomed the whole drawer — header, comment
+     button, the lot — while the picture itself stayed the same size relative to its
+     surroundings. The zoom has to be this document's own, applied to the picture, so
+     nothing outside the frame can move.
+
+     pan-y still lets the page scroll, and keeps the X axis for the swipe: without it a
+     sideways drag is claimed by the platform (on iOS, as a back-navigation gesture) and
+     the swipe script never sees an end to judge. */
+  html { touch-action: pan-y; }
   /* border-box because a padded height of 100% overflows its own viewport: the
      padding is added outside the 100%, which pushes the picture's content box past
      the bottom of the frame and makes it sit visibly too high. */
   html, body { height: 100%; box-sizing: border-box; }
-  body { margin: 0; display: flex; align-items: center; justify-content: center;
-         padding: 1rem; background: Canvas; color: CanvasText;
+  /* The scrolling window. Its own overflow means a zoomed picture can be panned to its
+     edges, and overscroll-behavior contain stops that pan continuing into the drawer
+     behind it once an edge is reached. */
+  body { margin: 0; height: 100%; overflow: auto; overscroll-behavior: contain;
+         background: Canvas; color: CanvasText;
          font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  /* A centring box, so a picture smaller than the window sits in the middle and a zoomed
+     one can still be scrolled from its top-left. min-width and min-height rather than
+     height, so it grows with the picture instead of clipping it. */
+  .stage { min-width: 100%; min-height: 100%; display: flex;
+           align-items: center; justify-content: center; padding: 1rem; box-sizing: border-box; }
   /* Fitted, not stretched: a screenshot wider than the drawer is the ordinary case,
      and scaling it down to fit is what makes it readable at a glance. The height is
-     capped too, so a tall one does not need a scroll to see what it is. */
+     capped too, so a tall one does not need a scroll to see what it is.
+     
+     A scale transform with a centre origin is how the zoom is applied: the layout size
+     never changes, so the scroll extent has to be given to the stage by the script, and
+     will-change keeps the gesture off the compositor's slow path. */
   img { max-width: 100%; max-height: 100%; object-fit: contain;
-        image-rendering: auto; background: #8881; border-radius: .4rem; }
+        image-rendering: auto; background: #8881; border-radius: .4rem;
+        transform-origin: center center; will-change: transform; }
   /* The picture is *not* the gesture surface until somebody says they are commenting.
      Taking every touch away from the browser is what makes a rectangle possible on a
      phone, and it is also what made panning and pinching impossible: one finger cannot
@@ -1379,7 +1555,7 @@ function imageDocument(input: {
 </head>
 <body data-file="${escapeHtml(input.key)}">
 ${controls}
-<img class="crop-target" src="${escapeHtml(input.href)}" alt="${escapeHtml(input.key)}" draggable="false">
+<div class="stage"><img class="crop-target" src="${escapeHtml(input.href)}" alt="${escapeHtml(input.key)}" draggable="false"></div>
 ${note}
 <script nonce="${input.nonce}">${SWIPE_SCRIPT}</script>
 <script nonce="${input.nonce}">${REGION_SCRIPT}</script>

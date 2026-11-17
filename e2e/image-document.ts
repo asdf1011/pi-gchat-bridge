@@ -16,17 +16,19 @@ export function imageDocumentFor(key: string): string {
   return `<!doctype html><html><head><meta charset="utf-8">
 <style>
   :root { color-scheme: light dark; }
-  html { touch-action: pan-y pinch-zoom; }
+  html { touch-action: pan-y; }
   html, body { height: 100%; box-sizing: border-box; }
   body { margin: 0; display: flex; align-items: center; justify-content: center;
          padding: 1rem; background: Canvas; color: CanvasText; }
   img { max-width: 100%; max-height: 100%; object-fit: contain; background: #8881; }
-  img { touch-action: auto; }
+  body { margin: 0; height: 100%; overflow: auto; overscroll-behavior: contain; }
+  .stage { min-width: 100%; min-height: 100%; display: flex; align-items: center; justify-content: center; padding: 1rem; box-sizing: border-box; }
+  img { touch-action: auto; transform-origin: center center; }
   img.crop-target.armed { touch-action: none; cursor: crosshair; user-select: none; -webkit-user-select: none; }
   .marquee { position: fixed; pointer-events: none; border: 2px solid #4c9aff; background: #4c9aff33; }
 </style></head>
 <body data-file="${key}">
-<img class="crop-target" src="${name}?raw" alt="${key}" draggable="false">
+<div class="stage"><img class="crop-target" src="${name}?raw" alt="${key}" draggable="false"></div>
 <script>${SWIPE_SCRIPT}</script>
 <script>${REGION_SCRIPT}</script>
 </body></html>`;
@@ -45,12 +47,14 @@ export function pdfPageDocumentFor(key: string, page: number, pageCount: number)
   return `<!doctype html><html><head><meta charset="utf-8">
 <style>
   :root { color-scheme: light dark; }
-  html { touch-action: pan-y pinch-zoom; }
+  html { touch-action: pan-y; }
   html, body { height: 100%; box-sizing: border-box; }
   body { margin: 0; display: flex; align-items: center; justify-content: center;
          padding: 1rem; background: Canvas; color: CanvasText; }
   img { max-width: 100%; max-height: 100%; object-fit: contain; background: #8881; }
-  img { touch-action: auto; }
+  body { margin: 0; height: 100%; overflow: auto; overscroll-behavior: contain; }
+  .stage { min-width: 100%; min-height: 100%; display: flex; align-items: center; justify-content: center; padding: 1rem; box-sizing: border-box; }
+  img { touch-action: auto; transform-origin: center center; }
   img.crop-target.armed { touch-action: none; cursor: crosshair; user-select: none; -webkit-user-select: none; }
   .marquee { position: fixed; pointer-events: none; border: 2px solid #4c9aff; background: #4c9aff33; }
   .pages { position: fixed; bottom: 0; left: 0; right: 0; display: flex; gap: .5rem;
@@ -62,7 +66,7 @@ export function pdfPageDocumentFor(key: string, page: number, pageCount: number)
   }<span>page ${page} of ${pageCount}</span>${
     page < pageCount ? `<a href="${at(page + 1)}" rel="next">page ${page + 1} →</a>` : "<a aria-disabled=\"true\">→</a>"
   }</nav>
-<img class="crop-target" src="${name}?page=${page}&amp;png" alt="${key}" draggable="false">
+<div class="stage"><img class="crop-target" src="${name}?page=${page}&amp;png" alt="${key}" draggable="false"></div>
 <p class="note">page ${page} of ${pageCount}</p>
 <script>${SWIPE_SCRIPT}</script>
 <script>${REGION_SCRIPT}</script>

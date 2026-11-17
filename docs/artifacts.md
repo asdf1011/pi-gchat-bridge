@@ -245,6 +245,27 @@ The button is hidden while the composer is open — the composer is the same act
 continued, and two of them would compete for the same corner. Pressing it again closes
 the composer and disarms, which is the way out on a device with no Escape key.
 
+### Zooming looks at the picture, not at the drawer
+
+Zoom is the picture document's own — a scale transform on the `<img>`, driven by two
+pointers (a pinch), `ctrl`+wheel (a trackpad), or a double-tap — and **never the
+browser's**.
+
+The distinction matters because of a bug with a non-obvious cause: `touch-action:
+pinch-zoom` in the frame lets the *browser* zoom, and a browser's pinch-zoom scales the
+**visual viewport**, which belongs to the top-level page. So pinching a picture zoomed
+the drawer's header and the comment button along with it. A transform cannot escape the
+frame, so the chrome stays put.
+
+- **About a point, not the centre.** A pinch holds the thing under the fingers still; a
+  scale about the centre drifts away from what the reader is looking at.
+- **The scroll extent is given to the stage by hand**, because a transform does not
+  change the layout box — without it a zoomed picture could not be panned to its edges.
+- **`overscroll-behavior: contain`** stops a pan reaching the picture's edge from
+  continuing into the drawer behind it.
+- **Arming disarms the zoom gestures**: `touch-action: none` is about to take the
+  touches, so a pinch under way would end mid-scale.
+
 ### Arming, and why gestures work again
 
 `touch-action: none` on a picture is what makes a rectangle possible on a phone, and it
