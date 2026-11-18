@@ -3146,3 +3146,93 @@ test("artifacts: the comment button does not raise the keyboard", async ({ page 
   await page.locator("#comment-text").click();
   await expect(page.locator("#comment-text")).toBeFocused();
 });
+
+test("artifacts: a selected region stays on the picture while the comment is written", async ({ page }) => {
+  // Reported: the rectangle vanished the moment the finger lifted — at exactly the point it
+  // became the thing being commented on. It is the only mark on screen saying which part of
+  // the picture was chosen, so it has to survive until the comment is done with.
+  await stubApi(page);
+  await page.route("**/api/environment", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ artifactsBaseUrl: "https://artifacts.example", pageVersion: "t" }),
+    }),
+  );
+  await page.route("**/api/c/*/artifacts", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([{ key: "pi/out/shot.png", wrote: 1, edited: 0, markdown: false, image: true }]),
+    }),
+  );
+  await page.route("**/api/c/*/comments", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
+  );
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAYAAACinX6EAAAAJUlEQVR42u3NMQEAAAgDoC251a3gLwSgcyfTVFVVVVVVVVVVVVX1tQFrwAPhpO4WAAAAAElFTkSuQmCC",
+    "base64",
+  );
+  await page.route("https://artifacts.example/**", (route) => {
+    const url = route.request().url();
+    if (url.includes("?raw")) return route.fulfill({ status: 200, contentType: "image/png", body: png });
+    return route.fulfill({ status: 200, contentType: "text/html", body: imageDocumentFor("pi/out/shot.png") });
+  });
+
+  await page.goto("/7/");
+  await page.locator("#artifacts-toggle").click();
+  await page.locator("#artifact-list li").first().click();
+  const frame = page.frames().find((f) => f !== page.mainFrame() && f.url().includes("shot.png"))!;
+  await expect
+    .poll(() => frame.evaluate(() => document.readyState === "complete" && Boolean(document.querySelector("img"))).catch(() => false))
+    .toBe(true);
+
+  /** How many selection boxes are on the picture, and where the first one is. */
+  const boxes = (): Promise<{ count: number; width: number }> =>
+    frame.evaluate(() => {
+      const all = document.querySelectorAll(".marquee");
+      const first = all[0]?.getBoundingClientRect();
+      return { count: all.length, width: first ? Math.round(first.width) : 0 };
+    });
+  /** A drag across the picture, in fractions of its box. */
+  const drag = async (from: [number, number], to: [number, number]): Promise<void> => {
+    await frame.evaluate(([a, b, c, d]) => {
+      const image = document.querySelector("img")!;
+      const r = image.getBoundingClientRect();
+      const at = (fx: number, fy: number) => [r.left + r.width * fx, r.top + r.height * fy] as const;
+      const [sx, sy] = at(a, b);
+      const [ex, ey] = at(c, d);
+      const send = (type: string, x: number, y: number) =>
+        document.body.dispatchEvent(
+          new PointerEvent(type, { clientX: x, clientY: y, bubbles: true, pointerId: 1, pointerType: "touch", button: 0 }),
+        );
+      send("pointerdown", sx, sy);
+      send("pointermove", ex, ey);
+      send("pointerup", ex, ey);
+    }, [from[0], from[1], to[0], to[1]]);
+    await page.waitForTimeout(200);
+  };
+
+  // Nothing before a selection.
+  expect(await boxes()).toEqual({ count: 0, width: 0 });
+
+  // Arm, drag: the box stays when the finger lifts.
+  await page.locator("#comment-fab").click();
+  await expect.poll(() => frame.evaluate(() => document.body.classList.contains("armed"))).toBe(true);
+  await drag([0.2, 0.2], [0.6, 0.5]);
+  const kept = await boxes();
+  expect(kept.count).toBe(1);
+  expect(kept.width).toBeGreaterThan(8);
+  // And the comment is being written about it.
+  await expect(page.locator("#comment-preview")).toBeVisible();
+
+  // A second drag replaces it rather than leaving two boxes behind.
+  await drag([0.3, 0.6], [0.8, 0.9]);
+  const replaced = await boxes();
+  expect(replaced.count).toBe(1);
+  expect(replaced.width).not.toBe(kept.width);
+
+  // Closing the composer takes the box away: it marked a selection that no longer exists.
+  await page.locator("#comment-cancel").click();
+  await expect.poll(() => boxes().then((b) => b.count)).toBe(0);
+});

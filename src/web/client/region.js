@@ -49,9 +49,17 @@
       return region;
     }
 
-    function clear() {
-      if (marquee && marquee.parentNode) marquee.parentNode.removeChild(marquee);
-      marquee = null;
+    /**
+     * Take the box down and forget the drag.
+     *
+     * `keep` leaves the box on the picture, which is what happens when a selection is made:
+     * the reader has just drawn a rectangle and needs to see it while they write the comment,
+     * to check it covers what they meant. It was removed the moment the finger lifted, so the
+     * region vanished at the exact moment it became the thing being commented on.
+     */
+    function clear(keep) {
+      if (marquee && !keep && marquee.parentNode) marquee.parentNode.removeChild(marquee);
+      if (!keep) marquee = null;
       drag = null;
     }
 
@@ -414,6 +422,9 @@
       } catch (e) {
         // Capture is an optimisation; the handlers below work without it.
       }
+      // A new press replaces the old box: the previous selection is being superseded, and
+      // leaving it on screen would show two rectangles while the second is dragged.
+      if (marquee) clear();
       drag = { x: event.clientX, y: event.clientY };
       marquee = document.createElement("div");
       marquee.className = "marquee";
@@ -441,10 +452,16 @@
       // have the drawer re-render a bar sixty times a second under the finger, and the
       // only rectangle that matters is the one the reader let go of.
       var region = regionOf(drag, { x: event.clientX, y: event.clientY });
-      clear();
-      // A press that ended where it began is a tap: no region, and no message — the
-      // click that follows offers the hint instead.
-      if (!region) return;
+      // A press that ended where it began is a tap: no region, and no message — the click
+      // that follows offers the hint instead. The box goes.
+      if (!region) {
+        clear();
+        return;
+      }
+      // A real selection keeps its box on the picture: the reader is about to write a comment
+      // about that rectangle, and it is the only thing on screen that says which part of the
+      // image they chose.
+      clear(true);
       parent.postMessage(
         {
           t: "pi-artifact-region",
