@@ -25,14 +25,14 @@ import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 
-import { imageTypeOf, isMarkdown, isPdf, readArtifact, readArtifactBytes, type ArtifactFile } from "../durable/artifacts.js";
+import { audioTypeOf, imageTypeOf, isMarkdown, isPdf, readArtifact, readArtifactBytes, type ArtifactFile } from "../durable/artifacts.js";
 import { repoRelativePath, showFile, showFileBytes } from "../durable/artifact-vcs.js";
 import { parseRegion } from "../durable/comments.js";
 import { logger } from "../logger.js";
 import type { SessionHost } from "../session-host/api.js";
 import { cropRegion } from "./crop.js";
 import { pdfPageCount, renderPdfPage } from "./pdf.js";
-import { COMMENT_SCRIPT, REGION_SCRIPT, RENDER_SCRIPT, SWIPE_SCRIPT } from "./client-scripts.js";
+import { COMMENT_SCRIPT, MEDIA_PLAYER_SCRIPT, REGION_SCRIPT, RENDER_SCRIPT, SWIPE_SCRIPT } from "./client-scripts.js";
 
 /**
  * Re-exported for the tests that serve a document carrying a real gesture.
@@ -42,7 +42,7 @@ import { COMMENT_SCRIPT, REGION_SCRIPT, RENDER_SCRIPT, SWIPE_SCRIPT } from "./cl
  * that splices them into documents, so it is the one a test is describing when it says "the
  * document really carries the swipe script".
  */
-export { COMMENT_SCRIPT, REGION_SCRIPT, RENDER_SCRIPT, SWIPE_SCRIPT };
+export { COMMENT_SCRIPT, MEDIA_PLAYER_SCRIPT, REGION_SCRIPT, RENDER_SCRIPT, SWIPE_SCRIPT };
 import { escapeHtml, markdownDocument, renderMarkdown } from "./markdown.js";
 
 export interface ArtifactsServerOptions {
@@ -147,6 +147,65 @@ function scriptedDocumentCsp(frameAncestors: string, nonce: string): string {
     `img-src data:; script-src 'nonce-${nonce}'; ` +
     `form-action 'none'; base-uri 'none'; frame-ancestors ${frameAncestors}`
   );
+}
+
+/**
+ * The CSP for the audio player document.
+ *
+ * `media-src 'self'` is the one allowance, and it is deliberately the narrowest that
+ * works: the player embeds an `<audio>` pointing at this same origin's bytes and
+ * nothing else. It cannot be folded into `scriptedDocumentCsp`, whose `img-src data:`
+ * allowance is for a different document — widening the shared policy would give every
+ * scripted document a fetch that only this one needs.
+ *
+ * `default-src 'none'` still covers fetch, frames and images, so the player cannot
+ * become a page; the script is nonce'd and can talk to its parent and nothing else.
+ * No `connect-src`: the script never fetches, it only drives the element.
+ */
+function mediaDocumentCsp(frameAncestors: string, nonce: string): string {
+  return (
+    `sandbox allow-scripts; default-src 'none'; style-src 'unsafe-inline'; ` +
+    `media-src 'self'; script-src 'nonce-${nonce}'; ` +
+    `form-action 'none'; base-uri 'none'; frame-ancestors ${frameAncestors}`
+  );
+}
+
+function mediaRange(
+  header: string | undefined,
+  size: number,
+): { start: number; end: number } | "unsatisfiable" | undefined {
+  // No header is the whole file: the ordinary first request from a player, and what a
+  // download link gets.
+  if (header === undefined) return undefined;
+  const match = /^\s*bytes\s*=\s*(\d*)\s*-\s*(\d*)\s*(?:,.*)?$/i.exec(header);
+  if (!match) return undefined;
+  const [, rawStart = "", rawEnd = ""] = match;
+  // A multi-range request (`bytes=0-1,5-6`) falls back to the whole file rather than
+  // answering 416: browsers do not send one for media, and a `multipart/byteranges`
+  // reply is a lot of machinery to carry for a case nothing asks for.
+  if (rawStart === "" && rawEnd === "") return undefined;
+  let start: number;
+  let end: number;
+  if (rawStart === "") {
+    // `bytes=-500`: the *last* 500 bytes. A player asks this to find a file's tail.
+    const suffix = Number(rawEnd);
+    if (!Number.isFinite(suffix) || suffix <= 0) return "unsatisfiable";
+    start = Math.max(0, size - suffix);
+    end = size - 1;
+  } else {
+    start = Number(rawStart);
+    // An open-ended range is the ordinary seeking request: from here to the end.
+    end = rawEnd === "" ? size - 1 : Number(rawEnd);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return undefined;
+    // A range past the end is not a failure of the request, it is a failure of the
+    // ask — the player has a stale idea of the length. 416 is the honest answer and
+    // tells it to re-read `Content-Range`.
+    if (start >= size) return "unsatisfiable";
+    if (end >= size) end = size - 1;
+    if (end < start) return undefined;
+  }
+  if (size === 0) return "unsatisfiable";
+  return { start, end };
 }
 
 function send(
@@ -553,6 +612,137 @@ ${note}
 }
 
 /**
+ * A player for an audio artifact.
+ *
+ * Served as HTML around an `<audio>` rather than as the bare bytes, for two reasons
+ * that both only show up on screen. A raw audio document in a frame gets the browser's
+ * native controls, which are drawn by the *browser* and follow its theme rather than
+ * this page's, so a dark drawer can get a light control strip. And the native element
+ * cannot show a category of thing this drawer has — a file whose length is known
+ * before it is read, a drag-to-seek bar sized to the container, an elapsed/total
+ * readout, and a keyboard surface that matches the comment viewer's keys.
+ *
+ * The player is deliberately built out of `<audio>` plus our own controls rather than
+ * a custom decoder: `preload="metadata"` means the browser fetches only the header
+ * until somebody presses play, and `?raw` answers `Range` requests so a seek is a
+ * small fetch rather than the whole file again.
+ *
+ * The safety rules are the image document's, unchanged. The key is escaped wherever it
+ * reaches markup; the `<audio>` points at this same origin and nothing else; and the
+ * CSP allows `media-src 'self'` with a nonce'd script and no `connect-src`, so the
+ * document can read the file it was made for and talk to its parent, and nothing more.
+ */
+export function audioDocument(input: {
+  key: string;
+  /**
+   * What `<audio>` points at, **relative to this document** — the same rule as
+   * `imageDocument.href`, and for the same reason: the document is served at
+   * `<root>/c/<id>/<key>`, so a sibling is just the last path segment, and a full
+   * key would resolve to `<root>/c/<id>/<key>/<key>` and 404.
+   */
+  href: string;
+  /** The content type the bytes will arrive as, so the player can name the format. */
+  type: string;
+  /** A line under the player — a truncation note. */
+  note?: string;
+  /** Per-response, for the player script — the same rule as every other scripted document. */
+  nonce: string;
+}): string {
+  const note = input.note === undefined ? "" : `<p class="note">${escapeHtml(input.note)}</p>`;
+  // The format, said plainly. `audio/wav` in a panel is jargon; "WAV" is a word.
+  const format = input.type.replace(/^audio\//, "").replace("mpeg", "mp3").toUpperCase();
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(input.key)}</title>
+<style>
+  :root { color-scheme: light dark; }
+  /* pan-y, like the image document: the page may still scroll, and a sideways drag
+     belongs to the drawer's swipe rather than to the scrubber. */
+  html { touch-action: pan-y; }
+  html, body { height: 100%; box-sizing: border-box; }
+  body { margin: 0; height: 100%; overflow: auto; overscroll-behavior: contain;
+         background: Canvas; color: CanvasText;
+         font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+         display: flex; flex-direction: column; justify-content: center;
+         padding: 1rem; gap: .75rem; }
+  /* The player is a card, not a full-bleed bar: it sits in the middle of the panel
+     like a picture does, so it reads as the artifact rather than as chrome. */
+  .player { border: 1px solid #8883; border-radius: .6rem; padding: .85rem .9rem;
+            background: #8881; display: flex; flex-direction: column; gap: .6rem; }
+  .row { display: flex; align-items: center; gap: .7rem; }
+  /* The play/pause button. Sized generously: it is the one control a person reaches
+     for, and it is also the tap target on a phone. */
+  button.play { flex: none; width: 2.6rem; height: 2.6rem; border-radius: 999px;
+                border: 1px solid #8886; background: Canvas; color: inherit; cursor: pointer;
+                display: grid; place-items: center; padding: 0; }
+  button.play:hover { background: #8882; }
+  button.play:focus-visible { outline: 2px solid #a51f34; outline-offset: 2px; }
+  button.play svg { width: 1.1rem; height: 1.1rem; fill: currentColor; }
+  /* The pause bars are hidden while paused and the play triangle while playing, so the
+     button is one element rather than two that have to be kept in step. */
+  button.play[data-playing="1"] .icon-play { display: none; }
+  button.play[data-playing="0"] .icon-pause { display: none; }
+  .scrub { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: .25rem; }
+  /* The progress bar is a native range input, made to look like a scrubber.
+     
+     A plain input type=range rather than a div with pointer handlers, because it brings
+     keyboard seeking, screen-reader announcement and drag semantics that otherwise have
+     to be rebuilt badly. Only its appearance is replaced. */
+  input.seek { -webkit-appearance: none; appearance: none; width: 100%; height: 1.1rem;
+               margin: 0; background: transparent; cursor: pointer; }
+  input.seek:focus-visible { outline: 2px solid #a51f34; outline-offset: 2px; border-radius: 999px; }
+  /* The filled part is a gradient stop at a CSS variable the script moves, so a drag
+     repaints nothing but that one value. */
+  input.seek::-webkit-slider-runnable-track { height: .35rem; border-radius: 999px;
+    background: linear-gradient(to right, #a51f34 var(--p, 0%), #8883 var(--p, 0%)); }
+  input.seek::-moz-range-track { height: .35rem; border-radius: 999px; background: #8883; }
+  input.seek::-moz-range-progress { height: .35rem; border-radius: 999px; background: #a51f34; }
+  input.seek::-webkit-slider-thumb { -webkit-appearance: none; appearance: none;
+    width: .9rem; height: .9rem; margin-top: -.27rem; border-radius: 999px;
+    background: CanvasText; border: 1px solid Canvas; box-shadow: 0 1px 3px #0004; }
+  input.seek::-moz-range-thumb { width: .9rem; height: .9rem; border-radius: 999px;
+    background: CanvasText; border: 1px solid Canvas; box-shadow: 0 1px 3px #0004; }
+  /* Elapsed and total, monospaced so the digits do not shuffle sideways as they count. */
+  .times { display: flex; justify-content: space-between;
+           font: .75rem/1 var(--mono, ui-monospace, monospace); opacity: .75; }
+  .meta { display: flex; justify-content: space-between; align-items: baseline;
+          gap: .5rem; font-size: .75rem; opacity: .65; }
+  .meta .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .meta .fmt { flex: none; }
+  .note { margin: 0; font-size: .75rem; opacity: .7; }
+  /* The audio element is the engine and never the interface: it is not shown, so a
+     browser that draws its own controls cannot disagree with ours. It still has to be
+     in the document, and not display: none, for play() to be allowed at all. */
+  audio { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+</style>
+</head>
+<body data-file="${escapeHtml(input.key)}">
+<div class="player">
+  <div class="meta"><span class="name">${escapeHtml(input.key.split("/").at(-1) ?? input.key)}</span><span class="fmt">${escapeHtml(format)}</span></div>
+  <div class="row">
+    <button class="play" type="button" data-playing="0" aria-label="Play" title="Play (space)">
+      <svg class="icon-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+      <svg class="icon-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
+    </button>
+    <div class="scrub">
+      <input class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek">
+      <div class="times"><span class="elapsed">0:00</span><span class="total">--:--</span></div>
+    </div>
+  </div>
+</div>
+${note}
+<audio preload="metadata" src="${escapeHtml(input.href)}"></audio>
+<script nonce="${input.nonce}">
+${MEDIA_PLAYER_SCRIPT}
+</script>
+</body>
+</html>`;
+}
+
+/**
  * The source view: numbered lines, comment marks, and the selection script.
  *
  * Served as `text/html` and therefore escaped line by line — the artifact's bytes
@@ -834,6 +1024,90 @@ async function handle(
         nonce,
       }),
     );
+    return;
+  }
+
+  // Audio is answered from its bytes, before anything tries to decode it as text, for
+  // the same reason a picture is: `readArtifact` reports a WAV as "binary" and returns
+  // no content, so a check below this point would never see one.
+  //
+  // Two URLs, and the split is the same one the image makes:
+  //
+  //   `?raw`   — the bytes, with their real content type. What the player document
+  //              below reads, and what ↗ opens (where the browser's own controls
+  //              appear, with its own scrubber).
+  //   plain    — a player document around those bytes, because a raw audio document in
+  //              a frame gets the browser's native `<audio>` chrome, which follows the
+  //              *browser's* theme rather than this page's, and cannot show a waveform
+  //              or a elapsed/total readout.
+  //
+  // Both honour `Range`. That is not an optimisation here — it is what makes seeking
+  // work at all: a player scrubbed to 0:12 must not have to download the first 12
+  // seconds again, and Safari refuses to play a media element from a server that
+  // never answers 206.
+  const audioType = audioTypeOf(key);
+  if (audioType !== undefined) {
+    let audio;
+    try {
+      if (revision !== "" && revision !== "latest") {
+        if (!repo) throw new Error("artifacts are not version controlled here");
+        audio = await readImageAtRevision(options, repo, revision, file);
+      } else {
+        audio = readArtifactBytes(file);
+      }
+    } catch (error) {
+      logger.error(`[artifacts] ${key}: ${(error as Error).message}`);
+      send(res, 404, "text/html; charset=utf-8", documentCsp, unreadableDocument(key));
+      return;
+    }
+
+    if (!url.searchParams.has("raw")) {
+      const nonce = randomBytes(16).toString("base64");
+      send(
+        res,
+        200,
+        "text/html; charset=utf-8",
+        mediaDocumentCsp(frameAncestorsFor(options.webOrigin), nonce),
+        audioDocument({
+          key,
+          // Relative to this document, so it works behind any mount prefix: the
+          // sibling bytes of the same artifact.
+          href: `${encodeURIComponent(key.split("/").at(-1) ?? key)}?raw`,
+          type: audioType,
+          ...(audio.size > audio.bytes.length
+            ? { note: `Playing the first ${Math.round(audio.bytes.length / 1024)} KiB of ${audio.size} bytes.` }
+            : {}),
+          nonce,
+        }),
+      );
+      return;
+    }
+
+    const filename = encodeURIComponent(key.split("/").at(-1) ?? key);
+    const headers: Record<string, string> = {
+      "Content-Disposition": `${url.searchParams.has("download") ? "attachment" : "inline"}; filename="${filename}"`,
+      // A media element scrubs by asking for ranges; without this header a browser
+      // will not try, and the progress bar cannot be dragged.
+      "Accept-Ranges": "bytes",
+      "Color-Scheme": "light dark",
+    };
+    const range = mediaRange(req.headers.range, audio.bytes.length);
+    if (range === "unsatisfiable") {
+      send(res, 416, "text/plain; charset=utf-8", TEXT_CSP, "range not satisfiable", {
+        ...headers,
+        "Content-Range": `bytes */${audio.bytes.length}`,
+      });
+      return;
+    }
+    if (range === undefined) {
+      send(res, 200, audioType, IMAGE_CSP, audio.bytes, headers);
+      return;
+    }
+    send(res, 206, audioType, IMAGE_CSP, audio.bytes.subarray(range.start, range.end + 1), {
+      ...headers,
+      "Content-Range": `bytes ${range.start}-${range.end}/${audio.bytes.length}`,
+      "Content-Length": String(range.end - range.start + 1),
+    });
     return;
   }
 

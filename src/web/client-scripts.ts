@@ -78,3 +78,5 @@ export const SWIPE_SCRIPT = load("swipe.js");
 export const REGION_SCRIPT = load("region.js");
 export const COMMENT_SCRIPT = load("comment.js");
 export const RENDER_SCRIPT = load("render.js");
+/** The audio player's controls. Self-contained: it includes nothing. */
+export const MEDIA_PLAYER_SCRIPT = load("media-player.js");

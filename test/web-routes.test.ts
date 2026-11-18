@@ -494,6 +494,7 @@ test("the artifact list is same-origin, small, and says which files render", asy
     artifacts: [
       { key: "docs/design.md", root: "/workspace", path: "/workspace/docs/design.md", wrote: 1, edited: 2 },
       { key: "src/app.ts", root: "/workspace", path: "/workspace/src/app.ts", wrote: 1, edited: 0 },
+      { key: "out/story.wav", root: "/workspace", path: "/workspace/out/story.wav", wrote: 1, edited: 0 },
     ],
   });
   const served = await serve(seam);
@@ -503,10 +504,14 @@ test("the artifact list is same-origin, small, and says which files render", asy
       wrote: number;
       edited: number;
       markdown: boolean;
+      audio?: boolean;
     }[];
-    assert.deepEqual(rows.map((row) => row.key), ["docs/design.md", "src/app.ts"]);
+    assert.deepEqual(rows.map((row) => row.key), ["docs/design.md", "src/app.ts", "out/story.wav"]);
     // Markdown is the only thing the artifact host will render as HTML.
-    assert.deepEqual(rows.map((row) => row.markdown), [true, false]);
+    assert.deepEqual(rows.map((row) => row.markdown), [true, false, false]);
+    // Audio is the kind that *plays*: the drawer frames a player rather than source,
+    // and the row says so, so a reader knows what opening it will do.
+    assert.deepEqual(rows.map((row) => row.audio === true), [false, false, true]);
     assert.equal(rows[0].wrote, 1);
     assert.equal(rows[0].edited, 2);
 

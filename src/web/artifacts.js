@@ -82,7 +82,7 @@ function currentKey() {
  * pool is capped: every entry is a live document with its own scripts and memory, and
  * a conversation with forty artifacts should not keep forty of them.
  */
-function frameFor(key, markdown, image, url, pdf = false) {
+function frameFor(key, markdown, image, url, pdf = false, audio = false) {
   const existing = framesByKey.get(key);
   if (existing) return existing;
   const frame = document.createElement('iframe');
@@ -92,7 +92,10 @@ function frameFor(key, markdown, image, url, pdf = false) {
   frame.dataset.key = key;
   frame.dataset.image = image ? '1' : '';
   frame.dataset.pdf = pdf ? '1' : '';
-  frame.classList.toggle('image', image || pdf);
+  frame.dataset.audio = audio ? '1' : '';
+  // Audio is framed like a picture rather than like a page of text: it has no lines to
+  // number, so it shares the "document the host builds around the bytes" styling.
+  frame.classList.toggle('image', image || pdf || audio);
   // Created *inside* the strip and never moved: an iframe that changes parent is
   // re-fetched, so the pool has to be positional rather than shuffled between
   // containers.
@@ -192,7 +195,7 @@ const artifactsTitle = document.getElementById('artifacts-title');
  * how the other numbered anything. Everything else opens as the source view,
  * where a line number is the obvious unit.
  */
-function artifactUrl(key, markdown, image, pdf) {
+function artifactUrl(key, markdown, image, pdf, audio = false) {
   const path = key.split('/').map(encodeURIComponent).join('/');
   // `pdf` is a third kind beside markdown and image: a document with pages, which the
   // server renders one page at a time. It is framed exactly like a picture — the
@@ -207,7 +210,11 @@ function artifactUrl(key, markdown, image, pdf) {
   // around the *rendered* page. Which page lives in the frame's URL, and the paging
   // links inside the document are how it changes — so reloading, or following a link
   // to `?page=3`, lands on the page it names.
-  if (image || pdf) return artifactsBase + '/c/' + current + '/' + path;
+  // Audio joins that branch: the drawer frames the *player document* the host builds,
+  // not the bytes. A raw audio document in a frame gets the browser's native controls,
+  // which follow the browser's theme rather than this page's, and can show neither a
+  // scrub bar sized to the drawer nor an elapsed/total readout.
+  if (image || pdf || audio) return artifactsBase + '/c/' + current + '/' + path;
   return artifactsBase + '/c/' + current + '/' + path + (markdown ? '?render' : '?view=source');
 }
 
@@ -225,6 +232,18 @@ function pdfRawUrl(key) {
 /** Where an image's own bytes live, for the new-tab button and for download links. */
 function rawArtifactUrl(key) {
   return artifactUrl(key, false, true) + '?raw';
+}
+
+/**
+ * Where an audio file's own bytes live — what ↗ opens.
+ *
+ * The bytes rather than the player document, because a tab is the browser's own audio
+ * viewer: it has its own scrubber, its own volume and, on a phone, the media session
+ * that puts the file on the lock screen. The drawer's player exists because *in a frame*
+ * the native chrome cannot follow the theme; in a tab that objection does not apply.
+ */
+function audioRawUrl(key) {
+  return artifactUrl(key, false, false, false, true) + '?raw';
 }
 
 /**
@@ -523,7 +542,7 @@ function loadFrameIn(frame, url) {
  * and the keyboard both go through here, so "next" looks the same however you
  * asked for it.
  */
-function showArtifact(key, markdown, push = true, image = false, from = 'right', pdf = false) {
+function showArtifact(key, markdown, push = true, image = false, from = 'right', pdf = false, audio = false) {
   for (const li of artifactsList.children) li.classList.toggle('on', li.dataset.key === key);
   // The document slides over the list and takes the drawer's full width, so a
   // name-heavy list stops competing with the thing being read.
@@ -558,7 +577,7 @@ function showArtifact(key, markdown, push = true, image = false, from = 'right',
   // A frame that already holds this document is reused, which is what makes going
   // back and forth instant — and, more importantly, what makes a *step* possible
   // without reloading anything that is on screen.
-  showKey(key, markdown, image, pdf);
+  showKey(key, markdown, image, pdf, audio);
   closeCommentBar();
   closeThread();
   // A document is open, so there is something to comment on. Every artifact offers it,
@@ -568,6 +587,7 @@ function showArtifact(key, markdown, push = true, image = false, from = 'right',
   artifactsNewTab.dataset.markdown = markdown ? '1' : '';
   artifactsNewTab.dataset.image = image ? '1' : '';
   artifactsNewTab.dataset.pdf = pdf ? '1' : '';
+  artifactsNewTab.dataset.audio = audio ? '1' : '';
 }
 
 /**
@@ -577,9 +597,9 @@ function showArtifact(key, markdown, push = true, image = false, from = 'right',
  * otherwise), parked in the strip and made current. No existing frame is reloaded,
  * which is the whole point of the pool.
  */
-function showKey(key, markdown, image, pdf) {
-  const url = artifactUrl(key, markdown, image, pdf);
-  const frame = frameFor(key, markdown, image, url, pdf);
+function showKey(key, markdown, image, pdf, audio = false) {
+  const url = artifactUrl(key, markdown, image, pdf, audio);
+  const frame = frameFor(key, markdown, image, url, pdf, audio);
   // The frame is in the strip before it is made current, so it is already laid out
   // and, on a re-visit, already painted. Neighbours are left loaded and detached:
   // that is what makes the next step instant instead of a reload.
@@ -690,7 +710,15 @@ async function restoreArtifact(key) {
     }
     return;
   }
-  showArtifact(key, row.dataset.markdown === '1', false, row.dataset.image === '1', 'right', row.dataset.pdf === '1');
+  showArtifact(
+    key,
+    row.dataset.markdown === '1',
+    false,
+    row.dataset.image === '1',
+    'right',
+    row.dataset.pdf === '1',
+    row.dataset.audio === '1',
+  );
 }
 
 /**
@@ -722,6 +750,7 @@ async function loadArtifacts(preserve) {
     li.dataset.markdown = row.markdown ? '1' : '';
     li.dataset.image = row.image ? '1' : '';
     li.dataset.pdf = row.pdf ? '1' : '';
+    li.dataset.audio = row.audio ? '1' : '';
     li.innerHTML = '<span class="col"><span class="name"></span><span class="dir"></span></span><span class="counts"></span>';
     // The name first and the directory underneath: a list of full paths is mostly
     // directory, and the drawer only needs enough to tell two files apart.
@@ -735,11 +764,22 @@ async function loadArtifacts(preserve) {
     // distinction is the whole reason the viewer needed a new kind of row.
     if (row.image) counts.unshift('image');
     else if (row.pdf) counts.unshift('pdf');
+    // "audio" rather than "sound" or "media": it is what the file is, and it is the
+    // one kind here that plays rather than being read or looked at.
+    else if (row.audio) counts.unshift('audio');
     else if (row.markdown) counts.unshift('markdown');
     li.querySelector('.counts').textContent = counts.join(', ');
     li.title = row.key;
     li.onclick = () =>
-      showArtifact(row.key, Boolean(row.markdown), true, Boolean(row.image), 'right', Boolean(row.pdf));
+      showArtifact(
+        row.key,
+        Boolean(row.markdown),
+        true,
+        Boolean(row.image),
+        'right',
+        Boolean(row.pdf),
+        Boolean(row.audio),
+      );
     artifactsList.append(li);
   }
   if (preserve && framed !== '') {
@@ -830,6 +870,7 @@ function artifactOrder() {
     markdown: li.dataset.markdown === '1',
     image: li.dataset.image === '1',
     pdf: li.dataset.pdf === '1',
+    audio: li.dataset.audio === '1',
   }));
 }
 
@@ -965,8 +1006,9 @@ function prepareNeighbour(side) {
     entry.key,
     entry.markdown,
     entry.image,
-    artifactUrl(entry.key, entry.markdown, entry.image, entry.pdf),
+    artifactUrl(entry.key, entry.markdown, entry.image, entry.pdf, entry.audio),
     entry.pdf,
+    entry.audio,
   );
   gesture.frame.hidden = false;
   // Order in the strip: `order: -1` puts it before the current pane (left), the
@@ -1124,6 +1166,7 @@ function artefactsAfterStep(entry) {
   artifactsNewTab.dataset.markdown = entry.markdown ? '1' : '';
   artifactsNewTab.dataset.image = entry.image ? '1' : '';
   artifactsNewTab.dataset.pdf = entry.pdf ? '1' : '';
+  artifactsNewTab.dataset.audio = entry.audio ? '1' : '';
   closeCommentBar();
   closeThread();
 }
@@ -1140,12 +1183,17 @@ artifactsNewTab.onclick = () => {
     // own viewer has text selection, links and zoom that a rendered image cannot.
     const isImage = artifactsNewTab.dataset.image === '1';
     const isPdf = artifactsNewTab.dataset.pdf === '1';
+    const isAudio = artifactsNewTab.dataset.audio === '1';
     window.open(
       isImage
         ? rawArtifactUrl(key)
         : isPdf
           ? pdfRawUrl(key)
-          : artifactUrl(key, artifactsNewTab.dataset.markdown === '1', false),
+          : isAudio
+            // The bytes, not the player document: a tab gets the browser's own audio
+            // viewer, which is better than ours in every way a tab can be.
+            ? audioRawUrl(key)
+            : artifactUrl(key, artifactsNewTab.dataset.markdown === '1', false),
       '_blank',
       'noopener',
     );

@@ -408,3 +408,39 @@ export function imageTypeOf(key: string): string | undefined {
 export function isPdf(key: string): boolean {
   return path.extname(key).toLowerCase() === ".pdf";
 }
+
+/**
+ * The audio types this viewer will play, with the content type to serve them as.
+ *
+ * An allow-list of **extensions**, exactly like `IMAGE_TYPES` and for the same reason:
+ * the answer decides a `Content-Type`, and a content type decides what a browser does
+ * with the bytes. Every entry here is a format a browser can play natively, so the
+ * player needs no decoder of its own — a `.flac` or `.ogg` is deliberately absent
+ * because support for them is not uniform, and a file this viewer lists but cannot
+ * play is worse than one it never claimed.
+ *
+ * `audio/wav` rather than `audio/wave` or `audio/x-wav`: `audio/wav` is the registered
+ * type now, and the `x-` spelling pushes some browsers into a download.
+ */
+const AUDIO_TYPES: Readonly<Record<string, string>> = {
+  ".wav": "audio/wav",
+  ".mp3": "audio/mpeg",
+  ".m4a": "audio/mp4",
+  ".aac": "audio/aac",
+  ".oga": "audio/ogg",
+  ".opus": "audio/ogg",
+  ".weba": "audio/webm",
+};
+
+/**
+ * The content type to serve an audio artifact as, or `undefined` for anything that is
+ * not playable audio.
+ *
+ * Extension-based on purpose, like every other type decision in this file: the name is
+ * what a person reads, and an `.mp3` that is not one fails at the demuxer with a reason.
+ * `undefined` means "not audio", which is not the same as "not a file": the caller
+ * still serves it, as text or as a download.
+ */
+export function audioTypeOf(key: string): string | undefined {
+  return AUDIO_TYPES[path.extname(key).toLowerCase()];
+}

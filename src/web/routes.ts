@@ -49,7 +49,7 @@ import { renderMarkdown } from "./markdown.js";
 import { modelKey } from "../shared/model-key.js";
 import { readBody as readBodyShared } from "../shared/serve-routes.js";
 import { runCommand } from "../commands/command-surface.js";
-import { imageTypeOf, isMarkdown, isPdf } from "../durable/artifacts.js";
+import { audioTypeOf, imageTypeOf, isMarkdown, isPdf } from "../durable/artifacts.js";
 import { currentAddress, MAX_COMMENT_CHARS, modelText } from "../durable/comments.js";
 import { entriesBefore } from "../durable/entries.js";
 import type { CommentRegion, SessionHost } from "../session-host/api.js";
@@ -449,6 +449,11 @@ export async function handleWebRequest(
           // A PDF is framed like a picture but is not one: the drawer asks for a *page*
           // and offers paging, and ↗ opens the PDF itself rather than a raster.
           pdf: isPdf(artifact.key),
+          // Audio is the fourth kind, and it is the one that is *played* rather than
+          // read or drawn. The drawer frames a player document instead of the bytes,
+          // for the same reason a picture gets a wrapper: the controls have to follow
+          // the theme, and a browser's own `<audio>` chrome in a frame does not.
+          audio: audioTypeOf(artifact.key) !== undefined,
         })),
       ),
     );

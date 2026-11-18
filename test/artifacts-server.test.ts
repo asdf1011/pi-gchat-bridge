@@ -1017,3 +1017,197 @@ test("a zoomed picture is pinned to its fitted size, so the scroll extent is rig
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+// --- Audio -------------------------------------------------------------------
+
+/** A short, real WAV: 8 frames of silence at 8 kHz, mono, 16-bit. */
+function wavBytes(frames = 8): Buffer {
+  const data = Buffer.alloc(frames * 2);
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0, "ascii");
+  header.writeUInt32LE(36 + data.length, 4);
+  header.write("WAVE", 8, "ascii");
+  header.write("fmt ", 12, "ascii");
+  header.writeUInt32LE(16, 16); // fmt chunk size
+  header.writeUInt16LE(1, 20); // PCM
+  header.writeUInt16LE(1, 22); // mono
+  header.writeUInt32LE(8000, 24); // sample rate
+  header.writeUInt32LE(8000 * 2, 28); // byte rate
+  header.writeUInt16LE(2, 32); // block align
+  header.writeUInt16LE(16, 34); // bits per sample
+  header.write("data", 36, "ascii");
+  header.writeUInt32LE(data.length, 40);
+  return Buffer.concat([header, data]);
+}
+
+test("audio's bytes are served from ?raw with an audio type, unchanged", async () => {
+  const root = tempDir();
+  const harness = await serve(root, ["story.wav"]);
+  try {
+    const bytes = wavBytes(64);
+    fs.writeFileSync(path.join(root, "story.wav"), bytes);
+    const response = await fetch(`${harness.base}/c/1/story.wav?raw`);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "audio/wav");
+    assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    // Tells a media element it may scrub by asking for a range.
+    assert.equal(response.headers.get("accept-ranges"), "bytes");
+    assert.match(response.headers.get("content-disposition") ?? "", /^inline; filename="story\.wav"$/);
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), bytes);
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a range request answers 206 with exactly that slice", async () => {
+  // Not an optimisation: Safari refuses to play a media element from a server that
+  // never answers 206, and a scrubber dragged to the middle must not re-download the
+  // start. This is the behaviour the progress bar depends on.
+  const root = tempDir();
+  const harness = await serve(root, ["story.wav"]);
+  try {
+    const bytes = wavBytes(64);
+    fs.writeFileSync(path.join(root, "story.wav"), bytes);
+    const response = await fetch(`${harness.base}/c/1/story.wav?raw`, {
+      headers: { Range: "bytes=10-19" },
+    });
+    assert.equal(response.status, 206);
+    assert.equal(response.headers.get("content-type"), "audio/wav");
+    assert.equal(response.headers.get("content-range"), `bytes 10-19/${bytes.length}`);
+    assert.equal(response.headers.get("content-length"), "10");
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), bytes.subarray(10, 20));
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an open-ended range runs to the end, and a suffix range from the end", async () => {
+  const root = tempDir();
+  const harness = await serve(root, ["story.wav"]);
+  try {
+    const bytes = wavBytes(64);
+    fs.writeFileSync(path.join(root, "story.wav"), bytes);
+
+    // "from 60 to the end" — what a seek to the tail asks for.
+    const open = await fetch(`${harness.base}/c/1/story.wav?raw`, { headers: { Range: "bytes=60-" } });
+    assert.equal(open.status, 206);
+    assert.equal(open.headers.get("content-range"), `bytes 60-${bytes.length - 1}/${bytes.length}`);
+
+    // "the last 8 bytes" — how a player reads a container's trailing index.
+    const suffix = await fetch(`${harness.base}/c/1/story.wav?raw`, { headers: { Range: "bytes=-8" } });
+    assert.equal(suffix.status, 206);
+    assert.equal(
+      suffix.headers.get("content-range"),
+      `bytes ${bytes.length - 8}-${bytes.length - 1}/${bytes.length}`,
+    );
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a range past the end is 416, not a truncated file", async () => {
+  // The honest answer: a player with a stale idea of the length is told the real one,
+  // rather than being handed a zero-length 206 it would read as a corrupt file.
+  const root = tempDir();
+  const harness = await serve(root, ["story.wav"]);
+  try {
+    const bytes = wavBytes(64);
+    fs.writeFileSync(path.join(root, "story.wav"), bytes);
+    const response = await fetch(`${harness.base}/c/1/story.wav?raw`, {
+      headers: { Range: `bytes=${bytes.length}-` },
+    });
+    assert.equal(response.status, 416);
+    assert.equal(response.headers.get("content-range"), `bytes */${bytes.length}`);
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the plain audio URL is a player document with our own controls", async () => {
+  // A raw audio document in a frame gets the browser's native controls, which follow
+  // the browser's theme and cannot show a scrub bar sized to the drawer or an
+  // elapsed/total readout. So the drawer frames a document, as it does for a picture.
+  const root = tempDir();
+  const harness = await serve(root, ["story.wav"]);
+  try {
+    fs.writeFileSync(path.join(root, "story.wav"), wavBytes(64));
+    const response = await fetch(`${harness.base}/c/1/story.wav`);
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("content-type") ?? "", /text\/html/);
+    const html = await response.text();
+
+    // The element is behind the controls, not the interface itself.
+    assert.match(html, /<audio preload="metadata" src="story\.wav\?raw">/);
+    assert.match(html, /class="play"/);
+    assert.match(html, /type="range"/);
+    assert.match(html, /class="elapsed"/);
+    assert.match(html, /class="total"/);
+    // The player script is ours and carries the nonce, not an inline reference to a file.
+    assert.match(html, /<script nonce="[^"]+">/);
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the player document may load its own audio and nothing else", async () => {
+  const root = tempDir();
+  const harness = await serve(root, ["story.wav"]);
+  try {
+    fs.writeFileSync(path.join(root, "story.wav"), wavBytes(64));
+    const response = await fetch(`${harness.base}/c/1/story.wav`);
+    const csp = response.headers.get("content-security-policy") ?? "";
+    // The file it was made for, and no remote host.
+    assert.match(csp, /media-src 'self'/);
+    assert.match(csp, /default-src 'none'/);
+    // Same rule as every other scripted document: the origin stays opaque.
+    assert.match(csp, /sandbox allow-scripts/);
+    assert.doesNotMatch(csp, /allow-same-origin/);
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a file named like audio is framed as one, whatever it holds", async () => {
+  // The type comes from the name, like every other decision in this viewer: the name is
+  // what a person reads, and a .wav that is not one fails at the demuxer with a reason.
+  const root = tempDir();
+  const harness = await serve(root, ["fake.wav"]);
+  try {
+    fs.writeFileSync(path.join(root, "fake.wav"), "this is not audio\n");
+    const raw = await fetch(`${harness.base}/c/1/fake.wav?raw`);
+    assert.equal(raw.headers.get("content-type"), "audio/wav");
+    assert.equal(await raw.text(), "this is not audio\n");
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the player claims its own keys, so paging is not lost to them", async () => {
+  // The drawer's own keydown listener lives on the *parent* document and pages with
+  // the arrow keys. A player that handled arrows without this reasoning would be a
+  // second claimant; because the frame is a cross-origin sandboxed document, its keys
+  // never reach the parent, so the two cannot fight. This asserts the player really
+  // does handle them, which is what makes that reasoning load-bearing.
+  const root = tempDir();
+  const harness = await serve(root, ["story.wav"]);
+  try {
+    fs.writeFileSync(path.join(root, "story.wav"), wavBytes(64));
+    const html = await (await fetch(`${harness.base}/c/1/story.wav`)).text();
+    assert.match(html, /event\.key === ' '/);
+    assert.match(html, /event\.key === 'ArrowLeft'/);
+    assert.match(html, /event\.key === 'ArrowRight'/);
+    // Space is not taken from a focused scrubber: the browser already owns it there.
+    assert.match(html, /if \(event\.target === seek\) return;/);
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
