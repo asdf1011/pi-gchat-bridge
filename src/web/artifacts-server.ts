@@ -1322,8 +1322,13 @@ async function handle(
   const suffix = read.truncated
     ? `\n\n--- truncated: showing ${read.content.length} of ${read.size} bytes ---\n`
     : "";
+  // `?download` asks for the bytes as an attachment rather than to be shown. Without
+  // it a text artifact is always inline — which is right for the frame, and wrong for
+  // the drawer's download button, where the point is to save the file rather than
+  // to open another view of it. The filename is the artifact's own, so a save lands
+  // as `run_tts.sh` rather than as whatever the browser derives from the URL.
   send(res, 200, "text/plain; charset=utf-8", TEXT_CSP, read.content + suffix, {
-    "Content-Disposition": `inline; filename="${encodeURIComponent(key.split("/").at(-1) ?? key)}"`,
+    "Content-Disposition": `${url.searchParams.has("download") ? "attachment" : "inline"}; filename="${encodeURIComponent(key.split("/").at(-1) ?? key)}"`,
   });
 }
 

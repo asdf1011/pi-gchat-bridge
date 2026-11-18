@@ -1211,3 +1211,65 @@ test("the player claims its own keys, so paging is not lost to them", async () =
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("?download on a text artifact is an attachment, not another inline view", async () => {
+  // The drawer's ⤓ saves the file. A text artifact was always served inline, which is
+  // right for the frame and wrong for a download: the browser would show it rather than
+  // save it, and `run_tts.sh` would arrive named after whatever the URL derived.
+  const root = tempDir();
+  const harness = await serve(root, ["run_tts.sh"]);
+  try {
+    fs.writeFileSync(path.join(root, "run_tts.sh"), "#!/bin/bash\necho hi\n");
+    const plain = await fetch(`${harness.base}/c/1/run_tts.sh`);
+    assert.match(plain.headers.get("content-disposition") ?? "", /^inline;/);
+
+    const saved = await fetch(`${harness.base}/c/1/run_tts.sh?download`);
+    assert.equal(saved.status, 200);
+    assert.match(saved.headers.get("content-disposition") ?? "", /^attachment; filename="run_tts\.sh"$/);
+    // The bytes are still the file's own, so a save is byte-identical to the artifact.
+    assert.equal(await saved.text(), "#!/bin/bash\necho hi\n");
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("?download marks audio as an attachment, and still honours a range", async () => {
+  // A download must not be answered as a media stream: `attachment` is what makes the
+  // browser save instead of opening its player. Range support is unchanged, so a
+  // resumed download still works.
+  const root = tempDir();
+  const harness = await serve(root, ["story.wav"]);
+  try {
+    const bytes = wavBytes(64);
+    fs.writeFileSync(path.join(root, "story.wav"), bytes);
+    const saved = await fetch(`${harness.base}/c/1/story.wav?raw&download`);
+    assert.equal(saved.status, 200);
+    assert.match(saved.headers.get("content-disposition") ?? "", /^attachment; filename="story\.wav"$/);
+    assert.equal(saved.headers.get("accept-ranges"), "bytes");
+    assert.deepEqual(Buffer.from(await saved.arrayBuffer()), bytes);
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the download button appears and hides with the others, and saves the raw file", async () => {
+  // A header button with no wiring is invisible in review and obvious on screen, so this
+  // asserts the four things that make it work: it exists, it follows the same show/hide
+  // as ↗, it knows which key is open, and it points at the *raw* bytes as an attachment
+  // rather than at the document the frame is showing.
+  const page = fs.readFileSync(path.join(projectRoot, "src/web/page.html"), "utf8");
+  assert.match(page, /<button id="artifacts-download"[^>]*hidden>/, page);
+  assert.match(page, /id="artifacts-download"[^>]*aria-label="Download this file"/);
+
+  const client = fs.readFileSync(path.join(projectRoot, "src/web/artifacts.js"), "utf8");
+  // Shown and hidden exactly where ↗ is, so the two can never disagree about whether
+  // there is a document open.
+  assert.match(client, /artifactsNewTab\.hidden = false;\s*\n\s*artifactsDownload\.hidden = false;/);
+  assert.match(client, /artifactsNewTab\.hidden = true;\s*\n\s*artifactsDownload\.hidden = true;/);
+  // The key is recorded on open and on a step, which are the two ways a document changes.
+  assert.equal((client.match(/artifactsDownload\.dataset\.key = /g) ?? []).length, 2);
+  // `?raw&download`: the file's own bytes, as an attachment.
+  assert.match(client, /'\?raw&download'/);
+});

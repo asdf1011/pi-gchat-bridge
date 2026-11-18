@@ -173,6 +173,7 @@ function setCurrentFrame(frame) {
 }
 const artifactsHint = document.getElementById('artifact-hint');
 const artifactsNewTab = document.getElementById('artifacts-newtab');
+const artifactsDownload = document.getElementById('artifacts-download');
 const artifactsBack = document.getElementById('artifacts-back');
 const artifactsTitle = document.getElementById('artifacts-title');
 
@@ -244,6 +245,19 @@ function rawArtifactUrl(key) {
  */
 function audioRawUrl(key) {
   return artifactUrl(key, false, false, false, true) + '?raw';
+}
+
+/**
+ * Where the file's own bytes live *as an attachment* — what ⤓ saves.
+ *
+ * `?raw&download` for every kind, because the raw URL is the one that answers with the
+ * file's real bytes and real content type: a rendered Markdown page or a player
+ * document are for reading, and neither is what "download this file" means. The
+ * artifact origin turns `download` into `Content-Disposition: attachment`, so the
+ * browser saves rather than opening a third view of what is already on screen.
+ */
+function downloadArtifactUrl(key) {
+  return artifactsBase + '/c/' + current + '/' + key.split('/').map(encodeURIComponent).join('/') + '?raw&download';
 }
 
 /**
@@ -555,6 +569,7 @@ function showArtifact(key, markdown, push = true, image = false, from = 'right',
   artifactsTitle.title = key;
   artifactsBack.hidden = false;
   artifactsNewTab.hidden = false;
+  artifactsDownload.hidden = false;
   // A transcript entry per document, so the browser's own back gesture means what it
   // looks like it means: close the document, show the list.
   try {
@@ -588,6 +603,7 @@ function showArtifact(key, markdown, push = true, image = false, from = 'right',
   artifactsNewTab.dataset.image = image ? '1' : '';
   artifactsNewTab.dataset.pdf = pdf ? '1' : '';
   artifactsNewTab.dataset.audio = audio ? '1' : '';
+  artifactsDownload.dataset.key = key;
 }
 
 /**
@@ -617,6 +633,7 @@ function applyListState() {
   artifactsTitle.removeAttribute('title');
   artifactsBack.hidden = true;
   artifactsNewTab.hidden = true;
+  artifactsDownload.hidden = true;
   // The frames stay loaded and out of the strip; only the *current* one is shown, so
   // returning to the list is a matter of hiding the strip rather than unmounting a
   // document that going back would have to reload.
@@ -1167,6 +1184,7 @@ function artefactsAfterStep(entry) {
   artifactsNewTab.dataset.image = entry.image ? '1' : '';
   artifactsNewTab.dataset.pdf = entry.pdf ? '1' : '';
   artifactsNewTab.dataset.audio = entry.audio ? '1' : '';
+  artifactsDownload.dataset.key = entry.key;
   closeCommentBar();
   closeThread();
 }
@@ -1199,6 +1217,23 @@ artifactsNewTab.onclick = () => {
     );
   }
 };
+artifactsDownload.onclick = () => {
+  const key = artifactsDownload.dataset.key;
+  if (!key) return;
+  // A hidden anchor rather than `location.href`: an anchor carries `download`, so the
+  // save is named after the artifact instead of after the URL's last segment — and the
+  // page itself is not navigated away from, which `location.href` would do.
+  const link = document.createElement('a');
+  link.href = downloadArtifactUrl(key);
+  link.download = baseName(key);
+  link.rel = 'noopener';
+  // Some browsers only honour `download` on an anchor that is in the document.
+  link.hidden = true;
+  document.body.append(link);
+  link.click();
+  link.remove();
+};
+
 document.addEventListener('keydown', (event) => {
   if (!artifactsOpen) return;
   // Left and right walk the artifacts — the keyboard's version of the swipe, and
