@@ -312,8 +312,14 @@
   #index-search:hover { background: #8884; }
   #index-search svg { display: block; }
   #index-list { list-style: none; margin: 0 auto; padding: 0; }
+  /* A row is a button, not a document: clicking one navigates, so it must not also select
+     the word under the finger. It did, and on a phone that raised the system UI's "look up"
+     bar over the page on every tap of a conversation — information the reader never asked
+     for, appearing over the thing they had just asked for. `user-select: none` on the rows
+     only: the bar above (heading, search) is still ordinary text somebody may want to copy. */
   #index-list li { padding: .6rem .75rem; border-bottom: 1px solid #8882; cursor: pointer;
-    display: flex; gap: .75rem; align-items: baseline; }
+    display: flex; gap: .75rem; align-items: baseline;
+    user-select: none; -webkit-user-select: none; }
   #index-list li:hover { background: #8881; }
   #index-list li .who { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* A date, not a full timestamp: at phone width "Nov 2, 7:33 AM" is wide enough
