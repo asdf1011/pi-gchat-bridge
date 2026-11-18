@@ -637,7 +637,8 @@
      translateX(-100%) moves exactly one document along. Every pane is `flex: none`
      at 100%: a flex-grown pane would be sized by the *track*, and the two would
      share it instead of lining up. */
-  #artifact-track { display: flex; align-items: stretch; height: 100%;
+  /* `position: relative` so a busy spinner can be placed against the strip's middle slot. */
+  #artifact-track { position: relative; display: flex; align-items: stretch; height: 100%;
     --doc-shift: 100%;
     transform: translateX(var(--doc-shift)); transition: transform 180ms ease;
     will-change: transform; }
@@ -653,6 +654,27 @@
   /* A frame that is not part of the current three is taken out of the strip
      entirely, so it can keep its loaded document off-screen without occupying a slot. */
   #artifact-track > .artifact-frame[hidden] { display: none; }
+  /* A document on its way. A frame that has not painted yet is a blank pane, which is
+     indistinguishable from a document with nothing in it — and a PDF page can take a second
+     to render, so the drawer looked broken rather than busy.
+     
+     Positioned against the strip's middle slot and sized to one pane, because the frame it
+     describes is a flex item the strip slides around; absolute positioning inside the frame
+     is impossible (it is another document), and a wrapper would change the swipe's layout.
+     Shown only after a delay — see `showBusy` in `artifacts.js` — so a document that loads
+     in 40 ms never flashes one. */
+  .artifact-busy { position: absolute; top: 0; bottom: 0; z-index: 2;
+    left: 0; width: 100%; display: flex; align-items: center; justify-content: center;
+    pointer-events: none; background: Canvas; color-scheme: light dark; }
+  .artifact-busy[hidden] { display: none; }
+  .artifact-busy::after { content: ""; width: 2rem; height: 2rem; border-radius: 50%;
+    border: 3px solid #8884; border-top-color: #888e;
+    animation: artifact-spin .8s linear infinite; }
+  @keyframes artifact-spin { to { transform: rotate(360deg); } }
+  /* A spinner is motion for its own sake; ask for less and get a static ring instead. */
+  @media (prefers-reduced-motion: reduce) {
+    .artifact-busy::after { animation: none; border-top-color: #8884; }
+  }
   /* An image is framed as itself, and an image document is transparent where the
      picture is — so what shows around it is this element's background. The default is
      white, which is a white slab inside a dark drawer. `Canvas` is the theme's own

@@ -97,8 +97,13 @@ function frameFor(key, markdown, image, url, pdf = false) {
   // re-fetched, so the pool has to be positional rather than shuffled between
   // containers.
   artifactsTrack.append(frame);
-  loadFrameIn(frame, url);
+  // The listener first. An iframe appended with no `src` fires `load` for `about:blank`,
+  // and a listener bound after `loadFrameIn` missed it — but the spinner's timer, set by
+  // `loadFrameIn`, was cleared by nothing and then settled by that same stray `load` when
+  // the real document was still on its way. Binding first lets `settleBusy` see it and
+  // ignore it correctly (see the `src` guard there).
   watchFrameLoads(frame);
+  loadFrameIn(frame, url);
   framesByKey.set(key, frame);
   // Oldest first: the cap trims documents nobody has looked at recently.
   if (framesByKey.size > FRAME_POOL_LIMIT) {
@@ -401,6 +406,10 @@ let frameLoadsSeen = 0;
  */
 function watchFrameLoads(frame) {
   frame.addEventListener('load', () => {
+    // The document arrived, whatever it was: the spinner has done its job. Before the
+    // `hidden` early-return below, because a parked frame that finishes loading is still
+    // worth settling — its spinner would otherwise be waiting the next time it is current.
+    settleBusy(frame);
     // A frame in the park is not on screen, so a load there is not a navigation the
     // reader made — it is a document finishing its initial fetch, or a reload this
     // page started for comments. Counting it would close the drawer over a document
@@ -424,11 +433,76 @@ function watchFrameLoads(frame) {
     frameLoadsCaused = frameLoadsSeen;
     if (artifactsOpen && artifactsPanel.classList.contains('showing-doc')) applyListState();
   });
+  // A navigation that fails still fires `load` in some browsers and not others; this is the
+  // belt. A spinner left turning over a document that will never arrive is worse than no
+  // spinner at all, because it says "wait" for ever.
+  frame.addEventListener('error', () => settleBusy(frame));
 }
 
-/** Point a frame at a URL, counting the load as ours. */
+/**
+ * How long a load may take before the drawer admits it is waiting.
+ *
+ * Half a second is the threshold a person notices without being told twice: below it the
+ * whole thing reads as instant, and a spinner that appears at 200 ms is a flicker that says
+ * "slow" about a document that was not. A rendered PDF page is the case that needs it — the
+ * server rasterises before it answers — and the spinner covers the gap between asking and
+ * the first paint.
+ */
+const BUSY_DELAY_MS = 500;
+
+/**
+ * The pane-shaped spinner for a frame, created on first use.
+ *
+ * A sibling of the frame rather than a child: the frame is another document, and the spinner
+ * has to sit *over* it. Absolute inside the track, sized to one pane, so it lands in the
+ * middle slot without joining the flex strip.
+ */
+function busyFor(frame) {
+  let busy = frame.__busy;
+  if (busy && busy.isConnected) return busy;
+  busy = document.createElement('div');
+  busy.className = 'artifact-busy';
+  busy.hidden = true;
+  // The `after` pseudo-element is the ring; nothing here is read out, because the drawer's
+  // own machinery already says what is being loaded and a second announcement is noise.
+  busy.setAttribute('aria-hidden', 'true');
+  artifactsTrack.append(busy);
+  frame.__busy = busy;
+  return busy;
+}
+
+/** Take the spinner down, and cancel the timer that would have shown it. */
+function settleBusy(frame) {
+  const busy = frame.__busy;
+  if (!busy) return;
+  // `about:blank` fires `load` the moment a frame is appended, before any document has been
+  // asked for. That is not the load the spinner is waiting on, so it must not cancel it —
+  // this is the difference between "the document arrived" and "the frame exists".
+  if (!frame.getAttribute('src') || frame.getAttribute('src') === 'about:blank') return;
+  clearTimeout(busy.__timer);
+  busy.__timer = undefined;
+  busy.hidden = true;
+}
+
+/**
+ * Point a frame at a URL, counting the load as ours.
+ *
+ * Also the one place a spinner is started: every document load goes through here — opening a
+ * file, turning a PDF page, reloading after a comment — so there is one hook to keep rather
+ * than three. A load that finishes inside `BUSY_DELAY_MS` never shows one.
+ */
 function loadFrameIn(frame, url) {
   frameLoadsCaused += 1;
+  const busy = busyFor(frame);
+  clearTimeout(busy.__timer);
+  // Only worth showing for the document the reader is looking at. A neighbour loaded ahead
+  // of a swipe, or a parked frame reloaded after a comment, is not something anyone is
+  // waiting on, and a spinner over it would appear in the strip when it became current.
+  if (!frame.hidden || frame === currentFrame) {
+    busy.__timer = setTimeout(() => {
+      busy.hidden = false;
+    }, BUSY_DELAY_MS);
+  }
   frame.src = url;
 }
 

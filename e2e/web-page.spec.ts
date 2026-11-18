@@ -3236,3 +3236,64 @@ test("artifacts: a selected region stays on the picture while the comment is wri
   await page.locator("#comment-cancel").click();
   await expect.poll(() => boxes().then((b) => b.count)).toBe(0);
 });
+
+test("artifacts: a slow document shows a spinner, a fast one does not", async ({ page }) => {
+  // A rendered PDF page takes a moment — the server rasterises before answering — and an
+  // iframe that has not painted is a blank pane, indistinguishable from a document with
+  // nothing in it. So the drawer says it is waiting, but only once waiting is what it is:
+  // a spinner at 200 ms is a flicker that calls a fast document slow.
+  await stubApi(page);
+  await page.route("**/api/environment", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ artifactsBaseUrl: "https://artifacts.example", pageVersion: "t" }),
+    }),
+  );
+  await page.route("**/api/c/*/artifacts", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([{ key: "pi/out/slow.pdf", wrote: 1, edited: 0, markdown: false, image: true, pdf: true }]),
+    }),
+  );
+  await page.route("**/api/c/*/comments", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
+  );
+  // Hold the document for 900 ms: long enough to cross the half-second threshold.
+  await page.route("https://artifacts.example/**", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    await route.fulfill({ status: 200, contentType: "text/html", body: "<body>page 1</body>" });
+  });
+
+  await page.goto("/7/");
+  await page.locator("#artifacts-toggle").click();
+  await page.locator("#artifact-list li").first().click();
+
+  const spinners = (): Promise<number> =>
+    page.evaluate(() => document.querySelectorAll(".artifact-busy:not([hidden])").length);
+
+  // The clock starts when the *frame* is asked for the document, not when the row is
+  // clicked: opening the drawer and sliding the document in are their own work, and timing
+  // from the click made this test depend on how long those took.
+  await expect
+    .poll(() => page.evaluate(() => document.querySelectorAll(".artifact-frame").length))
+    .toBe(1);
+  // Well inside the threshold: nothing yet, because a document that loads in 40 ms must not
+  // flash a spinner.
+  await page.waitForTimeout(120);
+  expect(await spinners()).toBe(0);
+
+  // Past the threshold it is up, and it fills the pane rather than sitting in a corner.
+  await expect.poll(spinners, { timeout: 2000 }).toBe(1);
+  const covers = await page.evaluate(() => {
+    const el = document.querySelector(".artifact-busy:not([hidden])")!;
+    const r = el.getBoundingClientRect();
+    return { width: Math.round(r.width), ring: getComputedStyle(el, "::after").animationName };
+  });
+  expect(covers.width).toBeGreaterThan(200);
+  expect(covers.ring).toBe("artifact-spin");
+
+  // And it goes when the document arrives — a spinner left turning says "wait" for ever.
+  await expect.poll(spinners, { timeout: 4000 }).toBe(0);
+});
