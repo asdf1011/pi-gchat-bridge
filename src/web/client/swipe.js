@@ -1,3 +1,7 @@
+// Who owns a horizontal drag. Included here as well as in `region.js` — both are separate
+// script blocks in the image document — and guarded there so the state survives both.
+/* @@include:gesture.js@@ */
+
   // --- Swiping between artifacts --------------------------------------------
   //
   // Two gestures share this surface, and getting the test wrong is what makes a
@@ -32,37 +36,22 @@
      * and only it knows how much of the picture is left to pan. So it reports both, and
      * this script simply obeys.
      */
-    var pageLocked = false;
-    /** Which way the document still has somewhere to go. */
-    var pannable = { left: false, right: false };
-
     /**
-     * Whether the document owns a drag whose finger moves dx pixels horizontally.
+     * Whether the document owns a drag whose finger moves `dx` pixels horizontally.
      *
-     * Armed means it owns every horizontal drag: the reader is drawing a rectangle, and a
-     * rectangle has no direction. Zoomed means it owns the drag only while the picture has
-     * somewhere to go that way — a finger moving right scrolls the picture's content right,
-     * which needs content to the left (pannable.left). When there is none the picture is
-     * pinned to that edge and the gesture is the drawer's: that is the whole of the rule,
-     * page only when we cannot drag any further.
+     * Asked, not held. This script used to keep its own copy of the answer — `pageLocked`
+     * and `sides`, refreshed by a message from its sibling — which meant the same fact in
+     * two places, and the copy was only refreshed when something happened to publish it. On
+     * load, and after a window resize, the two disagreed until a gesture settled it.
+     *
+     * `gestureOwner` is in the same scope, so this is a function call. In documents with no
+     * zoom and no rectangle (the source and rendered views) the object is absent and nothing
+     * there can own a horizontal drag, which is what that question returns.
      */
     function owned(dx) {
-      if (!pageLocked) return false;
-      // Armed: no direction, the rectangle owns it.
-      if (pannable.armed) return true;
-      return dx > 0 ? pannable.left : pannable.right;
+      if (typeof gestureOwner === "undefined") return false;
+      return gestureOwner.owns(dx);
     }
-
-    window.addEventListener("message", function (event) {
-      var data = event.data;
-      if (!data) return;
-      if (data.t !== "pi-artifact-page-locked") return;
-      // Only this document's own report. A lock from anywhere else would be about another
-      // frame, and obeying it would stop paging for no reason a reader could see.
-      if (event.source !== window) return;
-      pageLocked = data.locked === true;
-      pannable = data.sides || { left: false, right: false };
-    });
 
     function pointOf(event) {
       // changedTouches is where a touch really is; clientX is 0 on some browsers

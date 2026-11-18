@@ -504,10 +504,6 @@ function showArtifact(key, markdown, push = true, image = false, from = 'right',
  * which is the whole point of the pool.
  */
 function showKey(key, markdown, image, pdf) {
-  // A new document has not claimed anything yet. The previous frame's lock is about a
-  // picture that is no longer on screen, and carrying it over would leave the drawer unable
-  // to page away from a document nobody is dragging.
-  pageLockedByDocument = false;
   const url = artifactUrl(key, markdown, image, pdf);
   const frame = frameFor(key, markdown, image, url, pdf);
   // The frame is in the strip before it is made current, so it is already laid out
@@ -923,22 +919,9 @@ function hideNeighbour() {
  * loaded yet, because a document that slides away to show blank space is a promise
  * with nothing behind it.
  */
-/**
- * Whether the document in the middle has claimed horizontal drags for itself.
- *
- * A picture being commented on (armed) or panned (zoomed in) owns horizontal movement, and
- * paging must not start underneath it. The document reports this — see
- * `reportPageLock` in `artifacts-server.ts` — because only it knows whether a drag has
- * anywhere left to go.
- */
-let pageLockedByDocument = false;
 
 function dragArtifactPane(dx) {
   if (!artifactsPanel.classList.contains('showing-doc')) return;
-  // Belt and braces with the document's own gate: if a stale `drag` message arrives after
-  // the lock was set, the strip must still not move. The document stops sending these,
-  // but the ordering of two messages is not something to depend on.
-  if (pageLockedByDocument) return;
   const { previous, next } = artifactAt();
   // Which way is this going? Decided from the first few pixels and kept, so a
   // gesture that wobbles does not reload the neighbour frame mid-drag.

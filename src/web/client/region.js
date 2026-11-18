@@ -1,3 +1,7 @@
+// The gesture owner: who gets a horizontal drag. Loaded before this script, in the same
+// scope, so this one *sets* it and `swipe.js` *asks* it — one answer, no copies.
+/* @@include:gesture.js@@ */
+
   // --- Choosing part of a picture ------------------------------------------
   //
   // A picture has no lines to select, so the commentable unit is a rectangle dragged
@@ -107,37 +111,29 @@
      * is against the edge, the same drag pages. That is why this is not simply "armed or
      * zoomed" — a zoomed picture scrolled to its left edge has nothing left to give.
      */
-    /** Which way the picture still has somewhere to go, and whether a box is being drawn. */
-    var sides = { left: false, right: false, armed: false };
-
-    function reportPageLock() {
-      var locked = armed;
+        /**
+     * Publish who owns a horizontal drag, into the one place that answers for it.
+     *
+     * This script is the only party that can answer: it knows whether a rectangle is being
+     * drawn, and only it knows how much of a zoomed picture is left to pan. So it *sets*;
+     * `swipe.js` asks `gestureOwner.owns()`, and holds no copy that could go stale.
+     *
+     * Called whenever the answer changes — arming, zooming, and panning to an edge — which
+     * includes the cases that were previously never published at all (a picture that loads
+     * already zoomed, a window that resized). Those left the drawer paging under a
+     * rectangle until the first gesture settled it.
+     */
+    function reportGesture() {
       var scroller = document.scrollingElement;
-      if (!locked && zoom > 1 && scroller) {
-        var maxLeft = scroller.scrollWidth - scroller.clientWidth;
-        // Direction matters, and this is the whole rule: "page only when we cannot drag any
-        // further" means the picture keeps the gesture while there is room to move *that
-        // way*. A picture scrolled hard against its right edge has nowhere to go right, so
-        // dragging right is the drawer's — while dragging left still pans.
-        //
-        // The script reports both sides so the swipe can pick the one the finger is going.
-        sides = {
-          left: scroller.scrollLeft > 1,
-          right: scroller.scrollLeft < maxLeft - 1,
-          armed: false
-        };
-        locked = sides.left || sides.right;
-      } else {
-        // Zoomed out (or unarmed): nothing to pan, so the drawer owns horizontal drags
-        // unless a rectangle is being drawn.
-        sides = { left: false, right: false, armed: armed };
-      }
-      // Both ways round. window reaches the swipe script, a sibling IIFE in this same
-      // document, so a message is how the two talk and parent alone would skip it. parent
-      // reaches the drawer, which stops the strip moving even if a stale drag message is
-      // already in flight.
-      window.postMessage({ t: "pi-artifact-page-locked", locked: locked, sides: sides }, "*");
-      parent.postMessage({ t: "pi-artifact-page-locked", locked: locked, sides: sides }, "*");
+      var zoomed = zoom > 1 && scroller !== null;
+      // A picture pinned to its right edge has nowhere further to go right, so a finger
+      // heading right is the drawer's; one heading left still pans.
+      var maxLeft = zoomed ? scroller.scrollWidth - scroller.clientWidth : 0;
+      gestureOwner.report({
+        armed: armed,
+        panLeft: zoomed && scroller.scrollLeft > 1,
+        panRight: zoomed && scroller.scrollLeft < maxLeft - 1
+      });
     }
 
     /**
@@ -234,7 +230,7 @@
       }
       // After a layout, not during one: the lock depends on scrollWidth, which is only
       // right once the browser has laid the new stage size out.
-      requestAnimationFrame(reportPageLock);
+      requestAnimationFrame(reportGesture);
     }
 
     // The fit is measured once the picture has a size of its own, and re-measured when the
@@ -242,6 +238,11 @@
     function remeasure() {
       fitted = null;
       if (zoom === 1) measureFit();
+      // A resize can change what a zoomed picture has room to pan, so the answer has to be
+      // republished. It used to be published only when something happened to call it, which
+      // meant a picture that loaded already zoomed, or a window that resized, left the two
+      // scripts disagreeing until a gesture settled it.
+      reportGesture();
     }
     if (image.complete) remeasure();
     else image.addEventListener("load", remeasure, { once: true });
@@ -315,7 +316,7 @@
         event.preventDefault();
         // Reaching an edge is what hands the gesture to the drawer, so the answer changes
         // mid-gesture and has to be re-reported rather than decided at the start.
-        reportPageLock();
+        reportGesture();
       }
     });
 
@@ -389,7 +390,7 @@
       pinch = null;
       pan = null;
       // Armed, a horizontal drag draws a rectangle: the drawer must not page underneath it.
-      reportPageLock();
+      reportGesture();
     });
 
     // The whole document, not just the picture: once the button has been pressed the reader

@@ -6,8 +6,12 @@ import zlib from "node:zlib";
 import os from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
+import { fileURLToPath } from "node:url";
 
 import { RENDER_SCRIPT, startArtifactsServer } from "../src/web/artifacts-server.js";
+
+/** The repository root, for the tests that load a client script as a file. */
+const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 import { canonicalPath, type ArtifactFile } from "../src/durable/artifacts.js";
 import type { SessionHost } from "../src/session-host/api.js";
 
@@ -941,31 +945,46 @@ test("the picture document never asks the browser to zoom it", async () => {
   }
 });
 
-test("a zoomed picture keeps the drag until it has none left in that direction", async () => {
-  // The reader's rule, and the whole point of the page-lock message: page to the next
-  // artifact only when the picture cannot be dragged any further *that way*. The document
-  // reports which sides still have somewhere to go; the swipe script only pages when the
-  // direction the finger is travelling is not one of them.
+test("a zoomed picture keeps the drag until it has none left in that direction", () => {
+  // The reader's rule: page to the next artifact only when the picture cannot be dragged any
+  // further *that way*. It is the whole reason `gesture.js` exists, and it is arithmetic —
+  // so it is tested as arithmetic, by running the real file.
   //
-  // Driven through the real script text rather than the arithmetic alone, because the bug
-  // this guards is the two scripts disagreeing about direction — `owned()` takes the
-  // finger's dx, and "left" means content to the left exists.
-  const root = tempDir();
-  const harness = await serve(root, ["shot.png"]);
-  try {
-    fs.writeFileSync(path.join(root, "shot.png"), PNG_BYTES);
-    const html = await (await fetch(`${harness.base}/c/1/shot.png`)).text();
-    // The report carries the sides, and the swipe asks about the direction it is going.
-    assert.match(html, /left: scroller\.scrollLeft > 1/);
-    assert.match(html, /right: scroller\.scrollLeft < maxLeft - 1/);
-    assert.ok(html.includes("function owned(dx)"), "the swipe asks per direction");
-    assert.match(html, /return dx > 0 \? pannable\.left : pannable\.right/);
-    // And armed means every horizontal drag is the rectangle's, with no direction at all.
-    assert.match(html, /if \(pannable\.armed\) return true/);
-  } finally {
-    await harness.close();
-    fs.rmSync(root, { recursive: true, force: true });
-  }
+  // This used to regex the served script for `dx > 0 ? pannable.left : pannable.right`, which
+  // passed as long as that line was spelled that way and said nothing about what it did. The
+  // logic is one small object now, so it can be loaded and asked.
+  const source = fs.readFileSync(path.join(projectRoot, "src/web/client/gesture.js"), "utf8");
+  const owner = new Function(`${source}; return gestureOwner;`)() as {
+    report(next: { armed?: boolean; panLeft?: boolean; panRight?: boolean }): void;
+    owns(dx: number): boolean;
+  };
+
+  // At fit: nothing to pan, so the drawer owns every horizontal drag.
+  owner.report({});
+  assert.equal(owner.owns(-40), false, "a leftward drag pages when there is nothing to pan");
+  assert.equal(owner.owns(40), false, "and so does a rightward one");
+
+  // Zoomed, in the middle: the picture pans both ways, so the drawer gets nothing.
+  owner.report({ panLeft: true, panRight: true });
+  assert.equal(owner.owns(-40), true);
+  assert.equal(owner.owns(40), true);
+
+  // Against the left edge: a finger moving *right* has content to the left and pans; one
+  // moving left has nowhere to go, so that direction is the drawer's.
+  owner.report({ panLeft: true, panRight: false });
+  assert.equal(owner.owns(40), true, "rightward still pans, there is content to the left");
+  assert.equal(owner.owns(-40), false, "leftward pages, the picture is pinned to that edge");
+
+  // Against the right edge, the mirror image.
+  owner.report({ panLeft: false, panRight: true });
+  assert.equal(owner.owns(-40), true);
+  assert.equal(owner.owns(40), false);
+
+  // Armed: a rectangle has no direction, so it owns every horizontal drag whatever the pan
+  // state says. This is the case that matters most — it is the reader's finger mid-selection.
+  owner.report({ armed: true, panLeft: false, panRight: false });
+  assert.equal(owner.owns(-40), true);
+  assert.equal(owner.owns(40), true);
 });
 
 test("a zoomed picture is pinned to its fitted size, so the scroll extent is right", async () => {
