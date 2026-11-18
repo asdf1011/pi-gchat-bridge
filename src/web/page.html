@@ -683,7 +683,15 @@
      when it is pressed is what the comment is about; nothing selected means the file
      itself. Hidden while the composer is open, because the composer is the same action
      continued and two of them would compete for the same corner. */
-  #comment-fab { position: absolute; right: .9rem; bottom: .9rem; z-index: 4;
+  /* Clear of the bottom, not tucked into it.
+     
+     It sat at `.9rem` and was reported missing: selecting text on a phone raises the
+     browser's own bar along the bottom of the screen — Google's search strip, or Safari's
+     URL bar — which draws over this corner and hid the button exactly when it was wanted.
+     The inset is the home-indicator area on an iPhone, which the bar sits below; four rems
+     clears both, and stays out of the way on a desktop where neither exists. */
+  #comment-fab { position: absolute; right: .9rem;
+    bottom: calc(4.5rem + env(safe-area-inset-bottom, 0px)); z-index: 4;
     width: 2.75rem; height: 2.75rem; padding: 0; border-radius: 50%;
     display: flex; align-items: center; justify-content: center;
     border: 1px solid #8886; background: var(--bubble-me); color: inherit;
