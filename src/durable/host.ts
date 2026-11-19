@@ -43,7 +43,6 @@ import { getSupportedThinkingLevels } from "@earendil-works/pi-ai/models";
 import { getAgentDir, ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 import { logger } from "../logger.js";
-import { registerPackageProviders } from "./package-providers.js";
 import { modelKey } from "../shared/model-key.js";
 import type {
   AdapterEntry,
@@ -203,11 +202,6 @@ export class BridgeHost {
   static async open(options: BridgeHostOptions): Promise<BridgeHost> {
     const context = options.context ?? BACKGROUND_CONTEXT;
     const modelRuntime = options.modelRuntime ?? (await ModelRuntime.create());
-    // OAuth backends installed as pi packages (`pi install npm:pi-antigravity`)
-    // register their provider from an extension, which `ModelRuntime.create()`
-    // never runs. Without this the models exist for the TUI and not for `/model`
-    // here. Only provider registrations are taken; see package-providers.ts.
-    await registerPackageProviders(modelRuntime, { cwd: options.cwd ?? process.cwd() });
 
     // Before the harness, and before the Pub/Sub subscription: a second bridge
     // on the same database would answer the same Chat messages from a fresh
