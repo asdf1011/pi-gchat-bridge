@@ -1025,6 +1025,77 @@ async function serveApp(
   send(res, 200, appFileType(file), appCsp(frameAncestorsFor(options.webOrigin)), body, APP_HEADERS);
 }
 
+/** The largest report the bridge will store. Big enough for a full log, small enough to be free. */
+const MAX_REPORT_BYTES = 256 * 1024;
+
+/**
+ * Store a report an app sends about itself.
+ *
+ * The only write this origin accepts, and it exists because the interesting failures happen
+ * in a browser the developer cannot open: a GPU abort leaves its evidence in a console that
+ * nobody is watching. An app that can say "here is what happened" turns that into a file
+ * somebody can read.
+ *
+ * Deliberately narrow, because this origin is otherwise GET-only by design:
+ *
+ * - The **filename is generated here**, never taken from the request, so there is no path to
+ *   traverse even in principle.
+ * - The **body is capped** and refused rather than truncated, so a runaway client cannot fill
+ *   the disk one request at a time.
+ * - The report lands **inside the app's own directory**, under `reports/`, which is where the
+ *   person debugging it is already looking.
+ * - Only a directory that is already an app can be written to, so the marker file is still
+ *   the thing that grants the capability.
+ *
+ * It answers 204 with no body: there is nothing useful to say back, and an app posting
+ * diagnostics should not have to parse a response.
+ */
+async function receiveReport(
+  options: ArtifactsServerOptions,
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  conversationId: number,
+  appName: string,
+): Promise<void> {
+  const conversationDir = options.conversationDirFor?.(conversationId);
+  if (conversationDir === undefined) {
+    send(res, 404, "text/plain; charset=utf-8", TEXT_CSP, `no such conversation: ${conversationId}`);
+    return;
+  }
+  const appDir = appDirOf(conversationDir, appName);
+  if (appDir === undefined) {
+    send(res, 404, "text/plain; charset=utf-8", TEXT_CSP, `not an app: ${appName}`);
+    return;
+  }
+
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += (chunk as Buffer).length;
+    if (size > MAX_REPORT_BYTES) {
+      // Refused, not truncated: half a report is a report that lies.
+      send(res, 413, "text/plain; charset=utf-8", TEXT_CSP, `report larger than ${MAX_REPORT_BYTES} bytes`);
+      return;
+    }
+    chunks.push(chunk as Buffer);
+  }
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const name = `${stamp}-${randomBytes(3).toString("hex")}.json`;
+  const dir = path.join(appDir, "reports");
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, name), Buffer.concat(chunks));
+  } catch (error) {
+    logger.error(`[apps] report ${appName}: ${(error as Error).message}`);
+    send(res, 500, "text/plain; charset=utf-8", TEXT_CSP, "could not store the report");
+    return;
+  }
+  logger.info(`[apps] ${appName}: report stored as reports/${name} (${size} bytes)`);
+  res.writeHead(204, { ...BASE_HEADERS });
+  res.end();
+}
+
 /** One request. Split out so tests can drive it without a socket. */
 async function handle(
   options: ArtifactsServerOptions,
@@ -1038,6 +1109,15 @@ async function handle(
     send(res, 200, "text/plain; charset=utf-8", TEXT_CSP, "ok");
     return;
   }
+  // Apps may leave a report for whoever is debugging them; everything else here is read-only.
+  // Matched before the method check because that check refuses the one write this origin
+  // accepts.
+  const reportMatch = /^\/apps\/(\d+)\/([^/]+)\/report$/.exec(url.pathname);
+  if (reportMatch && req.method === "POST") {
+    await receiveReport(options, req, res, Number(reportMatch[1]), decodeURIComponent(reportMatch[2]));
+    return;
+  }
+
   if (req.method !== "GET" && req.method !== "HEAD") {
     send(res, 405, "text/plain; charset=utf-8", TEXT_CSP, "method not allowed", { Allow: "GET, HEAD" });
     return;

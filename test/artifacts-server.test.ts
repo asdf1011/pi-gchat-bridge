@@ -1475,3 +1475,75 @@ test("without a conversation directory, apps are explained rather than 404'd as 
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("an app can post a report, and only into its own directory", async () => {
+  // The only write this origin accepts. It exists so a failure in a browser nobody is
+  // watching can leave evidence behind, so the containment matters more here than anywhere.
+  const root = tempDir();
+  const conversationDir = path.join(root, "conversation", "1");
+  fs.mkdirSync(conversationDir, { recursive: true });
+  writeApp(conversationDir, "bench", { "index.html": "<!doctype html>" });
+
+  const harness = await serveWithApps(root, conversationDir);
+  try {
+    const post = await fetch(`${harness.base}/apps/1/bench/report`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: "diagnostics", adapter: "test" }),
+    });
+    assert.equal(post.status, 204);
+
+    // It landed inside the app, under reports/, with a name the server chose.
+    const dir = path.join(conversationDir, "bench", "reports");
+    const written = fs.readdirSync(dir);
+    assert.equal(written.length, 1);
+    assert.match(written[0]!, /\.json$/);
+    const stored = JSON.parse(fs.readFileSync(path.join(dir, written[0]!), "utf8")) as { kind: string };
+    assert.equal(stored.kind, "diagnostics");
+
+    // A directory that is not an app is not a place to write.
+    fs.mkdirSync(path.join(conversationDir, "plain"), { recursive: true });
+    assert.equal((await fetch(`${harness.base}/apps/1/plain/report`, { method: "POST", body: "{}" })).status, 404);
+
+    // Other methods stay refused: this origin is read-only apart from this one path.
+    assert.equal((await fetch(`${harness.base}/apps/1/bench/report`, { method: "PUT", body: "{}" })).status, 405);
+
+    // A traversal in the app segment cannot become a path.
+    assert.equal(
+      (await fetch(`${harness.base}/apps/1/..%2f..%2fetc/report`, { method: "POST", body: "{}" })).status,
+      404,
+    );
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a report larger than the cap is refused rather than truncated", async () => {
+  // Half a report is a report that lies about what happened.
+  const root = tempDir();
+  const conversationDir = path.join(root, "conversation", "1");
+  fs.mkdirSync(conversationDir, { recursive: true });
+  writeApp(conversationDir, "bench", { "index.html": "<!doctype html>" });
+
+  const harness = await serveWithApps(root, conversationDir);
+  try {
+    const atLimit = await fetch(`${harness.base}/apps/1/bench/report`, {
+      method: "POST",
+      body: "x".repeat(256 * 1024),
+    });
+    assert.equal(atLimit.status, 204);
+
+    const tooBig = await fetch(`${harness.base}/apps/1/bench/report`, {
+      method: "POST",
+      body: "x".repeat(256 * 1024 + 1),
+    });
+    assert.equal(tooBig.status, 413);
+
+    // Only the one that fit was stored.
+    assert.equal(fs.readdirSync(path.join(conversationDir, "bench", "reports")).length, 1);
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
