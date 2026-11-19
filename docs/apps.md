@@ -85,6 +85,30 @@ off plaintext origins and the local network.
 If that trade ever stops being acceptable, the fix is a hostname per app; the certificate
 cost of wildcard subdomains is noted in `CLOUDFLARE.md`.
 
+## Build output is not committed
+
+An app that needs compiled assets — a WASM bundle, a transpiled front end — ships the
+*source* that produces them and a script that does, with the output ignored:
+
+```
+pocket-tts-bench/
+  app.json  index.html  worker.js   source
+  build.sh                          produces the bundle
+  .gitignore                        audiocpp_cli.{js,wasm}
+```
+
+The app is in the conversation's repository, so committing a 6.6 MB derived binary would
+put weight with no information in it into that history, and pay it again on every rebuild.
+
+The page is responsible for noticing: it checks for its own bundle on load and says which
+command to run, rather than failing inside a worker with a 404 it cannot explain. Doing
+that check is a few lines and is the difference between a page that looks broken and one
+that looks unbuilt.
+
+The bridge deliberately has no opinion here — it serves files and knows nothing about how
+they were made. A general "the bridge builds apps" mechanism would be a build system with
+one user.
+
 ## Path containment
 
 `appRelativePath` and `resolveAppFile` are the only thing between a URL and the
