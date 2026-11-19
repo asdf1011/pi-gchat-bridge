@@ -1547,3 +1547,34 @@ test("a report larger than the cap is refused rather than truncated", async () =
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("app files carry an ETag, so no-cache can actually revalidate", async () => {
+  // Without a validator, `no-cache` degrades to heuristic freshness and a browser can serve a
+  // stale module — which is how a fixed script kept running from cache and threw at a line
+  // that no longer existed.
+  const root = tempDir();
+  const conversationDir = path.join(root, "conversation", "1");
+  fs.mkdirSync(conversationDir, { recursive: true });
+  writeApp(conversationDir, "bench", { "app.js": "export const a = 1;" });
+
+  const harness = await serveWithApps(root, conversationDir);
+  try {
+    const first = await fetch(`${harness.base}/apps/1/bench/app.js`);
+    assert.equal(first.status, 200);
+    const etag = first.headers.get("etag");
+    assert.ok(etag !== null && etag !== "", "an ETag is present");
+
+    // Revalidating with the same validator costs headers and nothing else.
+    const again = await fetch(`${harness.base}/apps/1/bench/app.js`, { headers: { "If-None-Match": etag! } });
+    assert.equal(again.status, 304);
+
+    // A changed file changes the validator, so a stale copy cannot be kept.
+    fs.writeFileSync(path.join(conversationDir, "bench", "app.js"), "export const a = 22222;");
+    const changed = await fetch(`${harness.base}/apps/1/bench/app.js`, { headers: { "If-None-Match": etag! } });
+    assert.equal(changed.status, 200);
+    assert.notEqual(changed.headers.get("etag"), etag);
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

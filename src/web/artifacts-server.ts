@@ -1028,7 +1028,9 @@ async function serveApp(
   }
 
   let body: Buffer;
+  let stat: fs.Stats;
   try {
+    stat = fs.statSync(file);
     body = fs.readFileSync(file);
   } catch (error) {
     logger.error(`[apps] ${appName}/${wanted}: ${(error as Error).message}`);
@@ -1036,7 +1038,23 @@ async function serveApp(
     return;
   }
 
-  send(res, 200, appFileType(file), appCsp(frameAncestorsFor(options.webOrigin)), body, APP_HEADERS);
+  // A validator, because `Cache-Control: no-cache` is not sufficient without one.
+  //
+  // `no-cache` means "revalidate before use", and revalidation needs something to revalidate
+  // *against*. With no `ETag` and no `Last-Modified`, browsers fall back to heuristic
+  // freshness and can serve a stale module — which is exactly what happened: a fixed
+  // `diagnostics.js` kept running from cache and threw at a line that no longer existed.
+  // Size plus mtime is free, changes whenever the file does, and makes the 304 cheap enough
+  // that a development loop can poll without caring.
+  const etag = `"${stat.size.toString(16)}-${Math.floor(stat.mtimeMs).toString(16)}"`;
+  const headers = { ...APP_HEADERS, ETag: etag };
+  if (req.headers["if-none-match"] === etag) {
+    res.writeHead(304, headers);
+    res.end();
+    return;
+  }
+
+  send(res, 200, appFileType(file), appCsp(frameAncestorsFor(options.webOrigin)), body, headers);
 }
 
 /** The largest report the bridge will store. Big enough for a full log, small enough to be free. */
