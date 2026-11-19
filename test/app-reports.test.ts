@@ -180,3 +180,36 @@ test("a handler that throws does not take the upload with it", async () => {
     cleanup();
   }
 });
+
+test("a report suppressed by the budget is announced by the next one, not lost", async () => {
+  // The budget exists to bound a runaway loop. It must not silently swallow the evidence
+  // somebody is waiting for — which is exactly what happened when six reports filled an hour
+  // and the four behind them went unannounced.
+  const { dir, appDir, cleanup } = scenario({ reports: { autoSubmit: true } });
+  try {
+    const spy = recordingSubmit();
+    let clock = 1_000_000;
+    const handle = makeReportHandler({
+      conversationDirFor: () => dir,
+      submit: spy.submit,
+      now: () => clock,
+      budget: { minGapMs: 0, maxPerHour: 2, maxBodyChars: 12_000 },
+    });
+
+    await handle(report(appDir, '{"n":1}', "r1.json"));
+    await handle(report(appDir, '{"n":2}', "r2.json"));
+    // Budget is full: these are stored but must not vanish.
+    await handle(report(appDir, '{"n":3}', "r3.json"));
+    await handle(report(appDir, '{"n":4}', "r4.json"));
+    assert.equal(spy.calls.length, 2, "the cap still holds");
+
+    // The hour moves on; the next submission must say what was missed.
+    clock += 61 * 60 * 1000;
+    await handle(report(appDir, '{"n":5}', "r5.json"));
+    assert.equal(spy.calls.length, 3);
+    assert.match(spy.calls[2]!.content, /2 further reports? arrived while the budget was full/);
+    assert.match(spy.calls[2]!.content, /reports\//);
+  } finally {
+    cleanup();
+  }
+});
