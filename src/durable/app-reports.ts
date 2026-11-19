@@ -40,6 +40,47 @@ export interface ReportArrival {
   bytes: number;
 }
 
+/**
+ * What a report *concluded*, as a string that ignores timing.
+ *
+ * Two runs of one configuration differ in every wall-clock figure and agree on everything
+ * that matters. Rounding the ratios to one decimal and dropping durations keeps that
+ * distinction: a repeat is recognised, while a run that got meaningfully faster or slower is
+ * not mistaken for one.
+ *
+ * `undefined` for a body that is not a diagnostics report — an app posting its own format is
+ * always worth a turn, because this function cannot claim to understand it.
+ */
+export function outcomeSignature(body: string): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return undefined;
+  }
+  if (parsed === null || typeof parsed !== "object") return undefined;
+  const report = parsed as {
+    requested?: { backend?: unknown; textLength?: unknown; chunkedMimi?: unknown };
+    runs?: { event?: unknown; backend?: unknown; failed?: unknown; rtf?: unknown }[];
+    errors?: { message?: unknown; reason?: unknown }[];
+  };
+  if (!Array.isArray(report.runs)) return undefined;
+  const runs = report.runs
+    .filter((run) => run.event === "run")
+    .map((run) => {
+      const rtf = typeof run.rtf === "number" && Number.isFinite(run.rtf) ? run.rtf.toFixed(1) : "-";
+      return `${String(run.backend)}:${run.failed ? "fail" : "ok"}:${rtf}`;
+    });
+  const errors = (report.errors ?? []).map((e) => String(e.message ?? e.reason ?? "")).sort();
+  return JSON.stringify([
+    report.requested?.backend ?? "",
+    report.requested?.textLength ?? "",
+    report.requested?.chunkedMimi ?? false,
+    runs,
+    errors,
+  ]);
+}
+
 /** The subset of `SessionHost.submit` this needs, so a test can pass a spy. */
 export type SubmitFn = (
   conversationId: number,
@@ -95,6 +136,11 @@ export function makeReportHandler(options: {
   // discarded: the budget is meant to bound a runaway loop, not to hide the evidence someone
   // is waiting for.
   const suppressed = new Map<string, number>();
+  // The outcome of the last report submitted for each app, so an identical repeat does not
+  // cost a turn. Two runs of the same configuration differ in timings but not in what they
+  // concluded, and a turn saying "the same thing happened again" is noise — the report is
+  // still stored either way.
+  const lastOutcome = new Map<string, string>();
 
   return async function handleReport(report: ReportArrival): Promise<void> {
     try {
@@ -131,6 +177,18 @@ export function makeReportHandler(options: {
         return;
       }
       const digest = createHash("sha256").update(body).digest("hex").slice(0, 16);
+
+      // Same shape of result as last time: stored, counted, not a turn.
+      const outcome = outcomeSignature(body);
+      if (outcome !== undefined && lastOutcome.get(key) === outcome) {
+        suppressed.set(key, (suppressed.get(key) ?? 0) + 1);
+        logger.info(
+          `[apps] ${report.appName}: report repeats the previous outcome; stored but not a turn ` +
+            `(${suppressed.get(key)} waiting)`,
+        );
+        return;
+      }
+      if (outcome !== undefined) lastOutcome.set(key, outcome);
       const truncated = body.length > budget.maxBodyChars;
       const shown = truncated
         ? `${body.slice(0, budget.maxBodyChars)}\n… truncated; the whole report is at ${report.file}`

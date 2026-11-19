@@ -213,3 +213,54 @@ test("a report suppressed by the budget is announced by the next one, not lost",
     cleanup();
   }
 });
+
+test("a repeat of the same outcome does not cost a turn, but a change does", async () => {
+  // Two runs of one configuration agree on everything except the clock. A turn saying "the
+  // same thing happened again" is noise; a run that actually changed is not.
+  const { dir, appDir, cleanup } = scenario({ reports: { autoSubmit: true } });
+  const reportBody = (rtf: number) =>
+    JSON.stringify({
+      requested: { backend: "webgpu", textLength: "long", chunkedMimi: true },
+      runs: [{ event: "run", backend: "webgpu", wallMs: 140040, audioSeconds: 20.56, rtf }],
+      errors: [],
+    });
+  try {
+    const spy = recordingSubmit();
+    const handle = makeReportHandler({
+      conversationDirFor: () => dir,
+      submit: spy.submit,
+      budget: { minGapMs: 0, maxPerHour: 99, maxBodyChars: 12_000 },
+    });
+
+    await handle(report(appDir, reportBody(6.811), "a.json"));
+    assert.equal(spy.calls.length, 1);
+    // Same conclusion, different numbers.
+    await handle(report(appDir, reportBody(6.763), "b.json"));
+    assert.equal(spy.calls.length, 1, "a repeat is not a second turn");
+
+    // A meaningfully different result is.
+    await handle(report(appDir, reportBody(1.2), "c.json"));
+    assert.equal(spy.calls.length, 2);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a report in an app's own format is always submitted", async () => {
+  // The signature only understands diagnostics reports; anything else might say something
+  // this code cannot judge, so it is never treated as a repeat.
+  const { dir, appDir, cleanup } = scenario({ reports: { autoSubmit: true } });
+  try {
+    const spy = recordingSubmit();
+    const handle = makeReportHandler({
+      conversationDirFor: () => dir,
+      submit: spy.submit,
+      budget: { minGapMs: 0, maxPerHour: 99, maxBodyChars: 12_000 },
+    });
+    await handle(report(appDir, '{"hello":"world"}', "a.json"));
+    await handle(report(appDir, '{"hello":"world"}', "b.json"));
+    assert.equal(spy.calls.length, 2);
+  } finally {
+    cleanup();
+  }
+});
