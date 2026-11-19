@@ -40,6 +40,18 @@ export interface AppManifest {
   name?: string;
   /** One line, shown in the index. */
   description?: string;
+  /**
+   * Whether a report posted by this app should start a conversation turn by itself.
+   *
+   * Off unless it says otherwise, and off is the correct default: a page that runs on load,
+   * reports, and is answered would otherwise loop on its own, spending turns nobody asked
+   * for. Turning it on is a statement that this app is a development loop rather than
+   * something a person uses.
+   */
+  reports?: {
+    /** Start a turn when a report arrives. Default false. */
+    autoSubmit?: boolean;
+  };
 }
 
 /** One app, as the index needs it. */
@@ -151,6 +163,24 @@ export function appsIn(conversationDir: string): AppEntry[] {
     if (dir !== undefined) apps.push(readManifest(dir, name));
   }
   return apps;
+}
+
+/**
+ * Read an app's `app.json`, or an empty manifest if it is absent or unreadable.
+ *
+ * Separate from `appsIn` because the *policy* questions ("may this app start a turn") are
+ * asked on a path where the answer must never be "guess".
+ */
+export function appManifest(appDir: string): AppManifest {
+  try {
+    const parsed: unknown = JSON.parse(fs.readFileSync(path.join(appDir, APP_MANIFEST), "utf8"));
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as AppManifest;
+    }
+  } catch {
+    // A manifest that does not parse simply has nothing to say.
+  }
+  return {};
 }
 
 /**

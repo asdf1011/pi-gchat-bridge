@@ -40,6 +40,7 @@ import { hostRouteFailure, hostRoutes } from "./host-routes.js";
 import { serveRoutes } from "../shared/serve-routes.js";
 import { readBody } from "../web/routes.js";
 import { startArtifactsServer } from "../web/artifacts-server.js";
+import { makeReportHandler } from "./app-reports.js";
 import { artifactRoots } from "./artifacts.js";
 import { initArtifactRepo } from "./artifact-vcs.js";
 import { inProcessSessionHost } from "../session-host/inprocess.js";
@@ -252,6 +253,13 @@ async function main(): Promise<void> {
   // Off unless `BRIDGE_ARTIFACTS_PORT` is set: a bridge that serves Chat needs no
   // artifact origin, and a listener nobody asked for is just another port to
   // wonder about.
+  // A report an app leaves becomes a turn only if the app asks for it *and* it is within
+  // budget; see `durable/app-reports.ts` for why both guards exist.
+  const reportHandler = makeReportHandler({
+    conversationDirFor: artifactRepoFor ?? (() => undefined),
+    submit: (conversationId, input) => hostSeam.submit(conversationId, input),
+  });
+
   const artifactsPort = Number(process.env.BRIDGE_ARTIFACTS_PORT ?? 0);
   let artifactsServer: http.Server | undefined;
   if (artifactsPort > 0) {
@@ -279,6 +287,9 @@ async function main(): Promise<void> {
       bind: config.bindAddress,
       redact: redactArtifact,
       ...(config.webOrigin ? { webOrigin: config.webOrigin } : {}),
+      // Whether a report becomes a turn is decided here rather than in the file server: this
+      // is where the conversation, the budget and the operator's intent live.
+      ...(artifactRepoFor === undefined ? {} : { onReport: reportHandler }),
     });
   }
 

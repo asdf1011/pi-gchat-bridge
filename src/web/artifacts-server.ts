@@ -82,6 +82,20 @@ export interface ArtifactsServerOptions {
    * if the app were missing.
    */
   conversationDirFor?: (conversationId: number) => string | undefined;
+  /**
+   * Told when an app leaves a report.
+   *
+   * The artifact origin deliberately knows nothing about turns: it stores a file and says
+   * where. Whether that should interrupt somebody is a policy question, and policy belongs
+   * where the conversation lives (see `durable/main.ts`), not in a file server.
+   */
+  onReport?: (report: {
+    conversationId: number;
+    appName: string;
+    /** Absolute path of the stored file, so the caller can read it. */
+    file: string;
+    bytes: number;
+  }) => void | Promise<void>;
 }
 
 /** Headers shared by every response: no sniffing, no caching, no framing by others. */
@@ -1092,6 +1106,17 @@ async function receiveReport(
     return;
   }
   logger.info(`[apps] ${appName}: report stored as reports/${name} (${size} bytes)`);
+
+  // Fire and forget: the report is already stored, and a caller that fails to act on it must
+  // not turn a successful upload into an error the browser has to make sense of.
+  try {
+    void Promise.resolve(
+      options.onReport?.({ conversationId, appName, file: path.join(dir, name), bytes: size }),
+    ).catch((error: unknown) => logger.warn(`[apps] report handler failed: ${String(error)}`));
+  } catch (error) {
+    logger.warn(`[apps] report handler failed: ${String(error)}`);
+  }
+
   res.writeHead(204, { ...BASE_HEADERS });
   res.end();
 }
