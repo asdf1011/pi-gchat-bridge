@@ -264,3 +264,33 @@ test("a report in an app's own format is always submitted", async () => {
     cleanup();
   }
 });
+
+test("a different configuration is not treated as a repeat", async () => {
+  // `threads` and `batch` change what the run does. Leaving them out of the signature made a
+  // four-thread batched result look identical to a one-thread unbatched one, and it was
+  // suppressed as a repeat — a real result silently dropped.
+  const { dir, appDir, cleanup } = scenario({ reports: { autoSubmit: true } });
+  const body = (extra: object) =>
+    JSON.stringify({
+      requested: { backend: "cpu", textLength: "long", chunkedMimi: false, ...extra },
+      runs: [{ event: "run", backend: "cpu", wallMs: 8600, audioSeconds: 20.5, rtf: 0.42 }],
+      errors: [],
+    });
+  try {
+    const spy = recordingSubmit();
+    const handle = makeReportHandler({
+      conversationDirFor: () => dir,
+      submit: spy.submit,
+      budget: { minGapMs: 0, maxPerHour: 99, maxBodyChars: 12_000 },
+    });
+    await handle(report(appDir, body({ threads: 1, batch: false }), "a.json"));
+    await handle(report(appDir, body({ threads: 4, batch: false }), "b.json"));
+    await handle(report(appDir, body({ threads: 4, batch: true }), "c.json"));
+    assert.equal(spy.calls.length, 3, "each configuration is its own result");
+    // But the same configuration again is a repeat.
+    await handle(report(appDir, body({ threads: 4, batch: true }), "d.json"));
+    assert.equal(spy.calls.length, 3);
+  } finally {
+    cleanup();
+  }
+});

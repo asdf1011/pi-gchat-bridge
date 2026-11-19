@@ -60,7 +60,7 @@ export function outcomeSignature(body: string): string | undefined {
   }
   if (parsed === null || typeof parsed !== "object") return undefined;
   const report = parsed as {
-    requested?: { backend?: unknown; textLength?: unknown; chunkedMimi?: unknown };
+    requested?: { backend?: unknown; textLength?: unknown; chunkedMimi?: unknown; batch?: unknown; threads?: unknown };
     runs?: { event?: unknown; backend?: unknown; failed?: unknown; rtf?: unknown }[];
     errors?: { message?: unknown; reason?: unknown }[];
   };
@@ -72,10 +72,15 @@ export function outcomeSignature(body: string): string | undefined {
       return `${String(run.backend)}:${run.failed ? "fail" : "ok"}:${rtf}`;
     });
   const errors = (report.errors ?? []).map((e) => String(e.message ?? e.reason ?? "")).sort();
+  // Every setting that changes what the run *does*, not just where it runs. Leaving out
+  // `threads` and `batch` made a four-thread batched run look like a repeat of a one-thread
+  // unbatched one, and the new result was suppressed as "the same thing again".
   return JSON.stringify([
     report.requested?.backend ?? "",
     report.requested?.textLength ?? "",
     report.requested?.chunkedMimi ?? false,
+    report.requested?.batch ?? false,
+    report.requested?.threads ?? null,
     runs,
     errors,
   ]);
