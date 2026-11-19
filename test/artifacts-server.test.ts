@@ -1273,3 +1273,205 @@ test("the download button appears and hides with the others, and saves the raw f
   // `?raw&download`: the file's own bytes, as an attachment.
   assert.match(client, /'\?raw&download'/);
 });
+
+// --- Apps --------------------------------------------------------------------
+//
+// An app is any directory holding app.json. The tests below are about the *mechanism*
+// — discovery, containment, headers, types — and deliberately name no particular app,
+// because the bridge does not know what an app is for and must not start knowing.
+
+/** Serve a conversation directory, so `/apps/...` has somewhere to look. */
+async function serveWithApps(root: string, conversationDir: string): Promise<Harness> {
+  const server = await startArtifactsServer({
+    seam: fakeSeam([], [1], []),
+    port: 0,
+    conversationDirFor: (id: number) => (id === 1 ? conversationDir : undefined),
+  });
+  const { port } = server.address() as AddressInfo;
+  return {
+    base: `http://127.0.0.1:${port}`,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}
+
+/** Write one app into a conversation directory. */
+function writeApp(conversationDir: string, name: string, files: Record<string, string>, manifest = {}): void {
+  const dir = path.join(conversationDir, name);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "app.json"), JSON.stringify(manifest));
+  for (const [file, content] of Object.entries(files)) {
+    const at = path.join(dir, file);
+    fs.mkdirSync(path.dirname(at), { recursive: true });
+    fs.writeFileSync(at, content);
+  }
+}
+
+test("a directory with app.json is an app, and the index lists it", async () => {
+  const root = tempDir();
+  const conversationDir = path.join(root, "conversation", "1");
+  fs.mkdirSync(conversationDir, { recursive: true });
+  writeApp(conversationDir, "bench", { "index.html": "<h1>hi</h1>" }, { name: "Bench", description: "times a model" });
+  // Not an app: no marker, so it is just a directory that would otherwise be served.
+  fs.mkdirSync(path.join(conversationDir, "scratch"), { recursive: true });
+  fs.writeFileSync(path.join(conversationDir, "scratch", "index.html"), "<h1>no</h1>");
+
+  const harness = await serveWithApps(root, conversationDir);
+  try {
+    const response = await fetch(`${harness.base}/apps/1/`);
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("content-type") ?? "", /text\/html/);
+    const html = await response.text();
+    assert.match(html, /href="\/apps\/1\/bench\/"/);
+    assert.match(html, />Bench</);
+    assert.match(html, /times a model/);
+    // The unmarked directory is not offered.
+    assert.doesNotMatch(html, /scratch/);
+    // The index is inert: it is our markup, so it keeps the sandbox.
+    assert.match(response.headers.get("content-security-policy") ?? "", /sandbox/);
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an app's files are served with the types a bundle needs", async () => {
+  // The three load-bearing ones: a module script is refused unless it is a JavaScript
+  // type, and instantiateStreaming is refused unless wasm is application/wasm. Getting
+  // either wrong is a page that half-works.
+  const root = tempDir();
+  const conversationDir = path.join(root, "conversation", "1");
+  fs.mkdirSync(conversationDir, { recursive: true });
+  writeApp(conversationDir, "bench", {
+    "index.html": "<!doctype html><title>app</title>",
+    "app.js": "export const x = 1;",
+    "lib.wasm": "\0asm",
+    "cfg.json": "{}",
+    "model.gguf": "x",
+  });
+
+  const harness = await serveWithApps(root, conversationDir);
+  try {
+    const at = async (p: string) => (await fetch(`${harness.base}/apps/1/bench/${p}`)).headers.get("content-type");
+    assert.match(await at("app.js") ?? "", /text\/javascript/);
+    assert.equal(await at("lib.wasm"), "application/wasm");
+    assert.match(await at("cfg.json") ?? "", /application\/json/);
+    // An unknown binary downloads rather than rendering.
+    assert.equal(await at("model.gguf"), "application/octet-stream");
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the app root serves index.html, whatever the trailing slash", async () => {
+  // A relative <script src="app.js"> has to resolve against the same directory either
+  // way, so the root is answered rather than redirected.
+  const root = tempDir();
+  const conversationDir = path.join(root, "conversation", "1");
+  fs.mkdirSync(conversationDir, { recursive: true });
+  writeApp(conversationDir, "bench", { "index.html": "<!doctype html><title>index</title>" });
+
+  const harness = await serveWithApps(root, conversationDir);
+  try {
+    for (const p of ["/apps/1/bench/", "/apps/1/bench"]) {
+      const response = await fetch(`${harness.base}${p}`);
+      assert.equal(response.status, 200, p);
+      assert.match(await response.text(), /<title>index<\/title>/, p);
+    }
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an app page is cross-origin isolated, because a wasm bundle waits forever without it", async () => {
+  // A pthread build asks for SharedArrayBuffer at startup. Without COOP+COEP the page is
+  // not isolated, the ask never resolves, and the app hangs with no error at all.
+  const root = tempDir();
+  const conversationDir = path.join(root, "conversation", "1");
+  fs.mkdirSync(conversationDir, { recursive: true });
+  writeApp(conversationDir, "bench", { "index.html": "<!doctype html><title>app</title>" });
+
+  const harness = await serveWithApps(root, conversationDir);
+  try {
+    const response = await fetch(`${harness.base}/apps/1/bench/`);
+    assert.equal(response.headers.get("cross-origin-opener-policy"), "same-origin");
+    assert.equal(response.headers.get("cross-origin-embedder-policy"), "require-corp");
+    assert.equal(response.headers.get("cross-origin-resource-policy"), "cross-origin");
+
+    const csp = response.headers.get("content-security-policy") ?? "";
+    // Rust-style CSP: the bundle's wasm must be allowed to instantiate.
+    assert.match(csp, /'wasm-unsafe-eval'/);
+    // An app runs script, so it is the one document here that is not sandboxed.
+    assert.doesNotMatch(csp, /sandbox/);
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a path cannot leave the app's own directory", async () => {
+  // The one function standing between a URL and the filesystem. `..`, an absolute path,
+  // and a symlink all have to be refused, and `.jj` too — that is the repository the
+  // conversation's artifacts are committed to.
+  const root = tempDir();
+  const conversationDir = path.join(root, "conversation", "1");
+  fs.mkdirSync(conversationDir, { recursive: true });
+  writeApp(conversationDir, "bench", { "index.html": "<!doctype html><title>app</title>" });
+  fs.mkdirSync(path.join(conversationDir, ".jj"), { recursive: true });
+  fs.writeFileSync(path.join(conversationDir, ".jj", "secret"), "history");
+  fs.writeFileSync(path.join(conversationDir, "outside.txt"), "not yours");
+  // A symlink inside the app pointing out of it.
+  fs.symlinkSync(path.join(conversationDir, "outside.txt"), path.join(conversationDir, "bench", "link.txt"));
+
+  const harness = await serveWithApps(root, conversationDir);
+  try {
+    const refused = async (p: string, why: string) => {
+      const response = await fetch(`${harness.base}/apps/1/bench/${p}`);
+      assert.notEqual(response.status, 200, `${why} should not be served`);
+    };
+    await refused("../outside.txt", "parent traversal");
+    await refused("..%2Foutside.txt", "encoded traversal");
+    await refused("%2e%2e/outside.txt", "dot-dot");
+    await refused("link.txt", "a symlink out of the directory");
+    await refused(".jj/secret", "the repository");
+    // The app's own files still work, so the refusals are not a blanket denial.
+    assert.equal((await fetch(`${harness.base}/apps/1/bench/index.html`)).status, 200);
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a directory without app.json is not an app, and says how to become one", async () => {
+  const root = tempDir();
+  const conversationDir = path.join(root, "conversation", "1");
+  fs.mkdirSync(path.join(conversationDir, "notes"), { recursive: true });
+  fs.writeFileSync(path.join(conversationDir, "notes", "index.html"), "<h1>no</h1>");
+
+  const harness = await serveWithApps(root, conversationDir);
+  try {
+    const response = await fetch(`${harness.base}/apps/1/notes/`);
+    assert.equal(response.status, 404);
+    assert.match(await response.text(), /app\.json/);
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("without a conversation directory, apps are explained rather than 404'd as missing", async () => {
+  // A deployment that does not version artifacts has nowhere to look, and saying so beats
+  // "no such app", which would send someone hunting for a file that was never the problem.
+  const root = tempDir();
+  const harness = await serve(root, ["notes.md"]);
+  try {
+    fs.writeFileSync(path.join(root, "notes.md"), "# hi\n");
+    const response = await fetch(`${harness.base}/apps/1/bench/`);
+    assert.equal(response.status, 404);
+    assert.match(await response.text(), /does not host apps/);
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

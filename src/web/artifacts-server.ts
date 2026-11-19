@@ -27,6 +27,7 @@ import http from "node:http";
 
 import { audioTypeOf, imageTypeOf, isMarkdown, isPdf, readArtifact, readArtifactBytes, type ArtifactFile } from "../durable/artifacts.js";
 import { repoRelativePath, showFile, showFileBytes } from "../durable/artifact-vcs.js";
+import { APP_MANIFEST, appDirOf, appFileType, appsIn, resolveAppFile, type AppEntry } from "../durable/apps.js";
 import { parseRegion } from "../durable/comments.js";
 import { logger } from "../logger.js";
 import type { SessionHost } from "../session-host/api.js";
@@ -70,6 +71,17 @@ export interface ArtifactsServerOptions {
    * plain explanation — this surface never invents an anchor it cannot check.
    */
   repoFor?: (conversationId: number) => string | undefined;
+  /**
+   * The directory holding a conversation's own files, if this deployment has one.
+   *
+   * Separate from `repoFor` on purpose: that one answers "where is the jj repository",
+   * which happens to be the same directory today but is a different question. An app is
+   * a directory of files, and serving one needs the second answer and not the first.
+   *
+   * Absent, `/apps/...` explains that this deployment hosts no apps rather than 404ing as
+   * if the app were missing.
+   */
+  conversationDirFor?: (conversationId: number) => string | undefined;
 }
 
 /** Headers shared by every response: no sniffing, no caching, no framing by others. */
@@ -844,6 +856,175 @@ function renderedDocument(key: string, bodyHtml: string, input: {
     .replace("</body>", tail);
 }
 
+/**
+ * The CSP for an app page.
+ *
+ * Apps are the one surface here that deliberately runs author-written code, so this is
+ * permissive in a way every other policy in this file is not. It is still a policy rather
+ * than nothing, and it is worth saying what each allowance buys:
+ *
+ * `'wasm-unsafe-eval'` is not optional — without it `WebAssembly.instantiate` is blocked
+ * outright, and a bundled WASM app is a blank page with a console error.
+ *
+ * `'unsafe-inline'` is deliberate and is *not* the weakening it looks like. An inline
+ * `<script>` is how a hand-written single-file app is built, and a static file host has no
+ * nonce to give one: the first version of this policy without it produced a page that
+ * loaded and did nothing, with the reason only in the console. The allowance that matters
+ * is still enforced — `'self'` means no remote script can be loaded, which is what stops
+ * a page behind Access from pulling in someone else's code.
+ *
+ * `worker-src blob:` because a bundler that ships its worker as a blob is ordinary, and
+ * `media-src blob:` because an app that generates audio plays it from an object URL.
+ * `connect-src https:` rather than `*`: an app may fetch a model from a CDN, and must not
+ * be able to reach plaintext origins or the local network from a page behind Access.
+ *
+ * There is no `sandbox`, unlike every other document in this file, and that is the whole
+ * point of an app.
+ */
+function appCsp(frameAncestors: string): string {
+  return (
+    `default-src 'self'; ` +
+    `script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; ` +
+    `worker-src 'self' blob:; ` +
+    `style-src 'self' 'unsafe-inline'; ` +
+    `img-src 'self' data: blob:; ` +
+    `media-src 'self' data: blob:; ` +
+    `connect-src 'self' https: data: blob:; ` +
+    `frame-ancestors ${frameAncestors}`
+  );
+}
+
+/**
+ * Headers every app response carries, on top of the shared ones.
+ *
+ * `Cross-Origin-Embedder-Policy: require-corp` is the load-bearing one and the reason this
+ * is not just `BASE_HEADERS`. A page can only use `SharedArrayBuffer` when it is
+ * cross-origin isolated, and isolation requires COOP *and* COEP. A pthread-built WASM
+ * bundle asks for `SharedArrayBuffer` during startup; without these it does not fail — it
+ * waits, forever, with no error, which is the worst possible failure and cost real time to
+ * diagnose.
+ *
+ * `Cross-Origin-Resource-Policy: cross-origin` lets the same files be fetched from another
+ * origin of ours (the web app), which is what a future in-drawer app frame would need.
+ * `Accept-Ranges` is not set: these are small assets, and range support is the audio
+ * player's concern, not an app directory's.
+ */
+const APP_HEADERS: Record<string, string> = {
+  ...BASE_HEADERS,
+  // An app's assets are immutable within a turn and small, but `no-store` above is wrong
+  // here: a 6 MB wasm bundle re-downloaded on every reload is the difference between a
+  // usable page and an unusable one. `no-cache` still revalidates.
+  "Cache-Control": "no-cache",
+  "Cross-Origin-Embedder-Policy": "require-corp",
+  "Cross-Origin-Resource-Policy": "cross-origin",
+};
+
+/**
+ * The list of apps a conversation has published.
+ *
+ * Inert HTML under the sandboxed document policy, like the artifact index: it is the
+ * bridge's own markup, and nothing about a listing needs a script. The app itself is one
+ * click away and is where the code runs.
+ */
+function appIndexPage(conversationId: number, apps: readonly AppEntry[]): string {
+  const rows = apps
+    .map((app) => {
+      const href = `/apps/${conversationId}/${encodeURIComponent(app.id)}/`;
+      const description = app.description === "" ? "" : `<br><small>${escapeHtml(app.description)}</small>`;
+      return `<li><a href="${escapeHtml(href)}">${escapeHtml(app.name)}</a>${description}</li>`;
+    })
+    .join("\n");
+  const body =
+    apps.length === 0
+      ? `<p>No apps in this conversation.</p>
+<p class="meta">A directory becomes an app when it contains <code>${APP_MANIFEST}</code>.</p>`
+      : `<ul class="files">\n${rows}\n</ul>`;
+  return markdownDocument(
+    `apps \u00b7 conversation ${conversationId}`,
+    `<h1>Apps</h1>
+<p class="meta">Conversation ${conversationId} \u00b7 ${apps.length} app${apps.length === 1 ? "" : "s"}</p>
+${body}`,
+  );
+}
+
+/**
+ * Serve an app, or the index of a conversation's apps.
+ *
+ * Three shapes, and the trailing slash matters only to a reader:
+ *
+ *   `/apps/<id>/`             — the apps this conversation published
+ *   `/apps/<id>/<name>/`      — that app's `index.html`
+ *   `/apps/<id>/<name>/<file>`— one file of it
+ *
+ * The index is inert HTML under the same sandboxed policy as every other document here,
+ * because it is ours. The files are the app's, and are served as they are.
+ */
+async function serveApp(
+  options: ArtifactsServerOptions,
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  url: URL,
+  parts: readonly string[],
+): Promise<void> {
+  const conversationDirFor = options.conversationDirFor;
+  if (conversationDirFor === undefined) {
+    send(res, 404, "text/plain; charset=utf-8", TEXT_CSP, "this deployment does not host apps");
+    return;
+  }
+
+  const [rawId, appName, ...rest] = parts;
+  const conversationId = rawId === undefined ? Number.NaN : Number(rawId);
+  if (!Number.isInteger(conversationId) || conversationId < 1) {
+    send(res, 404, "text/plain; charset=utf-8", TEXT_CSP, "apps are addressed by conversation: /apps/<id>/");
+    return;
+  }
+
+  const conversationDir = conversationDirFor(conversationId);
+  if (conversationDir === undefined) {
+    send(res, 404, "text/plain; charset=utf-8", TEXT_CSP, `no such conversation: ${conversationId}`);
+    return;
+  }
+
+  if (appName === undefined) {
+    const apps = appsIn(conversationDir);
+    send(res, 200, "text/html; charset=utf-8", documentCspFor(options.webOrigin), appIndexPage(conversationId, apps));
+    return;
+  }
+
+  const appDir = appDirOf(conversationDir, appName);
+  if (appDir === undefined) {
+    send(
+      res,
+      404,
+      "text/plain; charset=utf-8",
+      TEXT_CSP,
+      `not an app of conversation ${conversationId}: ${appName} (a directory becomes an app when it holds ${APP_MANIFEST})`,
+    );
+    return;
+  }
+
+  // A directory URL or the app root serves its index. Done here rather than with a
+  // redirect so that a relative `<script src="app.js">` resolves against the same
+  // directory whether or not the visitor typed the trailing slash.
+  const wanted = rest.length === 0 ? "index.html" : rest.join("/");
+  const file = resolveAppFile(appDir, wanted);
+  if (file === undefined) {
+    send(res, 404, "text/plain; charset=utf-8", TEXT_CSP, `no such file in app ${appName}: ${wanted}`);
+    return;
+  }
+
+  let body: Buffer;
+  try {
+    body = fs.readFileSync(file);
+  } catch (error) {
+    logger.error(`[apps] ${appName}/${wanted}: ${(error as Error).message}`);
+    send(res, 404, "text/plain; charset=utf-8", TEXT_CSP, `cannot read ${appName}/${wanted}`);
+    return;
+  }
+
+  send(res, 200, appFileType(file), appCsp(frameAncestorsFor(options.webOrigin)), body, APP_HEADERS);
+}
+
 /** One request. Split out so tests can drive it without a socket. */
 async function handle(
   options: ArtifactsServerOptions,
@@ -859,6 +1040,15 @@ async function handle(
   }
   if (req.method !== "GET" && req.method !== "HEAD") {
     send(res, 405, "text/plain; charset=utf-8", TEXT_CSP, "method not allowed", { Allow: "GET, HEAD" });
+    return;
+  }
+
+  // Apps, before the artifact match: `/apps/...` is its own namespace and must not be
+  // mistaken for a conversation key. What an app *is* lives in `durable/apps.ts`; this
+  // branch only serves files and sets the headers a bundled page needs.
+  const appsMatch = /^\/apps(?:\/(.*))?$/.exec(url.pathname);
+  if (appsMatch) {
+    await serveApp(options, req, res, url, (appsMatch[1] ?? "").split("/").filter((part) => part !== ""));
     return;
   }
 

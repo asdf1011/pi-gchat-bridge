@@ -272,6 +272,10 @@ async function main(): Promise<void> {
       // Reads of a specific revision go through jj; the live file is still read
       // from disk, which is what makes an in-progress turn visible.
       ...(artifactRepoFor ? { repoFor: artifactRepoFor } : {}),
+      // The same directory answers both questions today, but they are different
+      // questions: `repoFor` is "where is the jj repository", this one is "where do
+      // this conversation's files live". Apps need the second and nothing about git.
+      ...(artifactRepoFor ? { conversationDirFor: artifactRepoFor } : {}),
       bind: config.bindAddress,
       redact: redactArtifact,
       ...(config.webOrigin ? { webOrigin: config.webOrigin } : {}),
