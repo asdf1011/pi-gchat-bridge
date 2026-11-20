@@ -192,6 +192,22 @@
   #log .msg.pi .bubble { background: var(--bubble-pi); border-top-left-radius: .3rem; }
   #log .msg.me .bubble { background: var(--bubble-me); border-top-right-radius: .3rem; }
   #log .live .bubble { outline: 1px dashed #8884; }
+  /* Per-message actions. Shown when a message has been touched, clicked or focused — the three
+     ways a reader can plausibly point at one message rather than at the transcript. Kept beside
+     the bubble rather than inside it, so they never sit on top of the text they act on. */
+  #log .msg-actions { display: flex; gap: .3rem; align-items: center; align-self: flex-start;
+    margin-top: 1.35rem; }
+  #log .msg-actions button { font: inherit; font-size: .75em; display: inline-flex; gap: .25rem;
+    align-items: center; padding: .25rem .45rem; border-radius: .45rem; cursor: pointer;
+    border: 1px solid #8884; background: Canvas; color: inherit; opacity: .85; }
+  #log .msg-actions button:hover { opacity: 1; background: color-mix(in srgb, CanvasText 8%, Canvas); }
+  #log .msg-actions button.done { border-color: #2e7d32; color: #2e7d32; opacity: 1; }
+  #log .msg-actions svg { width: 1em; height: 1em; fill: none; stroke: currentColor;
+    stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+  /* A message that can be acted on says so: a focus ring for the keyboard, and a faint edge on
+     hover for the pointer, neither of which moves the layout. */
+  #log .msg[tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: .2rem;
+    border-radius: .6rem; }
   /* The live turn's status: which tool is running, or "thinking" before any text
      arrives. Chat shows the same thing inside the message it is editing, and so
      does this — inside the bubble, in the bubble's colours, so the reply and what
@@ -1407,6 +1423,10 @@ function messageRow(role, html, at, live, images, entryId) {
   const me = role === 'user';
   const block = document.createElement('div');
   block.className = 'msg ' + (me ? 'me' : 'pi') + (live ? ' live' : '');
+  // Focusable, because copying or reading a message aloud must be reachable without a pointer.
+  // The live row is excluded: it has no entry yet, and its text is still changing under the
+  // action a reader would have taken.
+  if (!live) block.tabIndex = 0;
   // The entry this row came from, so an anchor can name one turn. Absent on the live
   // row: the turn in flight has no entry yet — its id exists only once it is stored.
   if (entryId !== undefined && entryId !== null) block.dataset.entry = String(entryId);
@@ -1733,6 +1753,164 @@ function paintAnchorMiss() {
   log.prepend(note);
 }
 
+/**
+ * Copy and read-aloud, per message.
+ *
+ * Both act on one message, so they belong to that message rather than to the pane — and they
+ * appear when a message is touched, clicked or focused, which is the reader saying *which* one.
+ * The row is rebuilt on every repaint, so what is remembered is the entry id and the bar is
+ * moved back onto it afterwards; holding a node reference would point at a discarded clone.
+ */
+let actingEntry;
+
+const messageActions = document.createElement('div');
+messageActions.className = 'msg-actions';
+messageActions.innerHTML =
+  '<button type="button" data-act="copy" title="Copy this message">' +
+  '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/>' +
+  '<path d="M15 5.5A1.5 1.5 0 0 0 13.5 4H5.5A1.5 1.5 0 0 0 4 5.5v8A1.5 1.5 0 0 0 5.5 15"/></svg>' +
+  '<span>Copy</span></button>' +
+  '<button type="button" data-act="speak" title="Read this message aloud">' +
+  '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9.5v5h3.2L12 18.5v-13L7.2 9.5H4z"/>' +
+  '<path d="M15.5 9a4 4 0 0 1 0 6"/><path d="M18 6.5a7.5 7.5 0 0 1 0 11"/></svg>' +
+  '<span>Read</span></button>';
+
+/** The message a row holds, as plain text — what a reader would have copied by hand. */
+function rowText(row) {
+  return (row?.querySelector('.bubble')?.innerText ?? '').trim();
+}
+
+/** Put the bar on whichever message is acting, or take it away. Called after every repaint. */
+function syncMessageActions() {
+  for (const old of log.querySelectorAll('.msg.acting')) old.classList.remove('acting');
+  const row = actingEntry === undefined
+    ? null
+    : log.querySelector('.msg[data-entry="' + actingEntry + '"]');
+  if (row === null) {
+    messageActions.remove();
+    return;
+  }
+  // An image-only message has no text to copy and nothing to read aloud, so it gets no bar
+  // rather than two buttons that quietly do nothing.
+  if (rowText(row) === '') {
+    messageActions.remove();
+    return;
+  }
+  row.classList.add('acting');
+  row.append(messageActions);
+  refreshSpeakAction();
+}
+
+function refreshSpeakAction() {
+  const button = messageActions.querySelector('[data-act="speak"]');
+  if (button === null) return;
+  const label = speechEntry !== undefined && speechEntry === actingEntry ? 'Stop' : 'Read';
+  button.querySelector('span').textContent = label;
+}
+
+function activateRow(row) {
+  const entry = row?.dataset.entry;
+  if (entry === undefined || entry === '') return;
+  actingEntry = entry;
+  syncMessageActions();
+}
+
+/** Copy, with the old path for a page served without the clipboard permission. */
+async function copyRow(row, button) {
+  const text = rowText(row);
+  if (text === '') return;
+  let copied = false;
+  try {
+    await navigator.clipboard.writeText(text);
+    copied = true;
+  } catch {
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.setAttribute('readonly', '');
+    area.style.position = 'fixed';
+    area.style.top = '-1000px';
+    document.body.append(area);
+    area.select();
+    try { copied = document.execCommand('copy'); } catch { copied = false; }
+    area.remove();
+  }
+  const label = button.querySelector('span');
+  button.classList.toggle('done', copied);
+  label.textContent = copied ? 'Copied' : 'Failed';
+  setTimeout(() => {
+    button.classList.remove('done');
+    label.textContent = 'Copy';
+  }, 1400);
+}
+
+/**
+ * Read one message aloud, or stop if that message is the one being read.
+ *
+ * The app is asked directly rather than through talking mode: reading a past answer is a
+ * one-off, and turning the mode on to do it would make it start reading future answers too.
+ * The word events that come back are highlighted in *this* bubble, so the highlight lands where
+ * the reader is looking rather than in the live turn.
+ */
+async function speakRow(row) {
+  const text = rowText(row);
+  const entry = row.dataset.entry;
+  if (text === '') return;
+
+  if (speechEntry !== undefined && speechEntry === entry) {
+    stopReading();
+    return;
+  }
+  const frame = await ensureSpeechFrame();
+  if (frame === null) return;
+  stopReading();
+  speechEntry = entry;
+  speechTarget = row.querySelector('.bubble');
+  speechFrame.contentWindow.postMessage(
+    { type: 'speak', text, block: (speechBlock += 1), interrupt: true },
+    '*',
+  );
+
+  refreshSpeakAction();
+}
+
+/** Stop whatever is being read, and forget where it was being shown. */
+function stopReading() {
+  if (speechEntry === undefined && speechTarget === undefined) return;
+  speechFrame?.contentWindow?.postMessage({ type: 'stop' }, '*');
+  speechEntry = undefined;
+  speechTarget = undefined;
+  clearHighlight();
+  refreshSpeakAction();
+}
+
+// One listener for the whole log: rows are rebuilt constantly, so wiring each one would leak a
+// handler per repaint and act on nodes that are already gone.
+log.addEventListener('click', (event) => {
+  const button = event.target.closest('.msg-actions button');
+  if (button !== null) {
+    const row = button.closest('.msg');
+    if (button.dataset.act === 'copy') void copyRow(row, button);
+    else void speakRow(row);
+    return;
+  }
+  // A link is a link, and a selection drag is not a click on the message.
+  if (event.target.closest('a')) return;
+  if ((window.getSelection?.()?.toString() ?? '') !== '') return;
+  const row = event.target.closest('.msg');
+  if (row !== null) activateRow(row);
+});
+
+log.addEventListener('focusin', (event) => {
+  const row = event.target.closest('.msg');
+  if (row !== null) activateRow(row);
+});
+
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  if (speechEntry !== undefined) { stopReading(); return; }
+  if (actingEntry !== undefined) { actingEntry = undefined; syncMessageActions(); }
+});
+
 function paint() {
   log.innerHTML = '';
   log.append(earlierButton);
@@ -1795,6 +1973,7 @@ function paint() {
     if (status.textContent) bubble.append(status);
     log.append(row);
   }
+  syncMessageActions();
   paintEarlier();
   if (atBottom) log.scrollTop = log.scrollHeight;
   else log.scrollTop = Math.min(log.scrollTop, log.scrollHeight);
@@ -2190,9 +2369,8 @@ async function setTalking(on) {
   // transcript means turning talking mode on looks like nothing happened.
   if (on && pickerOpen) closePicker();
   if (!on) {
-    speechFrame?.contentWindow?.postMessage({ type: 'stop' }, '*');
+    stopReading();
     setSpeaking(false);
-    clearHighlight();
     return;
   }
   const url = await talkAppUrl();
@@ -2203,23 +2381,57 @@ async function setTalking(on) {
       'An app opts in with "speech": true in its app.json and a speech.html beside it.');
     return;
   }
-  if (speechFrame === undefined) {
-    speechFrame = document.getElementById('speech-host');
+  await ensureSpeechFrame();
+}
+
+/**
+ * The speech app, in its frame, loaded once and shared.
+ *
+ * Talking mode uses it for every answer and the per-message button uses it for one message, so the
+ * loading lives here rather than in either of them: a second `src` assignment would reload the
+ * model — and, worse, replace the window the message listener was bound to.
+ */
+let speechFrameLoading;
+async function ensureSpeechFrame() {
+  if (speechFrame === undefined) speechFrame = document.getElementById('speech-host');
+  if (speechFrame === null) return null;
+  if (speechFrame.dataset.loaded === 'true') return speechFrame;
+  if (speechFrameLoading !== undefined) {
+    await speechFrameLoading;
+    return speechFrame;
+  }
+  speechFrameLoading = (async () => {
+    const url = await talkAppUrl();
+    if (url === '') return;
     // A cross-origin app would be framed but never *isolated*, so its wasm pthread build could
     // not start and it would fail with no audio and no error. The discovered URL is same-origin
     // for exactly this reason; an override is the only way to get here otherwise.
     try {
       if (new URL(url, location.href).origin !== location.origin) {
         console.warn(
-          'talking mode: ' + url + ' is cross-origin, so it will not be cross-origin isolated ' +
-          'and a wasm app that needs SharedArrayBuffer will fail to start. Serve the app from ' +
-          'this origin (/apps/…) instead.',
+          'speech: ' + url + ' is cross-origin, so it will not be cross-origin isolated and a ' +
+          'wasm app that needs SharedArrayBuffer will fail to start. Serve the app from this ' +
+          'origin (/apps/…) instead.',
         );
       }
     } catch { /* not a URL: the frame will simply fail to load */ }
-    speechFrame.src = url;
-    // Same-origin would be nicer, but an app may be served from the artifacts origin; the
-    // protocol carries no secrets, so a wildcard target is the honest choice.
+    // The document has to exist before anything is posted to it: `src` only starts a
+    // navigation, and a message sent now goes to the frame's *initial* empty document and is
+    // thrown away when the real one replaces it. That is how "read this message" loaded the
+    // model and then said nothing.
+    //
+    // Waiting on the frame's own location, not on `readyState`: `about:blank` reports
+    // "complete" immediately, so the obvious guard passes before the navigation has begun.
+    const target = new URL(url, location.href).href;
+    if (speechFrame.src === '' || speechFrame.src === 'about:blank') speechFrame.src = url;
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline) {
+      const href = speechFrame.contentWindow?.location?.href ?? '';
+      if (href.startsWith(target) && speechFrame.contentDocument?.readyState === 'complete') break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    // `same-origin` frames inherit this page's isolation, which is what makes the app's wasm
+    // threads work at all; the protocol carries no secrets, so a wildcard target is honest here.
     window.addEventListener('message', (event) => {
       if (event.source !== speechFrame.contentWindow) return;
       const data = event.data;
@@ -2227,7 +2439,14 @@ async function setTalking(on) {
       if (data.type === 'models') applyModelOptions(data);
       if (data.type === 'word') highlightWord(Number(data.index));
       if (data.type === 'started') setSpeaking(true);
-      if (data.type === 'end') { setSpeaking(false); clearHighlight(); }
+      if (data.type === 'end') {
+        setSpeaking(false);
+        clearHighlight();
+        // Whatever was being read has finished, so the bar goes back to offering to read.
+        speechEntry = undefined;
+        speechTarget = undefined;
+        refreshSpeakAction();
+      }
       if (data.type === 'error') {
         // A microphone that animates while nothing is audible is worse than no icon: say so.
         setSpeaking(false);
@@ -2236,7 +2455,10 @@ async function setTalking(on) {
         console.warn('speech app error:', data.message);
       }
     });
-  }
+  })();
+  try { await speechFrameLoading; } finally { speechFrameLoading = undefined; }
+  if (speechFrame.src !== '') speechFrame.dataset.loaded = 'true';
+  return speechFrame;
 }
 
 /** Every word of a message as a Range, so the highlight can move without touching the DOM. */
@@ -2267,8 +2489,10 @@ function highlightWord(index) {
   if (typeof CSS === 'undefined' || CSS.highlights === undefined) return;
   // Re-collected on every word, because `paint()` rebuilds the transcript and the ranges from the
   // previous frame no longer point at anything.
+  // A message being read aloud wins: its bubble is the one the reader is looking at, and it is
+  // the one the word indices were counted against.
   const live = log.querySelector('.msg.live .current') ?? log.querySelector('.msg.live .said');
-  const target = live ?? log.querySelector('.msg.pi:last-of-type .bubble');
+  const target = speechTarget ?? live ?? log.querySelector('.msg.pi:last-of-type .bubble');
   if (target !== null) {
     const ranges = collectWords(target);
     if (ranges[index] !== undefined) spokenWords = ranges;
@@ -2304,6 +2528,11 @@ function clearHighlight() {
  * current, so it is cut with a short fade and the new text starts. Sentences *within* a block
  * queue, because they are one continuous thought.
  */
+/** Which message is being read aloud, and the bubble whose words are highlighted. */
+let speechEntry;
+let speechTarget;
+let speechBlock = 0;
+
 let talkBlock = '';      // the current block's text, as last seen
 let talkBlockId = 0;     // which block that is, so word indices can restart with it
 let lastLiveText = '';   // the last block seen with any text in it
