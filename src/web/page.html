@@ -537,6 +537,38 @@
   /* Disabled when nothing is staged: an Apply that would send nothing is a button
      that lies about having work to do. */
   #picker .apply:disabled { opacity: .45; cursor: default; }
+
+  /* Talking mode, as a microphone. Off is an outline; on is filled, so the toggle reads at
+     a glance; speaking additionally animates the waves beside it. */
+  #picker .talk { display: inline-flex; align-items: center; justify-content: center;
+    padding: .4rem .55rem; }
+  #picker .talk svg { width: 1.15em; height: 1.15em; fill: none;
+    stroke: currentColor; stroke-width: 1.8; stroke-linecap: round;
+    stroke-linejoin: round; }
+  #picker .talk[aria-pressed="true"] { background: var(--accent); }
+  #picker .talk[aria-pressed="true"] .talk-mic { fill: currentColor; }
+  /* Idle waves are drawn faint and still; they are the shape of the thing that will move. */
+  #picker .talk .talk-waves { opacity: .35; }
+  #picker .talk .talk-waves path { transform-origin: 9px 11px; }
+  /* Speaking. Two arcs at different phases so the pulse reads as sound rather than a
+     metronome, and a glow on the capsule so the state is legible when animations are
+     suppressed for reduced motion. */
+  #picker .talk.speaking .talk-waves { opacity: 1; }
+  #picker .talk.speaking .talk-waves path { animation: talk-wave 1.1s ease-in-out infinite; }
+  #picker .talk.speaking .talk-waves path + path { animation-delay: .22s; }
+  #picker .talk.speaking .talk-mic { animation: talk-glow 1.1s ease-in-out infinite; }
+  @keyframes talk-wave {
+    0%, 100% { opacity: .25; transform: scale(.82); }
+    50% { opacity: 1; transform: scale(1); }
+  }
+  @keyframes talk-glow { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }
+  /* A failure has to be visible somewhere other than the console. */
+  #picker .talk.failed { background: #c0392b; }
+  @media (prefers-reduced-motion: reduce) {
+    #picker .talk.speaking .talk-waves path,
+    #picker .talk.speaking .talk-mic { animation: none; }
+    #picker .talk.speaking .talk-waves { opacity: 1; }
+  }
   /* A sheet that eats the composer it belongs to is worse than a short list, and
      the footer made the content taller than 70vh on a phone — `max-height` only
      ever bit on desktop. Cap by vh everywhere: the popup fits either way, and the
@@ -945,7 +977,27 @@
          *speech app* — any page that implements the small postMessage protocol below —
          to read answers aloud, and takes the word positions it reports back. Which app
          that is lives in localStorage, so the web UI carries no model or vendor. -->
-    <button id="talk" type="button" class="apply" aria-pressed="false" title="Read answers aloud">Talk</button>
+    <!-- An icon rather than the word "Talk", because the control is a toggle whose *state*
+         matters more than its name: a microphone that fills in and beats when sound is
+         coming out says "on, and working" without being read.
+
+         The waves animate only while audio is actually playing — the app reports `started`
+         and `end` — so the animation is a truthful signal rather than a CSS marquee for
+         "probably fine". -->
+    <button id="talk" type="button" class="apply talk" aria-pressed="false"
+            aria-label="Read answers aloud" title="Read answers aloud">
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <g class="talk-mic">
+          <rect x="9" y="2.5" width="6" height="11" rx="3"/>
+          <path class="talk-stand" d="M6 10.5v1a6 6 0 0 0 12 0v-1"/>
+          <path class="talk-stand" d="M12 17.5V21"/>
+        </g>
+        <g class="talk-waves">
+          <path d="M18.4 6.2a7.6 7.6 0 0 1 0 9.6"/>
+          <path d="M21 3.6a11 11 0 0 1 0 14.8"/>
+        </g>
+      </svg>
+    </button>
     <button id="picker-apply" type="button" class="apply" disabled>Apply</button>
   </div>
 </div>
@@ -2025,8 +2077,13 @@ async function talkAppUrl() {
 async function setTalking(on) {
   talkOn = on;
   talk.setAttribute('aria-pressed', on ? 'true' : 'false');
+  talk.classList.remove('failed');
+  // The popup is a place to make a choice, and this is the choice: leaving it open over the
+  // transcript means turning talking mode on looks like nothing happened.
+  if (on && pickerOpen) closePicker();
   if (!on) {
     speechFrame?.contentWindow?.postMessage({ type: 'stop' }, '*');
+    talk.classList.remove('speaking');
     clearHighlight();
     return;
   }
@@ -2048,7 +2105,15 @@ async function setTalking(on) {
       const data = event.data;
       if (data === null || typeof data !== 'object') return;
       if (data.type === 'word') highlightWord(Number(data.index));
-      if (data.type === 'end') clearHighlight();
+      if (data.type === 'started') talk.classList.add('speaking');
+      if (data.type === 'end') { talk.classList.remove('speaking'); clearHighlight(); }
+      if (data.type === 'error') {
+        // A microphone that animates while nothing is audible is worse than no icon: say so.
+        talk.classList.remove('speaking');
+        talk.classList.add('failed');
+        talk.title = `Speech failed: ${String(data.message ?? 'unknown error')}`;
+        console.warn('speech app error:', data.message);
+      }
     });
   }
 }
@@ -2104,37 +2169,41 @@ function clearHighlight() {
 }
 
 /**
- * Talking mode reads the block being written, not the whole turn.
+ * Talking mode reads the *work*, not just the answer.
  *
- * A turn is several blocks — it says something, calls a tool, says something else — and reading
- * them all out would narrate the work instead of the answer. So only the *current* block is ever
- * spoken: each completed sentence is handed over as it appears, and if a new block starts (a tool
- * ran, or the model began a fresh message) whatever was queued for the old one is discarded. The
- * answer, being the last block, is the one heard in full.
+ * An earlier version spoke only the final block, on the grounds that the rest is machinery. It
+ * isn't: "let me check the logs" is the agent telling you what it is doing, and hearing it is
+ * more useful than hearing a finished answer arrive from silence. So every assistant block is
+ * read, sentence by sentence, as it is written.
  *
- * Sentences rather than the whole block, because the runtime takes a completed text and streams
- * audio out — there is no way to append to a text already being spoken — so the earliest possible
- * start is the first complete sentence.
+ * What is *not* read is `statusLine` — the tool and command lines. Those are already on screen as
+ * `#tool`, they are machine syntax rather than speech, and a voice reciting `jj log -r @` is noise.
+ *
+ * Blocks replace each other rather than queue: a new block means the previous one is no longer
+ * current, so it is cut with a short fade and the new text starts. Sentences *within* a block
+ * queue, because they are one continuous thought.
  */
-let talkBlock = '';      // the current block's text, as last seen
+let talkBlock = '';   // the current block's text, as last seen
+let talkWords = 0;    // words of it handed over so far
 
 /**
- * Hand over every sentence of the block that is now complete.
+ * Hand over every sentence of the current block that is now complete.
  *
- * `startWord` is the sentence's first word counted across the whole answer, so the app can report
- * a word index the page can highlight without the two having to agree on how sentences were split.
+ * `startWord` counts words already sent *in this block*, so the app can report a word index into
+ * the block being spoken — which is the one on screen and the one being highlighted.
  */
 function speakStreamingBlock(text) {
   if (!talkOn || speechFrame?.contentWindow === undefined) return;
   const body = text.trim();
   if (body === '') return;
 
-  // A new block: the text no longer extends what we were reading. Drop the old one rather than
-  // letting a preamble's audio run on over the answer.
+  // A new block: what was playing is now a previous message. Tell the app to cut it rather than
+  // letting it run over the top of the new text.
+  let interrupt = false;
   if (!body.startsWith(talkBlock)) {
-    if (talkBlock !== '') speechFrame.contentWindow.postMessage({ type: 'stop' }, '*');
     talkBlock = '';
-    talkedWords = 0;
+    talkWords = 0;
+    interrupt = true;
   }
   if (body === talkBlock) return;
 
@@ -2143,26 +2212,37 @@ function speakStreamingBlock(text) {
   // away when the rest arrives, and it would be spoken with the intonation of a finished thought.
   const complete = fresh.match(/^[\s\S]*[.!?…](?=\s|$)/);
   if (complete === null) return;
-  const spoken = complete[0];
-  const startWord = talkedWords;
-  talkedWords += (spoken.match(/\S+/g) || []).length;
-  talkBlock += spoken;
-  speechFrame.contentWindow.postMessage({ type: 'speak', text: spoken.trim(), startWord }, '*');
+  const taken = complete[0];
+  talkBlock += taken;
+  // Split into sentences so each is one request, and carry the running word offset so the
+  // highlight can address words within the block rather than restarting at the sentence.
+  const sentences = taken.split(/(?<=[.!?…])(?=\s|$)/).filter((part) => part.trim() !== '');
+  for (const [index, sentence] of sentences.entries()) {
+    speechFrame.contentWindow.postMessage({
+      type: 'speak',
+      text: sentence.trim(),
+      startWord: talkWords,
+      // Only the first sentence of a new block cuts the old one off; the rest of the block is a
+      // continuation and queues behind it.
+      interrupt: index === 0 && interrupt,
+    }, '*');
+    talkWords += (sentence.match(/\S+/g) || []).length;
+  }
 }
 
-/** Flush whatever the block ended on, which has no closing punctuation to make it "complete". */
+/** Flush whatever a block ended on, which has no closing punctuation to make it "complete". */
 function speakRemainder(text) {
   if (!talkOn || speechFrame?.contentWindow === undefined) return;
-  const body = text.trim();
-  const rest = body.slice(talkBlock.length).trim();
+  // Only the block we were actually reading can have an unfinished tail: if the turn ended on a
+  // different block, `talkBlock` is a prefix of nothing and slicing by its length would cut
+  // into the middle of a word.
+  if (!text.trim().startsWith(talkBlock)) return;
+  const rest = text.trim().slice(talkBlock.length).trim();
   if (rest === '') return;
-  speechFrame.contentWindow.postMessage({ type: 'speak', text: rest, startWord: talkedWords }, '*');
-  talkedWords += (rest.match(/\S+/g) || []).length;
-  talkBlock = body;
+  speechFrame.contentWindow.postMessage({ type: 'speak', text: rest, startWord: talkWords }, '*');
+  talkWords += (rest.match(/\S+/g) || []).length;
+  talkBlock = text.trim();
 }
-
-/** Word count handed over so far in the current block's answer. */
-let talkedWords = 0;
 
 function applyView(view) {
   const d = view && typeof view === 'object' ? view : {};
@@ -2190,7 +2270,7 @@ function applyView(view) {
   if (turnEnded && !wasEnded) {
     // The turn is over: whatever the last block ended on has no closing punctuation to make it
     // look complete, and nothing else is coming to finish it.
-    const ended = liveText || turnText;
+    const ended = liveText;
     requestAnimationFrame(() => {
       speakRemainder(ended);
       talkBlock = '';
