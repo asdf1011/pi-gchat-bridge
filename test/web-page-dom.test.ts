@@ -2283,7 +2283,9 @@ test("a conversation shows the format behind the send caret, without opening it"
     // second control beside it.
     const menu = doc.getElementById("send-menu")!;
     assert.equal(menu.hidden, false, "the menu is reachable without typing a command");
-    assert.equal(doc.getElementById("send-primary")!.textContent, "Send");
+    // Trimmed because the button now also holds the microphone it swaps in while talking mode is
+    // on with nothing to send; the word is still what is on it here.
+    assert.equal(doc.getElementById("send-primary")!.textContent?.trim(), "Send");
 
     // What is in use, in words, once the menu is open.
     (menu as HTMLButtonElement).click();

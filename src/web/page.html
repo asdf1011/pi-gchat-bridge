@@ -564,6 +564,30 @@
   @keyframes talk-glow { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }
   /* A failure has to be visible somewhere other than the console. */
   #picker .talk.failed { background: #c0392b; }
+
+  /* The send button doubling as the microphone. Same paths as the picker's, so the two cannot
+     drift: idle is a filled capsule with still waves, speaking animates them. */
+  #send-primary .send-mic { display: none; width: 1.15em; height: 1.15em; fill: none;
+    stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  /* Only while there is nothing to send. With text in the composer the word comes back, because
+     the same click sends then — measured, it was showing the microphone while sending. */
+  #send-primary.talking.empty .send-label { display: none; }
+  #send-primary.talking.empty .send-mic { display: block; }
+  #send-primary.talking .talk-mic { fill: currentColor; }
+  #send-primary .talk-waves { opacity: .35; }
+  #send-primary .talk-waves path { transform-origin: 9px 11px; }
+  /* Armed but silent still has to look alive, or "is it on?" is unanswerable when nothing is
+     playing: the capsule breathes slowly, the waves stay still. */
+  #send-primary.talking .talk-mic { animation: talk-glow 2.6s ease-in-out infinite; }
+  #send-primary.speaking .talk-waves { opacity: 1; }
+  #send-primary.speaking .talk-waves path { animation: talk-wave 1.1s ease-in-out infinite; }
+  #send-primary.speaking .talk-waves path + path { animation-delay: .22s; }
+  #send-primary.speaking .talk-mic { animation-duration: 1.1s; }
+  @media (prefers-reduced-motion: reduce) {
+    #send-primary.talking .talk-mic,
+    #send-primary.speaking .talk-waves path { animation: none; }
+    #send-primary.speaking .talk-waves { opacity: 1; }
+  }
   @media (prefers-reduced-motion: reduce) {
     #picker .talk.speaking .talk-waves path,
     #picker .talk.speaking .talk-mic { animation: none; }
@@ -941,7 +965,24 @@
            why it lives under the caret rather than beside it. The trailing corner
            keeps the composer's tighter radius all the way across. -->
       <div id="send-group">
-        <button id="send-primary" type="submit">Send</button>
+        <!-- While talking mode is on and there is nothing to send, this button is the microphone
+             instead of the word "Send": the send control is the one thing always on screen, so it
+             is the honest place to show that answers are being read aloud. Typing brings the word
+             back, because sending must never be lost to a mode. -->
+        <button id="send-primary" type="submit">
+          <span class="send-label">Send</span>
+          <svg class="send-mic" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <g class="talk-mic">
+              <rect x="9" y="2.5" width="6" height="11" rx="3"/>
+              <path class="talk-stand" d="M6 10.5v1a6 6 0 0 0 12 0v-1"/>
+              <path class="talk-stand" d="M12 17.5V21"/>
+            </g>
+            <g class="talk-waves">
+              <path d="M18.4 6.2a7.6 7.6 0 0 1 0 9.6"/>
+              <path d="M21 3.6a11 11 0 0 1 0 14.8"/>
+            </g>
+          </svg>
+        </button>
         <button id="send-menu" type="button" aria-haspopup="dialog" aria-expanded="false"
                 title="Model and thinking level" aria-label="Choose model and thinking level">
           <span id="send-caret" aria-hidden="true"></span>
@@ -2074,16 +2115,82 @@ async function talkAppUrl() {
   return url;
 }
 
+/**
+ * The send button carries the mode.
+ *
+ * It is the one control that is always in view, so it is where "answers are being read aloud"
+ * belongs — as a microphone in place of the word, animated while sound is coming out. A typed
+ * message brings the word back: sending outranks the mode, and a mode that swallows a message
+ * would be a trap.
+ */
+function refreshSendButton() {
+  const send = document.getElementById('send-primary');
+  if (send === null) return;
+  const idle = (document.getElementById('text')?.value ?? '').trim() === '';
+  send.classList.toggle('talking', talkOn);
+  send.classList.toggle('empty', idle);
+  // The label follows what the button *is* right now, not the mode: with text in the composer it
+  // sends, and telling a screen reader otherwise would be a lie about the same click.
+  const asMicrophone = talkOn && idle;
+  send.setAttribute('aria-label', asMicrophone ? 'Turn off read answers aloud' : 'Send message');
+  send.title = asMicrophone ? 'Read answers aloud is on — press to turn it off' : 'Send';
+}
+
+/** Speaking state, shown on both microphones: the send button and the one in the picker. */
+function setSpeaking(on) {
+  for (const button of [document.getElementById('send-primary'), talk]) {
+    if (button !== null) button.classList.toggle('speaking', on);
+  }
+}
+
+/**
+ * Keep the screen on while talking mode is on.
+ *
+ * A phone that locks suspends the page, and a suspended page stops scheduling audio — so talking
+ * mode goes quiet exactly when it is most useful. The Wake Lock API is the only honest fix; where
+ * it does not exist, or is refused (it needs a visible, secure page), nothing here pretends.
+ *
+ * The lock is dropped whenever the page is hidden, by the platform rather than by choice, so it is
+ * re-requested when the page comes back.
+ */
+let wakeLock = null;
+
+async function keepAwake(on) {
+  if (typeof navigator === 'undefined' || !('wakeLock' in navigator)) return;
+  if (!on) {
+    const held = wakeLock;
+    wakeLock = null;
+    try { await held?.release(); } catch { /* already gone */ }
+    return;
+  }
+  // A hidden page cannot hold one; `visibilitychange` asks again when it returns.
+  if (document.visibilityState !== 'visible') return;
+  try {
+    wakeLock = await navigator.wakeLock.request('screen');
+    wakeLock.addEventListener('release', () => { wakeLock = null; });
+  } catch {
+    // Refused (no gesture, battery saver, or unsupported). Talking mode still works while the
+    // screen is on; it just cannot stop the screen sleeping.
+    wakeLock = null;
+  }
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && talkOn) void keepAwake(true);
+});
+
 async function setTalking(on) {
   talkOn = on;
   talk.setAttribute('aria-pressed', on ? 'true' : 'false');
   talk.classList.remove('failed');
+  refreshSendButton();
+  void keepAwake(on);
   // The popup is a place to make a choice, and this is the choice: leaving it open over the
   // transcript means turning talking mode on looks like nothing happened.
   if (on && pickerOpen) closePicker();
   if (!on) {
     speechFrame?.contentWindow?.postMessage({ type: 'stop' }, '*');
-    talk.classList.remove('speaking');
+    setSpeaking(false);
     clearHighlight();
     return;
   }
@@ -2117,11 +2224,11 @@ async function setTalking(on) {
       const data = event.data;
       if (data === null || typeof data !== 'object') return;
       if (data.type === 'word') highlightWord(Number(data.index));
-      if (data.type === 'started') talk.classList.add('speaking');
-      if (data.type === 'end') { talk.classList.remove('speaking'); clearHighlight(); }
+      if (data.type === 'started') setSpeaking(true);
+      if (data.type === 'end') { setSpeaking(false); clearHighlight(); }
       if (data.type === 'error') {
         // A microphone that animates while nothing is audible is worse than no icon: say so.
-        talk.classList.remove('speaking');
+        setSpeaking(false);
         talk.classList.add('failed');
         talk.title = `Speech failed: ${String(data.message ?? 'unknown error')}`;
         console.warn('speech app error:', data.message);
@@ -3408,6 +3515,20 @@ pickerApply.onclick = () => void applyFormat();
 
 const talkButton = document.getElementById('talk');
 talkButton.onclick = () => void setTalking(!talkOn);
+
+// The send button is a microphone while talking mode is on, so pressing it turns the mode off
+// instead of sending — unless there is something to send, in which case the word is showing and
+// sending is what it does. `preventDefault` is what stops the form submitting.
+document.getElementById('send-primary').addEventListener('click', (event) => {
+  if (!talkOn) return;
+  if ((document.getElementById('text')?.value ?? '').trim() !== '') return;
+  event.preventDefault();
+  void setTalking(false);
+});
+
+// Typing restores the word "Send", so the two never fight over what the button does.
+document.getElementById('text').addEventListener('input', refreshSendButton);
+refreshSendButton();
 pickerScrim.onclick = () => closePicker();
 pickerSearch.addEventListener('input', () => {
   drawModels(pickerSearch.value);
