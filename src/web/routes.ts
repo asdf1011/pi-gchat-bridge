@@ -31,6 +31,7 @@
  */
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import nodePath from "node:path";
 import type http from "node:http";
 
 import {
@@ -46,7 +47,7 @@ import {
   type PastedImage,
 } from "./sink.js";
 import { manifestVersion, mountRootOf, webManifest } from "./manifest.js";
-import { renderMarkdown } from "./markdown.js";
+import { markdownDocument, renderMarkdown } from "./markdown.js";
 import { modelKey } from "../shared/model-key.js";
 import { readBody as readBodyShared } from "../shared/serve-routes.js";
 import { runCommand } from "../commands/command-surface.js";
@@ -467,6 +468,26 @@ export async function handleWebRequest(
     if (file === undefined) { res.writeHead(404).end("not found"); return true; }
     let body: Buffer;
     try { body = fs.readFileSync(file); } catch { res.writeHead(404).end("not found"); return true; }
+    // Markdown is rendered, not served raw. A note or a report beside the app is a document a
+    // reader is meant to read; served as `text/plain` the viewer can only offer to download it,
+    // which is what "the report link shows nothing" turned out to be.
+    if (/\.(md|markdown)$/i.test(file)) {
+      const title = nodePath.basename(file).replace(/\.(md|markdown)$/i, "");
+      const html = markdownDocument(title, renderMarkdown(body.toString("utf8"), { images: true }));
+      const buffer = Buffer.from(html, "utf8");
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Content-Length": String(buffer.byteLength),
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "frame-ancestors 'self' https://pi.hl.id.au",
+        "Cross-Origin-Opener-Policy": "same-origin",
+        "Cross-Origin-Embedder-Policy": "require-corp",
+        "Cross-Origin-Resource-Policy": "cross-origin",
+      });
+      res.end(req.method === "HEAD" ? undefined : buffer);
+      return true;
+    }
     res.writeHead(200, {
       "Content-Type": appFileType(file),
       "Content-Length": String(body.byteLength),
