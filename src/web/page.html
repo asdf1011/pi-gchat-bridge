@@ -529,6 +529,11 @@
     padding: .4rem 1rem; border-radius: .5rem; border: 1px solid transparent;
     background: var(--accent); color: var(--accent-ink); cursor: pointer; }
   #picker .apply:hover:not(:disabled) { background: var(--accent-hover); }
+  /* The word being read aloud. A `::highlight()` pseudo-element, because the CSS Custom
+     Highlight API paints a Range without the text being wrapped in elements — which matters
+     here, since the transcript is rebuilt on every frame and any spans would be destroyed. */
+  ::highlight(speaking) { background: #ffd54a99; color: inherit; }
+
   /* Disabled when nothing is staged: an Apply that would send nothing is a button
      that lies about having work to do. */
   #picker .apply:disabled { opacity: .45; cursor: default; }
@@ -936,9 +941,15 @@
        surface could do to the conversation changed — only when. -->
   <div class="actions" id="picker-actions">
     <span id="picker-staged" role="status" aria-live="polite"></span>
+    <!-- Talking mode. The bridge has no opinion about speech synthesis: this asks a
+         *speech app* — any page that implements the small postMessage protocol below —
+         to read answers aloud, and takes the word positions it reports back. Which app
+         that is lives in localStorage, so the web UI carries no model or vendor. -->
+    <button id="talk" type="button" class="apply" aria-pressed="false" title="Read answers aloud">Talk</button>
     <button id="picker-apply" type="button" class="apply" disabled>Apply</button>
   </div>
 </div>
+<iframe id="speech-host" hidden referrerpolicy="no-referrer" title="Speech"></iframe>
 <button id="new-chat" title="Start a new conversation" aria-label="New chat">＋</button>
 <aside id="artifacts" hidden>
   <div id="artifacts-resize" role="separator" aria-orientation="vertical" title="Drag to resize"></div>
@@ -1865,6 +1876,9 @@ function connectStream(id) {
     if (!pageVersion || reloadedForVersion) return;
     try {
       const environment = await (await apiFetch(rel('api/environment'))).json();
+      // Where apps (and so the speech app) are served. Not this origin: the artifact host is a
+      // separate hostname, which is what keeps app code away from the conversation API.
+      artifactsOrigin = String(environment.artifactsBaseUrl || '').replace(/\/$/, '');
       const latest = String(environment.pageVersion || '');
       if (latest && latest !== pageVersion) {
         reloadedForVersion = true;
@@ -1956,8 +1970,143 @@ async function catchUp(id, generation) {
  * reconnect. The frames used to be read field by field at their call site, which is how the same
  * facts came to be assigned in two places and drift.
  */
+/**
+ * Talking mode.
+ *
+ * The web UI deliberately knows nothing about speech synthesis. It knows a *speech app* URL and a
+ * three-message protocol, and everything else — the model, the voice, the chunking — belongs to
+ * that app, which lives in the conversation's artifacts like every other app:
+ *
+ *   page -> app   {type:"speak", text}
+ *   app  -> page  {type:"started"}
+ *   app  -> page  {type:"word", index}     0-based index into the words of `text`
+ *   app  -> page  {type:"end"} | {type:"error", message}
+ *
+ * The app URL is asked for once and remembered, because there is no registry the web UI could
+ * consult: apps are served per conversation, and the artifacts origin is a different origin with
+ * no CORS for this page.
+ */
+const TALK_KEY = 'pi.talk.app';
+/** The artifacts origin, learned from `api/environment`; empty until it is known. */
+let artifactsOrigin = '';
+let talkOn = false;
+let speechFrame;
+let spokenWords = [];      // the ranges being highlighted, in reading order
+let highlight;
+
+function talkAppUrl() {
+  let url = '';
+  try { url = localStorage.getItem(TALK_KEY) || ''; } catch { /* private mode */ }
+  if (url !== '') return url;
+  // Apps are served from the *artifacts* origin, which is a different hostname from this page —
+  // suggesting `location.origin + /apps/…` pointed at the web adapter, which serves no apps.
+  // The environment endpoint is the only place that knows where they live.
+  const suggestion = artifactsOrigin === ''
+    ? ''
+    : `${artifactsOrigin}/apps/${current}/`;
+  const asked = window.prompt(
+    'URL of the speech app that should read answers aloud\n' +
+    '(an app under /apps/… implementing the {speak, word, end} protocol)',
+    suggestion,
+  );
+  if (!asked) return '';
+  try { localStorage.setItem(TALK_KEY, asked); } catch { /* private mode */ }
+  return asked;
+}
+
+function setTalking(on) {
+  talkOn = on;
+  talk.setAttribute('aria-pressed', on ? 'true' : 'false');
+  if (!on) {
+    speechFrame?.contentWindow?.postMessage({ type: 'stop' }, '*');
+    clearHighlight();
+    return;
+  }
+  const url = talkAppUrl();
+  if (!url) { talkOn = false; talk.setAttribute('aria-pressed', 'false'); return; }
+  if (speechFrame === undefined) {
+    speechFrame = document.getElementById('speech-host');
+    speechFrame.src = url;
+    // Same-origin would be nicer, but an app may be served from the artifacts origin; the
+    // protocol carries no secrets, so a wildcard target is the honest choice.
+    window.addEventListener('message', (event) => {
+      if (event.source !== speechFrame.contentWindow) return;
+      const data = event.data;
+      if (data === null || typeof data !== 'object') return;
+      if (data.type === 'word') highlightWord(Number(data.index));
+      if (data.type === 'end') clearHighlight();
+    });
+  }
+}
+
+/** Every word of a message as a Range, so the highlight can move without touching the DOM. */
+function collectWords(root) {
+  const ranges = [];
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+    const text = node.nodeValue || '';
+    const re = /\S+/g;
+    for (let m = re.exec(text); m !== null; m = re.exec(text)) {
+      const range = document.createRange();
+      range.setStart(node, m.index);
+      range.setEnd(node, m.index + m[0].length);
+      ranges.push(range);
+    }
+  }
+  return ranges;
+}
+
+/**
+ * Highlight the word being spoken.
+ *
+ * The CSS Custom Highlight API rather than wrapping every word in a span: `paint()` rebuilds the
+ * transcript on every frame, so spans would be destroyed mid-sentence, and rewriting the HTML of
+ * a message to read it aloud would be an unkind thing to do to a reader who is scrolling it.
+ */
+function highlightWord(index) {
+  if (typeof CSS === 'undefined' || CSS.highlights === undefined) return;
+  const range = spokenWords[index];
+  if (range === undefined) return;
+  highlight = new Highlight(range);
+  CSS.highlights.set('speaking', highlight);
+  const box = range.getBoundingClientRect?.();
+  if (box && (box.bottom > window.innerHeight - 80 || box.top < 0)) {
+    range.startContainer.parentElement?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }
+}
+
+function clearHighlight() {
+  if (typeof CSS !== 'undefined' && CSS.highlights !== undefined) CSS.highlights.delete('speaking');
+  highlight = undefined;
+  spokenWords = [];
+}
+
+/**
+ * Read the answer that just finished.
+ *
+ * Triggered when a turn *ends* rather than as the text streams: a turn is several messages — it
+ * says something, calls a tool, says something else — and speaking those as they arrive would read
+ * out the work rather than the answer. The last assistant row in the log is the answer.
+ *
+ * The words come from that row's own DOM, so the highlight lands on exactly the text a reader sees,
+ * including anything rendered from markdown.
+ */
+function speakFinalAnswer() {
+  if (!talkOn || speechFrame?.contentWindow === undefined) return;
+  // `.pi` is the assistant's row class (`.me` is the reader's), so this is the last thing the
+  // agent said — the answer the turn ended on.
+  const rows = log.querySelectorAll('.msg.pi .bubble');
+  const target = rows.length > 0 ? rows[rows.length - 1] : null;
+  if (target === null) return;
+  const text = (target.innerText || '').trim();
+  if (text === '') return;
+  spokenWords = collectWords(target);
+  speechFrame.contentWindow.postMessage({ type: 'speak', text }, '*');
+}
+
 function applyView(view) {
   const d = view && typeof view === 'object' ? view : {};
+  const wasEnded = turnEnded;
   liveText = typeof d.text === 'string' ? d.text : '';
   turnText = typeof d.turn === 'string' ? d.turn : '';
   turnHtml = typeof d.turnHtml === 'string' ? d.turnHtml : '';
@@ -1971,6 +2120,14 @@ function applyView(view) {
   // already finished, which only a new turn painted over.
   turnEnded = !d.busy;
   statusLine = '';
+  // The *transition* is the trigger, not the state: `applyView` runs on every frame, and
+  // `turnEnded` stays true between turns, so testing the state alone would re-read the same
+  // answer on every repaint.
+  if (turnEnded && !wasEnded) {
+    // After the paint that shows the answer, so the words being highlighted are the ones on
+    // screen rather than the ones from the previous frame.
+    requestAnimationFrame(() => speakFinalAnswer());
+  }
 }
 
 /**
@@ -3066,6 +3223,9 @@ sendMenuButton.onclick = () => {
   else void openPicker();
 };
 pickerApply.onclick = () => void applyFormat();
+
+const talkButton = document.getElementById('talk');
+talkButton.onclick = () => setTalking(!talkOn);
 pickerScrim.onclick = () => closePicker();
 pickerSearch.addEventListener('input', () => {
   drawModels(pickerSearch.value);
