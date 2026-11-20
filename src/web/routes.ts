@@ -501,18 +501,25 @@ export async function handleWebRequest(
     const stamp = new Date(now).toISOString().replace(/[:.]/g, "-");
     const base = `${stamp}-${randomUUID().slice(0, 6)}`;
     const query = url.searchParams;
+    // The truth and the prediction, side by side: which conversation and message the sentence came
+    // from, the sentence as typed, the context words it was given, and what the detectors said.
+    // A clip without both is a recording; with both it is an evaluation sample.
     const meta = {
       receivedAt: new Date(now).toISOString(),
-      conversationId: Number(conv),
+      conversationId: Number(query.get("conversationId") ?? conv),
+      messageId: query.get("messageId") ?? "",
       app,
       bytes: body.byteLength,
       note: query.get("note") ?? "",
+      expected: query.get("expected") ?? "",
+      context: (query.get("context") ?? "").split("/").filter((word) => word !== ""),
       onsetSeconds: query.get("onset") ?? "",
       endSeconds: query.get("end") ?? "",
-      leadSeconds: query.get("lead") ?? "",
-      durationSeconds: query.get("duration") ?? "",
-      transcript: query.get("text") ?? "",
+      turnScore: query.get("turnScore") ?? "",
+      turnScore2: query.get("turnScore2") ?? "",
+      transcript: query.get("transcript") ?? query.get("text") ?? "",
       model: query.get("model") ?? "",
+      durationSeconds: query.get("duration") ?? "",
     };
     try {
       fs.mkdirSync(nodePath.join(dir, "clips"), { recursive: true });
