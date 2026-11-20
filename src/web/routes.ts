@@ -229,6 +229,13 @@ export interface WebRouteOptions {
    * one cannot start. Serving our own apps here is what lets talking mode work at all.
    */
   appFileFor?: (conversationId: number, app: string, relative: string) => string | undefined;
+  /**
+   * An app's directory, for the one thing an app writes back: audio clips.
+   *
+   * Separate from `appFileFor` because writing needs the directory, not a file that already
+   * exists — and the name is chosen here, never by the caller.
+   */
+  appDirFor?: (conversationId: number, app: string) => string | undefined;
   /** Resolved by the caller, so this module does no header trust of its own. */
   who: Identity;
   log?: { info(message: string): void };
@@ -238,6 +245,9 @@ export interface WebRouteOptions {
  * Strip a reverse proxy's mount prefix, so route matching is independent of
  * whether the proxy passes "/pi/web/..." or rewrites it to "/web/...".
  */
+/** Clips accepted in the last hour. Module scope: one page, one budget. */
+const clipStamps: number[] = [];
+
 export function webPath(pathname: string): string {
   const at = pathname.indexOf("/web");
   return at > 0 ? pathname.slice(at) : pathname;
@@ -461,6 +471,63 @@ export async function handleWebRequest(
   // App files, on this origin. Deliberately narrow: read-only, contained in the app directory by
   // the resolver, and served with the artifact CSP so an app cannot reach this origin's API by
   // being framed here.
+  // Audio clips an app wants kept, on the origin the page is served from — a relative POST from
+  // the page, so no CORS and no second origin to keep in step.
+  //
+  // Bounded: a size cap, a count per hour, and a filename chosen here. Reports exist to be read;
+  // these exist to be kept, so nothing is triggered by one.
+  const appClip = /^\/apps\/(\d+)\/([^/]+)\/clip$/.exec(path);
+  if (req.method === "POST" && appClip) {
+    const [, conv, app] = appClip;
+    const dir = options.appDirFor?.(Number(conv), app ?? "");
+    if (dir === undefined) { res.writeHead(404).end("not an app"); return true; }
+    const now = Date.now();
+    while (clipStamps.length > 0 && now - clipStamps[0] > 60 * 60 * 1000) clipStamps.shift();
+    if (clipStamps.length >= 40) { res.writeHead(429).end("at most 40 clips an hour"); return true; }
+    // Read as bytes, not through `readBody`: that decodes UTF-8, which corrupts audio. The cap is
+    // enforced while reading so a huge upload is refused before it is held in memory.
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let tooLarge = false;
+    for await (const chunk of req) {
+      const buffer = chunk as Buffer;
+      size += buffer.length;
+      if (size > 4 * 1024 * 1024) { tooLarge = true; req.destroy(); break; }
+      chunks.push(buffer);
+    }
+    if (tooLarge) { res.writeHead(413).end("clip larger than 4 MiB"); return true; }
+    const body = Buffer.concat(chunks);
+    if (body.byteLength === 0) { res.writeHead(400).end("empty clip"); return true; }
+    const stamp = new Date(now).toISOString().replace(/[:.]/g, "-");
+    const base = `${stamp}-${randomUUID().slice(0, 6)}`;
+    const query = url.searchParams;
+    const meta = {
+      receivedAt: new Date(now).toISOString(),
+      conversationId: Number(conv),
+      app,
+      bytes: body.byteLength,
+      note: query.get("note") ?? "",
+      onsetSeconds: query.get("onset") ?? "",
+      endSeconds: query.get("end") ?? "",
+      leadSeconds: query.get("lead") ?? "",
+      durationSeconds: query.get("duration") ?? "",
+      transcript: query.get("text") ?? "",
+      model: query.get("model") ?? "",
+    };
+    try {
+      fs.mkdirSync(nodePath.join(dir, "clips"), { recursive: true });
+      fs.writeFileSync(nodePath.join(dir, "clips", `${base}.wav`), body);
+      fs.writeFileSync(nodePath.join(dir, "clips", `${base}.json`), JSON.stringify(meta, null, 2));
+    } catch {
+      res.writeHead(500).end("could not store the clip");
+      return true;
+    }
+    clipStamps.push(now);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, file: `clips/${base}.wav` }));
+    return true;
+  }
+
   const appFile = /^\/apps\/(\d+)\/([^/]+)\/(.+)$/.exec(path);
   if ((req.method === "GET" || req.method === "HEAD") && appFile) {
     const [, conv, app, relative] = appFile;

@@ -97,6 +97,8 @@ const server = http.createServer(
               // exists, only that one offered to speak.
               // The app's files, served from *this* origin. Talking mode needs the app in a frame
               // that inherits this page's cross-origin isolation, and only same-origin frames do.
+              appDirFor: (conversationId: number, app: string): string | undefined =>
+                appDirOf(path.join(artifactsDir, "conversation", String(conversationId)), app),
               appFileFor: (conversationId: number, app: string, relative: string): string | undefined => {
                 const dir = appDirOf(path.join(artifactsDir, "conversation", String(conversationId)), app);
                 return dir === undefined ? undefined : resolveAppFile(dir, relative);
