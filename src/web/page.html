@@ -2212,13 +2212,18 @@ function speakStreamingBlock(text) {
 
   // A new block: what was playing is now a previous message. Tell the app to cut it rather than
   // letting it run over the top of the new text.
+  if (body === talkBlock) return;
+  // A *shorter* snapshot than what we have already read is the same block seen earlier, not a new
+  // one. Frames are not guaranteed to arrive in order at the end of a turn, and treating one as a
+  // new block discarded the progress and re-read the answer from its first word.
+  if (talkBlock !== '' && talkBlock.startsWith(body)) return;
+
   let interrupt = false;
   if (!body.startsWith(talkBlock)) {
     talkBlock = '';
     talkBlockId += 1;
     interrupt = true;
   }
-  if (body === talkBlock) return;
 
   const fresh = body.slice(talkBlock.length);
   // Only whole sentences: a half-sentence handed to the model is a request that has to be thrown
@@ -2286,10 +2291,18 @@ function applyView(view) {
   }
   if (turnEnded && !wasEnded) {
     // The turn is over: whatever the last block ended on has no closing punctuation to make it
-    // look complete, and nothing else is coming to finish it. Read from the last block that had
-    // text, not from this frame: ending a turn empties `liveText`, so the final sentence of every
-    // answer was being dropped — which is what "it stopped at …" was.
-    const ended = liveText !== '' ? liveText : lastLiveText;
+    // look complete, and nothing else is coming to finish it.
+    //
+    // Which text is authoritative is the whole problem. The frame that ends a turn often carries
+    // no `liveText` at all (the answer has moved into the transcript), and the last frame that
+    // *did* carry some can be a snapshot from before the final tokens — so taking "the last
+    // non-empty one" speaks a prefix and stops mid-sentence. `turn` is the turn's own accumulated
+    // text, which is complete. Take the longest candidate that still begins with what we have
+    // already read, so the tail is everything not yet said and nothing already said twice.
+    const candidates = [liveText, lastLiveText, turnText]
+      .map((text) => text.trim())
+      .filter((text) => text !== '' && text.startsWith(talkBlock));
+    const ended = candidates.reduce((longest, text) => (text.length > longest.length ? text : longest), talkBlock);
     requestAnimationFrame(() => {
       speakRemainder(ended);
       talkBlock = '';
