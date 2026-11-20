@@ -565,6 +565,12 @@
   /* A failure has to be visible somewhere other than the console. */
   #picker .talk.failed { background: #c0392b; }
 
+  /* The voice menu, sized like the buttons it sits between. `hidden` until the speech app has
+     said what it has: an empty menu is worse than no menu. */
+  #picker .actions select { flex: none; font: inherit; font-size: .82em; max-width: 9.5rem;
+    padding: .3rem .35rem; border-radius: .4rem; border: 1px solid #8884;
+    background: Canvas; color: inherit; }
+
   /* The send button doubling as the microphone. Same paths as the picker's, so the two cannot
      drift: idle is a filled capsule with still waves, speaking animates them. */
   #send-primary .send-mic { display: none; width: 1.15em; height: 1.15em; fill: none;
@@ -1025,6 +1031,10 @@
          The waves animate only while audio is actually playing — the app reports `started`
          and `end` — so the animation is a truthful signal rather than a CSS marquee for
          "probably fine". -->
+    <!-- Which voice reads answers. The options are not known here: the speech app reports what it
+         can do, and this shows exactly that list — the web UI carries no engine names, so adding a
+         voice to the app adds it to this menu with no change on this side. -->
+    <select id="talk-model" aria-label="Voice" title="Voice for reading answers aloud" hidden></select>
     <button id="talk" type="button" class="apply talk" aria-pressed="false"
             aria-label="Read answers aloud" title="Read answers aloud">
       <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -1976,22 +1986,7 @@ function connectStream(id) {
     // transcript, and the transcript is what has to be caught up; this is the one place that knows a
     // stream actually came back.
     void catchUp(id, generation);
-    if (!pageVersion || reloadedForVersion) return;
-    try {
-      const environment = await (await apiFetch(rel('api/environment'))).json();
-      // Where apps (and so the speech app) are served. Not this origin: the artifact host is a
-      // separate hostname, which is what keeps app code away from the conversation API.
-      artifactsOrigin = String(environment.artifactsBaseUrl || '').replace(/\/$/, '');
-      const latest = String(environment.pageVersion || '');
-      if (latest && latest !== pageVersion) {
-        reloadedForVersion = true;
-        saveDraft();
-        location.reload();
-      }
-    } catch {
-      // A failed probe means the server is not answering yet; the next open tries
-      // again.
-    }
+    void probeEnvironment();
   });
 
   source.addEventListener('tool', (e) => {
@@ -2176,8 +2171,14 @@ async function keepAwake(on) {
 }
 
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && talkOn) void keepAwake(true);
+  if (document.visibilityState !== 'visible') return;
+  if (talkOn) void keepAwake(true);
+  // Coming back to the tab is the cheapest moment to notice a rebuild.
+  void probeEnvironment();
 });
+
+// Every minute is often enough to notice a rebuild and rare enough to cost nothing.
+setInterval(() => { void probeEnvironment(); }, 60_000);
 
 async function setTalking(on) {
   talkOn = on;
@@ -2223,6 +2224,7 @@ async function setTalking(on) {
       if (event.source !== speechFrame.contentWindow) return;
       const data = event.data;
       if (data === null || typeof data !== 'object') return;
+      if (data.type === 'models') applyModelOptions(data);
       if (data.type === 'word') highlightWord(Number(data.index));
       if (data.type === 'started') setSpeaking(true);
       if (data.type === 'end') { setSpeaking(false); clearHighlight(); }
@@ -2420,6 +2422,32 @@ function applyView(view) {
       talkBlockId += 1;
       lastLiveText = '';
     });
+  }
+}
+
+/**
+ * Ask the server which page it is serving, and take a newer one.
+ *
+ * Run on reconnect *and* on a timer. Reconnect alone was not enough: a page holding a long-lived
+ * stream never reconnects, so a rebuilt front end reached only the tabs that happened to drop
+ * off — and every fix was followed by "did you reload?". The draft is saved first, so the reload
+ * is not a way to lose what somebody was typing.
+ */
+async function probeEnvironment() {
+  if (!pageVersion || reloadedForVersion) return;
+  try {
+    const environment = await (await apiFetch(rel('api/environment'))).json();
+    // Where apps (and so the speech app) are served. Not this origin: the artifact host is a
+    // separate hostname, which is what keeps app code away from the conversation API.
+    artifactsOrigin = String(environment.artifactsBaseUrl || '').replace(/\/$/, '');
+    const latest = String(environment.pageVersion || '');
+    if (latest && latest !== pageVersion) {
+      reloadedForVersion = true;
+      saveDraft();
+      location.reload();
+    }
+  } catch {
+    // A failed probe means the server is not answering; the next one tries again.
   }
 }
 
@@ -3533,6 +3561,37 @@ document.getElementById('send-primary').addEventListener('click', (event) => {
 // Typing restores the word "Send", so the two never fight over what the button does.
 document.getElementById('text').addEventListener('input', refreshSendButton);
 refreshSendButton();
+
+/**
+ * Render the speech app's catalogue of voices, exactly as it gave them.
+ *
+ * Called from the frame's message, so it is a hoisted declaration rather than a loose statement
+ * next to the listener: a frame that reports its options quickly would otherwise be handled
+ * before the element reference existed.
+ */
+function applyModelOptions(data) {
+  const menu = document.getElementById('talk-model');
+  if (menu === null) return;
+  const current = String(data.current ?? '');
+  // A switch replaces the voice, so a highlight from the old one is now meaningless.
+  if (menu.value !== '' && menu.value !== current) clearHighlight();
+  menu.innerHTML = '';
+  for (const option of Array.isArray(data.options) ? data.options : []) {
+    const item = document.createElement('option');
+    item.value = String(option.id ?? '');
+    item.textContent = String(option.label ?? option.id ?? '');
+    menu.append(item);
+  }
+  menu.value = current;
+  // One voice is not a choice: no menu at all rather than a menu with a single entry.
+  menu.hidden = menu.options.length < 2;
+}
+
+const talkModel = document.getElementById('talk-model');
+talkModel.onchange = () => {
+  // The app owns the choice (and remembers it); this only says which one.
+  speechFrame?.contentWindow?.postMessage({ type: 'model', id: talkModel.value }, '*');
+};
 pickerScrim.onclick = () => closePicker();
 pickerSearch.addEventListener('input', () => {
   drawModels(pickerSearch.value);
