@@ -2195,8 +2195,9 @@ function clearHighlight() {
  * current, so it is cut with a short fade and the new text starts. Sentences *within* a block
  * queue, because they are one continuous thought.
  */
-let talkBlock = '';   // the current block's text, as last seen
-let talkWords = 0;    // words of it handed over so far
+let talkBlock = '';      // the current block's text, as last seen
+let talkBlockId = 0;     // which block that is, so word indices can restart with it
+let lastLiveText = '';   // the last block seen with any text in it
 
 /**
  * Hand over every sentence of the current block that is now complete.
@@ -2214,7 +2215,7 @@ function speakStreamingBlock(text) {
   let interrupt = false;
   if (!body.startsWith(talkBlock)) {
     talkBlock = '';
-    talkWords = 0;
+    talkBlockId += 1;
     interrupt = true;
   }
   if (body === talkBlock) return;
@@ -2233,12 +2234,14 @@ function speakStreamingBlock(text) {
     speechFrame.contentWindow.postMessage({
       type: 'speak',
       text: sentence.trim(),
-      startWord: talkWords,
+      // The app numbers the words itself, carrying a cursor across the sentences of one block.
+      // Counting them here instead meant two different splitters had to agree exactly, and they
+      // did not: the reported indices skipped words at some sentence boundaries.
+      block: talkBlockId,
       // Only the first sentence of a new block cuts the old one off; the rest of the block is a
       // continuation and queues behind it.
       interrupt: index === 0 && interrupt,
     }, '*');
-    talkWords += (sentence.match(/\S+/g) || []).length;
   }
 }
 
@@ -2251,8 +2254,7 @@ function speakRemainder(text) {
   if (!text.trim().startsWith(talkBlock)) return;
   const rest = text.trim().slice(talkBlock.length).trim();
   if (rest === '') return;
-  speechFrame.contentWindow.postMessage({ type: 'speak', text: rest, startWord: talkWords }, '*');
-  talkWords += (rest.match(/\S+/g) || []).length;
+  speechFrame.contentWindow.postMessage({ type: 'speak', text: rest, block: talkBlockId }, '*');
   talkBlock = text.trim();
 }
 
@@ -2260,6 +2262,9 @@ function applyView(view) {
   const d = view && typeof view === 'object' ? view : {};
   const wasEnded = turnEnded;
   liveText = typeof d.text === 'string' ? d.text : '';
+  // Kept because the frame that ends a turn can arrive with the answer already moved into the
+  // transcript, leaving `liveText` empty — and the sentence it stopped on then never spoke.
+  if (liveText !== '') lastLiveText = liveText;
   turnText = typeof d.turn === 'string' ? d.turn : '';
   turnHtml = typeof d.turnHtml === 'string' ? d.turnHtml : '';
   liveHtml = typeof d.html === 'string' ? d.html : '';
@@ -2281,12 +2286,15 @@ function applyView(view) {
   }
   if (turnEnded && !wasEnded) {
     // The turn is over: whatever the last block ended on has no closing punctuation to make it
-    // look complete, and nothing else is coming to finish it.
-    const ended = liveText;
+    // look complete, and nothing else is coming to finish it. Read from the last block that had
+    // text, not from this frame: ending a turn empties `liveText`, so the final sentence of every
+    // answer was being dropped — which is what "it stopped at …" was.
+    const ended = liveText !== '' ? liveText : lastLiveText;
     requestAnimationFrame(() => {
       speakRemainder(ended);
       talkBlock = '';
-      talkedWords = 0;
+      talkBlockId += 1;
+      lastLiveText = '';
     });
   }
 }
