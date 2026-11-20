@@ -2097,6 +2097,18 @@ async function setTalking(on) {
   }
   if (speechFrame === undefined) {
     speechFrame = document.getElementById('speech-host');
+    // A cross-origin app would be framed but never *isolated*, so its wasm pthread build could
+    // not start and it would fail with no audio and no error. The discovered URL is same-origin
+    // for exactly this reason; an override is the only way to get here otherwise.
+    try {
+      if (new URL(url, location.href).origin !== location.origin) {
+        console.warn(
+          'talking mode: ' + url + ' is cross-origin, so it will not be cross-origin isolated ' +
+          'and a wasm app that needs SharedArrayBuffer will fail to start. Serve the app from ' +
+          'this origin (/apps/…) instead.',
+        );
+      }
+    } catch { /* not a URL: the frame will simply fail to load */ }
     speechFrame.src = url;
     // Same-origin would be nicer, but an app may be served from the artifacts origin; the
     // protocol carries no secrets, so a wildcard target is the honest choice.

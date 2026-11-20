@@ -30,6 +30,7 @@
  * injection path that can drive tools. That is presentation, and it is this adapter's job.
  */
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
 import type http from "node:http";
 
 import {
@@ -49,6 +50,7 @@ import { renderMarkdown } from "./markdown.js";
 import { modelKey } from "../shared/model-key.js";
 import { readBody as readBodyShared } from "../shared/serve-routes.js";
 import { runCommand } from "../commands/command-surface.js";
+import { appFileType } from "../durable/apps.js";
 import { audioTypeOf, imageTypeOf, isMarkdown, isPdf } from "../durable/artifacts.js";
 import { currentAddress, MAX_COMMENT_CHARS, modelText } from "../durable/comments.js";
 import { entriesBefore } from "../durable/entries.js";
@@ -218,6 +220,14 @@ export interface WebRouteOptions {
    * this module has neither. Empty means no app advertises the capability.
    */
   speechAppFor?: (conversationId: number) => string | undefined;
+  /**
+   * An app file, resolved to a path on disk for serving from *this* origin.
+   *
+   * Same-origin because cross-origin isolation is inherited only by same-origin frames: a
+   * cross-origin frame of an isolated page is not itself isolated, so a wasm pthread build inside
+   * one cannot start. Serving our own apps here is what lets talking mode work at all.
+   */
+  appFileFor?: (conversationId: number, app: string, relative: string) => string | undefined;
   /** Resolved by the caller, so this module does no header trust of its own. */
   who: Identity;
   log?: { info(message: string): void };
@@ -341,6 +351,16 @@ export async function handleWebRequest(
       // discovered. It is only named when the deployment has an artifact origin at
       // all, and it grants nothing beyond `img-src`: no script, no frame, no fetch.
       "Content-Security-Policy": `img-src 'self' data:${artifactImageOrigin(options.artifactsBaseUrl)}; object-src 'none'; base-uri 'self'`,
+      // Cross-origin isolation, because the speech apps it frames need `SharedArrayBuffer` for a
+      // pthread wasm build — and isolation is decided by the *top-level* document. A frame cannot
+      // acquire it on its own: measured, the same app was `crossOriginIsolated: true` loaded
+      // directly and `false` inside this page, which is why talking mode produced no audio.
+      //
+      // The cost is that every cross-origin subresource must opt in with CORP, which the artifact
+      // origin now does for everything it serves. `same-origin` on the opener policy also means a
+      // page opened from a link does not share a browsing context group with this one.
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Cross-Origin-Embedder-Policy": "require-corp",
     });
     res.end(webPage());
     return true;
@@ -437,6 +457,36 @@ export async function handleWebRequest(
   // The chat page's talking mode asks *this* origin which app speaks, rather than the artifact
   // origin: that is a different hostname with no CORS for this page, and the answer is a URL the
   // page is allowed to frame. The web UI still knows nothing about speech beyond the protocol.
+  // App files, on this origin. Deliberately narrow: read-only, contained in the app directory by
+  // the resolver, and served with the artifact CSP so an app cannot reach this origin's API by
+  // being framed here.
+  const appFile = /^\/apps\/(\d+)\/([^/]+)\/(.+)$/.exec(path);
+  if ((req.method === "GET" || req.method === "HEAD") && appFile) {
+    const [, conv, app, relative] = appFile;
+    const file = options.appFileFor?.(Number(conv), app, relative ?? "");
+    if (file === undefined) { res.writeHead(404).end("not found"); return true; }
+    let body: Buffer;
+    try { body = fs.readFileSync(file); } catch { res.writeHead(404).end("not found"); return true; }
+    res.writeHead(200, {
+      "Content-Type": appFileType(file),
+      "Content-Length": String(body.byteLength),
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+      // The app is framed by this page, so it must be frameable by this origin and no other.
+      "Content-Security-Policy": "frame-ancestors 'self'",
+      "Cross-Origin-Resource-Policy": "same-origin",
+      // Every app file carries these, not just the document. Isolation is inherited by same-origin
+      // frames, but only from a document that carries them — and under `COEP: require-corp` the
+      // app's *worker script* is fetched as a child that needs the header as well: without it
+      // Chromium refuses the request outright (`coep-frame-resource-needs-coep-header`), the
+      // worker never starts, and the app reports only "could not load the speech model".
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Cross-Origin-Embedder-Policy": "require-corp",
+    });
+    res.end(req.method === "HEAD" ? undefined : body);
+    return true;
+  }
+
   const speechApp = /^\/api\/c\/(\d+)\/speech$/.exec(api);
   if (req.method === "GET" && speechApp) {
     const url = options.speechAppFor?.(Number(speechApp[1]));

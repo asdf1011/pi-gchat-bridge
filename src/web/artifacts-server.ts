@@ -104,6 +104,12 @@ const BASE_HEADERS: Record<string, string> = {
   "Referrer-Policy": "no-referrer",
   "X-Content-Type-Options": "nosniff",
   "Cross-Origin-Opener-Policy": "same-origin",
+  // Everything this origin serves is meant to be embedded by this deployment's own UI, and the
+  // chat page is cross-origin isolated (the speech apps need `SharedArrayBuffer`). Under
+  // `COEP: require-corp` a cross-origin subresource without this header is *refused*, so without
+  // it the comment composer's crop preview and every artifact image would stop loading — a
+  // failure three steps away from the header that caused it.
+  "Cross-Origin-Resource-Policy": "cross-origin",
 };
 
 /**
