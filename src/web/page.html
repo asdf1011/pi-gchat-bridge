@@ -1994,27 +1994,25 @@ let speechFrame;
 let spokenWords = [];      // the ranges being highlighted, in reading order
 let highlight;
 
-function talkAppUrl() {
+/**
+ * Which app should speak, asked of the bridge rather than of the reader.
+ *
+ * The bridge scans the conversation's app manifests for one that advertises `speech`, so nothing
+ * here names a model, a voice or a directory. An explicit choice in localStorage still wins, which
+ * is the escape hatch for pointing at a different app without changing the bridge.
+ */
+async function talkAppUrl() {
   let url = '';
   try { url = localStorage.getItem(TALK_KEY) || ''; } catch { /* private mode */ }
   if (url !== '') return url;
-  // Apps are served from the *artifacts* origin, which is a different hostname from this page —
-  // suggesting `location.origin + /apps/…` pointed at the web adapter, which serves no apps.
-  // The environment endpoint is the only place that knows where they live.
-  const suggestion = artifactsOrigin === ''
-    ? ''
-    : `${artifactsOrigin}/apps/${current}/`;
-  const asked = window.prompt(
-    'URL of the speech app that should read answers aloud\n' +
-    '(an app under /apps/… implementing the {speak, word, end} protocol)',
-    suggestion,
-  );
-  if (!asked) return '';
-  try { localStorage.setItem(TALK_KEY, asked); } catch { /* private mode */ }
-  return asked;
+  try {
+    const response = await apiFetch(rel(`api/c/${current}/speech`));
+    if (response.ok) url = String((await response.json()).url || '');
+  } catch { /* fall through to "no app" */ }
+  return url;
 }
 
-function setTalking(on) {
+async function setTalking(on) {
   talkOn = on;
   talk.setAttribute('aria-pressed', on ? 'true' : 'false');
   if (!on) {
@@ -2022,8 +2020,14 @@ function setTalking(on) {
     clearHighlight();
     return;
   }
-  const url = talkAppUrl();
-  if (!url) { talkOn = false; talk.setAttribute('aria-pressed', 'false'); return; }
+  const url = await talkAppUrl();
+  if (!url) {
+    talkOn = false;
+    talk.setAttribute('aria-pressed', 'false');
+    window.alert('No app in this conversation offers to speak.\n\n' +
+      'An app opts in with "speech": true in its app.json and a speech.html beside it.');
+    return;
+  }
   if (speechFrame === undefined) {
     speechFrame = document.getElementById('speech-host');
     speechFrame.src = url;
@@ -3280,7 +3284,7 @@ sendMenuButton.onclick = () => {
 pickerApply.onclick = () => void applyFormat();
 
 const talkButton = document.getElementById('talk');
-talkButton.onclick = () => setTalking(!talkOn);
+talkButton.onclick = () => void setTalking(!talkOn);
 pickerScrim.onclick = () => closePicker();
 pickerSearch.addEventListener('input', () => {
   drawModels(pickerSearch.value);

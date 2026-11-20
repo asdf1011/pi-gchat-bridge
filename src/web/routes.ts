@@ -211,6 +211,13 @@ export interface WebRouteOptions {
    * that knows where artifacts are rooted.
    */
   artifactPath?: (conversationId: number, file: string) => string;
+  /**
+   * The URL of an app in this conversation that can read text aloud, if one exists.
+   *
+   * Resolved by the caller because it needs the artifacts directory and the artifact origin, and
+   * this module has neither. Empty means no app advertises the capability.
+   */
+  speechAppFor?: (conversationId: number) => string | undefined;
   /** Resolved by the caller, so this module does no header trust of its own. */
   who: Identity;
   log?: { info(message: string): void };
@@ -427,6 +434,17 @@ export async function handleWebRequest(
   // The artifact list for one conversation, same-origin: the page links to the
   // artifact host but never fetches from it, so no CORS is needed anywhere.
   const artifactList = /^\/api\/c\/(\d+)\/artifacts$/.exec(api);
+  // The chat page's talking mode asks *this* origin which app speaks, rather than the artifact
+  // origin: that is a different hostname with no CORS for this page, and the answer is a URL the
+  // page is allowed to frame. The web UI still knows nothing about speech beyond the protocol.
+  const speechApp = /^\/api\/c\/(\d+)\/speech$/.exec(api);
+  if (req.method === "GET" && speechApp) {
+    const url = options.speechAppFor?.(Number(speechApp[1]));
+    res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+    res.end(JSON.stringify({ url: url ?? "" }));
+    return true;
+  }
+
   if (req.method === "GET" && artifactList) {
     const artifacts = await seam.artifacts(Number(artifactList[1]));
     if (artifacts === undefined) {

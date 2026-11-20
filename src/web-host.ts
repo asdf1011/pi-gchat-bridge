@@ -18,6 +18,7 @@ import http from "node:http";
 
 import { createHost, ipcLink } from "@earendil-works/chord";
 
+import fs from "node:fs";
 import path from "node:path";
 
 import { handleWebRequest } from "./web/routes.js";
@@ -90,6 +91,29 @@ const server = http.createServer(
               // because guessing a cwd for it is how a message ends up naming the wrong file.
               //
               // A file already named absolutely is taken as it is.
+              // Which app in this conversation reads text aloud, if any. Scanned from the app
+              // manifests rather than named here: the web UI must not know that a TTS app
+              // exists, only that one offered to speak.
+              speechAppFor: (conversationId: number): string | undefined => {
+                const dir = path.join(artifactsDir, "conversation", String(conversationId));
+                let names: string[];
+                try {
+                  names = fs.readdirSync(dir);
+                } catch {
+                  return undefined;
+                }
+                for (const name of names.sort()) {
+                  try {
+                    const manifest = JSON.parse(fs.readFileSync(path.join(dir, name, "app.json"), "utf8"));
+                    if (manifest?.speech !== true) continue;
+                    if (!fs.existsSync(path.join(dir, name, "speech.html"))) continue;
+                    return `${artifactsBaseUrl}/apps/${conversationId}/${name}/speech.html`;
+                  } catch {
+                    // Not an app, or a manifest that does not parse. Try the next.
+                  }
+                }
+                return undefined;
+              },
               artifactPath: (conversationId: number, file: string): string => {
                 if (path.isAbsolute(file)) return file;
                 const scope = `conversation/${conversationId}/`;

@@ -48,6 +48,15 @@ export interface AppManifest {
    * for. Turning it on is a statement that this app is a development loop rather than
    * something a person uses.
    */
+  /**
+   * Whether this app can read text aloud, for the chat page's talking mode.
+   *
+   * A capability the app advertises, not something the bridge knows: the web UI carries no model
+   * or vendor, and asks for "the app that speaks" rather than for any particular one. The app
+   * implements the `{speak, stop}` / `{started, word, end}` postMessage protocol.
+   */
+  speech?: boolean;
+  /** Whether a report posted by this app should start a conversation turn by itself. */
   reports?: {
     /** Start a turn when a report arrives. Default false. */
     autoSubmit?: boolean;
