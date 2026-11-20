@@ -2325,18 +2325,22 @@ function speakStreamingBlock(text) {
   // new block discarded the progress and re-read the answer from its first word.
   if (talkBlock !== '' && talkBlock.startsWith(body)) return;
 
-  let interrupt = false;
-  if (!body.startsWith(talkBlock)) {
-    talkBlock = '';
-    talkBlockId += 1;
-    interrupt = true;
-  }
-
-  const fresh = body.slice(talkBlock.length);
+  // Nothing is committed until there is a whole sentence to send. Committing a restart on a frame
+  // that turned out to have no complete sentence discarded what we had read and interrupted the
+  // sentence being spoken — and then sent nothing to replace it, which is an answer going quiet
+  // mid-thought.
+  const restarted = !body.startsWith(talkBlock);
+  const fresh = restarted ? body : body.slice(talkBlock.length);
   // Only whole sentences: a half-sentence handed to the model is a request that has to be thrown
   // away when the rest arrives, and it would be spoken with the intonation of a finished thought.
   const complete = fresh.match(/^[\s\S]*[.!?…](?=\s|$)/);
   if (complete === null) return;
+  // Now it is certain something will be said, so the restart can be committed.
+  if (restarted) {
+    talkBlock = '';
+    talkBlockId += 1;
+  }
+  const interrupt = restarted;
   const taken = complete[0];
   talkBlock += taken;
   // Split into sentences so each is one request, and carry the running word offset so the
