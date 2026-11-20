@@ -949,7 +949,17 @@
     <button id="picker-apply" type="button" class="apply" disabled>Apply</button>
   </div>
 </div>
-<iframe id="speech-host" hidden referrerpolicy="no-referrer" title="Speech"></iframe>
+<!-- The speech app, in its own document.
+     An iframe rather than a worker in this page, and not for tidiness: the TTS bundle is a
+     pthread build, so it needs SharedArrayBuffer, which needs its document to be cross-origin
+     isolated. Measured: this page is crossOriginIsolated=false, the artifact origin is true. So
+     the worker runs over there or not at all — and that also keeps app code off this origin,
+     which is the one that can post messages to a conversation.
+
+     `allow="autoplay"` delegates the permission the frame needs to start audio; without it a
+     cross-origin frame can be refused playback however the click that started it happened. -->
+<iframe id="speech-host" hidden referrerpolicy="no-referrer" title="Speech"
+        allow="autoplay"></iframe>
 <button id="new-chat" title="Start a new conversation" aria-label="New chat">＋</button>
 <aside id="artifacts" hidden>
   <div id="artifacts-resize" role="separator" aria-orientation="vertical" title="Drag to resize"></div>
