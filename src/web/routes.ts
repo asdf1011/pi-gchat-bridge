@@ -542,7 +542,9 @@ export async function handleWebRequest(
       const existing = fs.existsSync(indexPath)
         ? (JSON.parse(fs.readFileSync(indexPath, "utf8")) as unknown[])
         : [];
-      existing.push({ file: `${base}.wav`, meta: `${base}.json`, ...meta });
+      // Stored with the directory in it, matching what the POST response returns: an index entry
+      // is an address, and a bare filename resolves against whatever page reads it.
+      existing.push({ file: `clips/${base}.wav`, meta: `clips/${base}.json`, ...meta });
       fs.writeFileSync(indexPath, JSON.stringify(existing, null, 1));
     } catch {
       // The clip itself is stored; an unreadable index is a listing problem, not a save problem.
