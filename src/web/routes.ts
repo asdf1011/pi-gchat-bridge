@@ -535,6 +535,18 @@ export async function handleWebRequest(
       res.writeHead(500).end("could not store the clip");
       return true;
     }
+    // An index beside the clips, so a listening page can list them. Nothing serves a directory
+    // listing — deliberately — and the alternative is the page guessing filenames.
+    const indexPath = nodePath.join(dir, "clips", "index.json");
+    try {
+      const existing = fs.existsSync(indexPath)
+        ? (JSON.parse(fs.readFileSync(indexPath, "utf8")) as unknown[])
+        : [];
+      existing.push({ file: `${base}.wav`, meta: `${base}.json`, ...meta });
+      fs.writeFileSync(indexPath, JSON.stringify(existing, null, 1));
+    } catch {
+      // The clip itself is stored; an unreadable index is a listing problem, not a save problem.
+    }
     clipStamps.push(now);
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true, file: `clips/${base}.wav` }));
