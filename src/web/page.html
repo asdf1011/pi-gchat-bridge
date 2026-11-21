@@ -615,6 +615,9 @@
     stroke: currentColor; stroke-width: 1.7; stroke-linejoin: round; }
   #talk-indicator .bubble-back { opacity: .45; }
   #talk-indicator .dots { fill: currentColor; stroke: none; }
+  #talk-indicator .play-glyph { display: none; fill: currentColor; stroke: none; }
+  #talk-indicator.paused .dots { display: none; }
+  #talk-indicator.paused .play-glyph { display: inline; }
   /* Speaking: the dots march. Paused: they stop, and the whole thing dims, because a paused mode
      that animates is a mode the reader cannot tell apart from a working one. */
   #talk-indicator.speaking .dots circle { animation: talk-dot 1.05s ease-in-out infinite; }
@@ -1038,8 +1041,8 @@
 <!-- The activity indicator for talking mode: two speech bubbles where the microphone used to
      float. Shown only while the mode is on, and animated while it is actually speaking — so the
      header button can stay a button, and the corner says what the page is doing. -->
-<button id="talk-indicator" type="button" hidden title="Turn off read answers aloud"
-        aria-label="Turn off read answers aloud">
+<button id="talk-indicator" type="button" hidden title="Pause reading answers"
+        aria-label="Pause reading answers">
   <svg viewBox="0 0 24 24" focusable="false">
     <path class="bubble-back" d="M3.5 4.5h10a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2H8l-3 2.5V13.5H3.5a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2z"
           transform="translate(1.2 0)"/>
@@ -1047,6 +1050,9 @@
     <g class="dots">
       <circle cx="13" cy="13.6" r=".95"/><circle cx="16.4" cy="13.6" r=".95"/><circle cx="19.8" cy="13.6" r=".95"/>
     </g>
+    <!-- Paused shows a play mark in place of the dots: the button's action is what it should say,
+         and "press to resume" is easier to see than a still icon. -->
+    <path class="play-glyph" d="M13.6 11.6l6.2 3.4-6.2 3.4z"/>
   </svg>
 </button>
 <div id="picker-scrim" hidden></div>
@@ -2339,6 +2345,11 @@ function showIndicator(on) {
   indicator.hidden = !on;
   indicator.classList.toggle('paused', on && talkPaused);
   indicator.classList.toggle('failed', talk.classList.contains('failed'));
+  // The label is the action, not the state: a button that says "paused" leaves the reader to work
+  // out what pressing it does.
+  const label = talkPaused ? 'Resume reading answers' : 'Pause reading answers';
+  indicator.setAttribute('aria-label', label);
+  indicator.title = label;
 }
 
 /**
@@ -2386,7 +2397,7 @@ async function setTalking(on) {
   talkOn = on;
   talk.setAttribute('aria-pressed', on ? 'true' : 'false');
   talk.classList.remove('failed');
-  talk.title = on ? 'Reading answers aloud — press to pause' : 'Read answers aloud';
+  talk.title = on ? 'Stop reading answers aloud' : 'Read answers aloud';
   showIndicator(on);
   refreshSendButton();
   void keepAwake(on);
@@ -2400,6 +2411,30 @@ async function setTalking(on) {
     return;
   }
   await ensureSpeechFrame();
+  // Straight away, not "the next time an answer arrives": pressing the button is a request to hear
+  // something now, so the last answer is read. If a turn is mid-flight the streamed path will speak
+  // it as sentences complete, and speaking the stored copy as well would say it twice.
+  if (liveText === '') speakLatestAnswer();
+}
+
+/**
+ * Read the last answer in the log.
+ *
+ * The bubble's own text, so the words highlighted are the ones on screen — and the same treatment
+ * the per-message Read button gives it, minus the button.
+ */
+function speakLatestAnswer() {
+  const rows = log.querySelectorAll('.msg.pi .bubble');
+  const target = rows.length > 0 ? rows[rows.length - 1] : null;
+  if (target === null) return;
+  const text = (target.innerText || '').trim();
+  if (text === '') return;
+  speechTarget = target;
+  speechEntry = String(target.closest('.msg')?.dataset.entry ?? '');
+  speechFrame?.contentWindow?.postMessage(
+    { type: 'speak', text, block: (speechBlock += 1), interrupt: true },
+    '*',
+  );
 }
 
 /**
@@ -3803,28 +3838,28 @@ const talkButton = document.getElementById('talk');
  * discarded, and the word highlight stops with it because it is driven by the audio clock.
  */
 /**
- * The floating indicator is the off switch.
+ * Two controls, two jobs.
  *
- * The header button cycles on → paused → on, which leaves no way to *stop* the mode — and a mode
- * with no way out is one that keeps a wake lock and a loaded model for ever. The indicator only
- * exists while the mode is on, so it is the natural place for "enough".
+ * The header button is the mode: on or off, and nothing else — it is the thing you switch when you
+ * want answers spoken or quiet. The floating button is playback: pause and resume, for when you
+ * want to stop mid-paragraph and pick it up again. Putting both on one button made "pause" and
+ * "off" the same gesture one press apart, which is the kind of ambiguity you find out about by
+ * accidentally switching the mode off.
  */
-document.getElementById('talk-indicator').onclick = () => { void setTalking(false); };
+talkButton.onclick = () => { void setTalking(!talkOn); };
 
-talkButton.onclick = () => {
-  if (!talkOn) { void setTalking(true); return; }
+document.getElementById('talk-indicator').onclick = () => {
+  if (!talkOn) return;
   if (talkPaused) {
     talkPaused = false;
     talk.classList.remove('paused');
     showIndicator(true);
-    talk.title = 'Reading answers aloud — press to pause';
     speechFrame?.contentWindow?.postMessage({ type: 'resume' }, '*');
     return;
   }
   talkPaused = true;
   talk.classList.add('paused');
   showIndicator(true);
-  talk.title = 'Paused — press to resume reading';
   speechFrame?.contentWindow?.postMessage({ type: 'pause' }, '*');
   setSpeaking(false);
 };
