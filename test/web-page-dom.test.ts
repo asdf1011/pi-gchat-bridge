@@ -568,28 +568,24 @@ test("a stream error says reconnecting rather than going blank", async () => {
 
 // --- Search -------------------------------------------------------------------
 
-test("the magnifier beside the title opens a box, and only takes the space when it is open", async () => {
+test("the conversation page has no magnifier: its box is reached from the list", async () => {
   let h: Harness | undefined;
   try {
-    h = await loadPage({ conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    // Search is a property of the conversation *list*, so the conversation header carries the
+    // microphone instead. The form still exists here — the list hands off to it with `?search=1` —
+    // but nothing on this page opens it, and a lost button must not leave a broken handler behind.
+    h = await loadPage({ pathname: "/7/?search=1", conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
     const doc = h.dom.window.document;
+    assert.equal(doc.getElementById("search-toggle"), null, "no magnifier on this page");
     const bar = doc.getElementById("search-bar") as HTMLElement;
-    const toggle = doc.getElementById("search-toggle") as HTMLButtonElement;
-    assert.equal(bar.hidden, true, "closed until asked for");
-    assert.equal(toggle.getAttribute("aria-expanded"), "false");
+    assert.equal(bar.hidden, false, "the hand-off from the list opened it");
+    assert.equal(doc.activeElement, doc.getElementById("search-text"), "and put the caret in it");
 
-    toggle.click();
-    assert.equal(bar.hidden, false);
-    assert.equal(toggle.getAttribute("aria-expanded"), "true");
-    // Focused, so the keyboard is up on a phone and typing needs no second tap.
-    assert.equal(doc.activeElement, doc.getElementById("search-text"));
-
-    // Escape closes it, and puts focus back where it came from.
+    // Escape closes it without touching a button that is not there.
     doc.getElementById("search-text")!.dispatchEvent(
       new h.dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
     );
     assert.equal(bar.hidden, true);
-    assert.equal(doc.activeElement, toggle);
   } finally {
     h?.close();
   }
@@ -631,7 +627,7 @@ test("a search that could not start says so, and leaves the box usable", async (
       createdExtra: { conversationId: undefined },
     });
     const doc = h.dom.window.document;
-    doc.getElementById("search-toggle")!.click();
+    // The box arrives open from the list's hand-off; there is no button here to press.
     (doc.getElementById("search-text") as HTMLInputElement).value = "nothing";
     doc.getElementById("search-bar")!.dispatchEvent(new h.dom.window.Event("submit", { cancelable: true }));
     await h.settle();
@@ -675,7 +671,6 @@ test("arriving with ?search=1 opens the box, and does not keep it in the address
     });
     const doc = h.dom.window.document;
     assert.equal((doc.getElementById("search-bar") as HTMLElement).hidden, false);
-    assert.equal(doc.getElementById("search-toggle")!.getAttribute("aria-expanded"), "true");
     // The flag is transient: a reload should not reopen a box nobody asked for.
     assert.equal(h.dom.window.location.search, "");
 

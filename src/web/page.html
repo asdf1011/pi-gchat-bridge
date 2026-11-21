@@ -582,33 +582,59 @@
   /* A failure has to be visible somewhere other than the console. */
   #picker .talk.failed { background: #c0392b; }
 
+  /* The microphone in the header, where the search button was: same size and weight as the other
+     header controls, so it reads as part of the header rather than as a decorated link. */
+  #conv-header #talk { padding: .35rem .55rem; border-radius: .5rem; border: 1px solid #8886;
+    background: #8883; color: inherit; cursor: pointer; display: inline-flex;
+    align-items: center; justify-content: center; }
+  #conv-header #talk:hover { background: #8884; }
+  #conv-header #talk svg { width: 1.05rem; height: 1.05rem; fill: none; stroke: currentColor;
+    stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  #conv-header #talk .talk-waves { opacity: .3; }
+  #conv-header #talk[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink);
+    border-color: transparent; }
+  #conv-header #talk[aria-pressed="true"] .talk-mic { fill: currentColor; }
+  #conv-header #talk.speaking .talk-waves { opacity: 1; }
+  #conv-header #talk.speaking .talk-waves path { animation: talk-wave 1.1s ease-in-out infinite; }
+  #conv-header #talk.speaking .talk-waves path + path { animation-delay: .22s; }
+  #conv-header #talk.paused .talk-waves { opacity: .2; }
+  #conv-header #talk.failed { background: #c0392b; color: #fff; border-color: transparent; }
+
+  /* The floating indicator: where the microphone used to sit, saying what the page is doing.
+     Below the header, because the header's corner is now the button itself. */
+  #talk-indicator { position: fixed; top: 3.1rem; right: .9rem; z-index: 40;
+    display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
+    /* `padding: 0` matters: a button's default padding shrank the flex child to a sliver, which
+       rendered the icon as a 4px smear rather than a speech bubble. */
+    padding: 0; box-sizing: border-box;
+    width: 2.6rem; height: 2.6rem; border-radius: 50%;
+    background: color-mix(in srgb, Canvas 88%, transparent); color: var(--accent);
+    border: 1px solid #8884; backdrop-filter: blur(6px); box-shadow: 0 .12rem .5rem #0002; }
+  #talk-indicator[hidden] { display: none; }
+  #talk-indicator svg { flex: none; width: 1.45rem; height: 1.45rem; fill: none;
+    stroke: currentColor; stroke-width: 1.7; stroke-linejoin: round; }
+  #talk-indicator .bubble-back { opacity: .45; }
+  #talk-indicator .dots { fill: currentColor; stroke: none; }
+  /* Speaking: the dots march. Paused: they stop, and the whole thing dims, because a paused mode
+     that animates is a mode the reader cannot tell apart from a working one. */
+  #talk-indicator.speaking .dots circle { animation: talk-dot 1.05s ease-in-out infinite; }
+  #talk-indicator.speaking .dots circle:nth-child(2) { animation-delay: .16s; }
+  #talk-indicator.speaking .dots circle:nth-child(3) { animation-delay: .32s; }
+  @keyframes talk-dot { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
+  #talk-indicator.paused { opacity: .55; }
+  #talk-indicator.failed { color: #c0392b; }
+  @media (prefers-reduced-motion: reduce) {
+    #conv-header #talk.speaking .talk-waves path,
+    #talk-indicator.speaking .dots circle { animation: none; }
+    #talk-indicator.speaking .dots circle { opacity: 1; }
+  }
+
   /* The voice menu, sized like the buttons it sits between. `hidden` until the speech app has
      said what it has: an empty menu is worse than no menu. */
   #picker .actions select { flex: none; font: inherit; font-size: .82em; max-width: 9.5rem;
     padding: .3rem .35rem; border-radius: .4rem; border: 1px solid #8884;
     background: Canvas; color: inherit; }
 
-  /* The send button doubling as the microphone. Same paths as the picker's, so the two cannot
-     drift: idle is a filled capsule with still waves, speaking animates them. */
-  #send-primary .send-mic { display: none; width: 1.15em; height: 1.15em; fill: none;
-    stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-  /* Only while there is nothing to send. With text in the composer the word comes back, because
-     the same click sends then — measured, it was showing the microphone while sending. */
-  #send-primary.talking.empty .send-label { display: none; }
-  #send-primary.talking.empty .send-mic { display: block; }
-  #send-primary.talking .talk-mic { fill: currentColor; }
-  #send-primary .talk-waves { opacity: .35; }
-  #send-primary .talk-waves path { transform-origin: 9px 11px; }
-  /* Armed but silent still has to look alive, or "is it on?" is unanswerable when nothing is
-     playing: the capsule breathes slowly, the waves stay still. */
-  #send-primary.talking .talk-mic { animation: talk-glow 2.6s ease-in-out infinite; }
-  #send-primary.speaking .talk-waves { opacity: 1; }
-  #send-primary.speaking .talk-waves path { animation: talk-wave 1.1s ease-in-out infinite; }
-  #send-primary.speaking .talk-waves path + path { animation-delay: .22s; }
-  #send-primary.speaking .talk-mic { animation-duration: 1.1s; }
-  @media (prefers-reduced-motion: reduce) {
-    #send-primary.talking .talk-mic,
-    #send-primary.speaking .talk-waves path { animation: none; }
     #send-primary.speaking .talk-waves { opacity: 1; }
   }
   @media (prefers-reduced-motion: reduce) {
@@ -939,15 +965,20 @@
   <header id="conv-header">
     <a id="back" href="./" title="All conversations" aria-label="All conversations">←</a>
     <span id="conv-title"></span>
-    <button id="search-toggle" type="button" title="Search past conversations"
-            aria-label="Search past conversations" aria-expanded="false" aria-controls="search-bar">
-      <!-- Drawn rather than an emoji: a magnifier is one of the few glyphs every platform
-           renders as the same shape, and an emoji would arrive in colour and at the
-           wrong weight next to the title. -->
-      <svg viewBox="0 0 24 24" width="1em" height="1em" aria-hidden="true" focusable="false">
-        <circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/>
-        <line x1="15.4" y1="15.4" x2="21" y2="21" stroke="currentColor" stroke-width="2"
-              stroke-linecap="round"/>
+    <!-- Talking mode lives in the header, where the search button used to be: search belongs on
+         the conversation list, and this is a mode you switch on while reading answers. -->
+    <button id="talk" type="button" aria-pressed="false" title="Read answers aloud"
+            aria-label="Read answers aloud">
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <g class="talk-mic">
+          <rect x="9" y="2.5" width="6" height="11" rx="3"/>
+          <path class="talk-stand" d="M6 10.5v1a6 6 0 0 0 12 0v-1"/>
+          <path class="talk-stand" d="M12 17.5V21"/>
+        </g>
+        <g class="talk-waves">
+          <path d="M18.4 6.2a7.6 7.6 0 0 1 0 9.6"/>
+          <path d="M21 3.6a11 11 0 0 1 0 14.8"/>
+        </g>
       </svg>
     </button>
     <button id="artifacts-toggle" title="Files this conversation wrote" hidden aria-label="Artifacts">🗂</button>
@@ -992,20 +1023,7 @@
              instead of the word "Send": the send control is the one thing always on screen, so it
              is the honest place to show that answers are being read aloud. Typing brings the word
              back, because sending must never be lost to a mode. -->
-        <button id="send-primary" type="submit">
-          <span class="send-label">Send</span>
-          <svg class="send-mic" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <g class="talk-mic">
-              <rect x="9" y="2.5" width="6" height="11" rx="3"/>
-              <path class="talk-stand" d="M6 10.5v1a6 6 0 0 0 12 0v-1"/>
-              <path class="talk-stand" d="M12 17.5V21"/>
-            </g>
-            <g class="talk-waves">
-              <path d="M18.4 6.2a7.6 7.6 0 0 1 0 9.6"/>
-              <path d="M21 3.6a11 11 0 0 1 0 14.8"/>
-            </g>
-          </svg>
-        </button>
+        <button id="send-primary" type="submit">Send</button>
         <button id="send-menu" type="button" aria-haspopup="dialog" aria-expanded="false"
                 title="Model and thinking level" aria-label="Choose model and thinking level">
           <span id="send-caret" aria-hidden="true"></span>
@@ -1016,6 +1034,21 @@
 </div>
 <!-- One picker for both buttons. Which list it shows is decided at open time,
      so the two never drift apart and there is one close path to get right. -->
+
+<!-- The activity indicator for talking mode: two speech bubbles where the microphone used to
+     float. Shown only while the mode is on, and animated while it is actually speaking — so the
+     header button can stay a button, and the corner says what the page is doing. -->
+<button id="talk-indicator" type="button" hidden title="Turn off read answers aloud"
+        aria-label="Turn off read answers aloud">
+  <svg viewBox="0 0 24 24" focusable="false">
+    <path class="bubble-back" d="M3.5 4.5h10a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2H8l-3 2.5V13.5H3.5a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2z"
+          transform="translate(1.2 0)"/>
+    <path class="bubble-front" d="M10 9.5h10a2 2 0 0 1 2 2v4.5a2 2 0 0 1-2 2h-1.5v2.8l-3.2-2.8H10a2 2 0 0 1-2-2V11.5a2 2 0 0 1 2-2z"/>
+    <g class="dots">
+      <circle cx="13" cy="13.6" r=".95"/><circle cx="16.4" cy="13.6" r=".95"/><circle cx="19.8" cy="13.6" r=".95"/>
+    </g>
+  </svg>
+</button>
 <div id="picker-scrim" hidden></div>
 <div id="picker" hidden role="dialog" aria-modal="false" aria-label="Model and thinking level">
   <div class="search" hidden>
@@ -1037,10 +1070,6 @@
        surface could do to the conversation changed — only when. -->
   <div class="actions" id="picker-actions">
     <span id="picker-staged" role="status" aria-live="polite"></span>
-    <!-- Talking mode. The bridge has no opinion about speech synthesis: this asks a
-         *speech app* — any page that implements the small postMessage protocol below —
-         to read answers aloud, and takes the word positions it reports back. Which app
-         that is lives in localStorage, so the web UI carries no model or vendor. -->
     <!-- An icon rather than the word "Talk", because the control is a toggle whose *state*
          matters more than its name: a microphone that fills in and beats when sound is
          coming out says "on, and working" without being read.
@@ -1052,20 +1081,6 @@
          can do, and this shows exactly that list — the web UI carries no engine names, so adding a
          voice to the app adds it to this menu with no change on this side. -->
     <select id="talk-model" aria-label="Voice" title="Voice for reading answers aloud" hidden></select>
-    <button id="talk" type="button" class="apply talk" aria-pressed="false"
-            aria-label="Read answers aloud" title="Read answers aloud">
-      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-        <g class="talk-mic">
-          <rect x="9" y="2.5" width="6" height="11" rx="3"/>
-          <path class="talk-stand" d="M6 10.5v1a6 6 0 0 0 12 0v-1"/>
-          <path class="talk-stand" d="M12 17.5V21"/>
-        </g>
-        <g class="talk-waves">
-          <path d="M18.4 6.2a7.6 7.6 0 0 1 0 9.6"/>
-          <path d="M21 3.6a11 11 0 0 1 0 14.8"/>
-        </g>
-      </svg>
-    </button>
     <button id="picker-apply" type="button" class="apply" disabled>Apply</button>
   </div>
 </div>
@@ -2277,6 +2292,8 @@ const TALK_KEY = 'pi.talk.app';
 /** The artifacts origin, learned from `api/environment`; empty until it is known. */
 let artifactsOrigin = '';
 let talkOn = false;
+/** Whether the reader has paused talking mode, as opposed to turned it off. */
+let talkPaused = false;
 let speechFrame;
 let spokenWords = [];      // the ranges being highlighted, in reading order
 let highlight;
@@ -2299,32 +2316,29 @@ async function talkAppUrl() {
   return url;
 }
 
-/**
- * The send button carries the mode.
- *
- * It is the one control that is always in view, so it is where "answers are being read aloud"
- * belongs — as a microphone in place of the word, animated while sound is coming out. A typed
- * message brings the word back: sending outranks the mode, and a mode that swallows a message
- * would be a trap.
- */
+/** The send button says Send, and only Send: the floating microphone carries the mode. */
 function refreshSendButton() {
   const send = document.getElementById('send-primary');
   if (send === null) return;
-  const idle = (document.getElementById('text')?.value ?? '').trim() === '';
-  send.classList.toggle('talking', talkOn);
-  send.classList.toggle('empty', idle);
-  // The label follows what the button *is* right now, not the mode: with text in the composer it
-  // sends, and telling a screen reader otherwise would be a lie about the same click.
-  const asMicrophone = talkOn && idle;
-  send.setAttribute('aria-label', asMicrophone ? 'Turn off read answers aloud' : 'Send message');
-  send.title = asMicrophone ? 'Read answers aloud is on — press to turn it off' : 'Send';
+  send.setAttribute('aria-label', 'Send message');
+  send.title = 'Send';
 }
 
-/** Speaking state, shown on both microphones: the send button and the one in the picker. */
+/** Speaking state, shown on the header microphone and on the floating indicator. */
 function setSpeaking(on) {
-  for (const button of [document.getElementById('send-primary'), talk]) {
-    if (button !== null) button.classList.toggle('speaking', on);
-  }
+  talk.classList.toggle('speaking', on);
+  indicator?.classList.toggle('speaking', on);
+}
+
+/** The floating indicator is shown while the mode is on, and carries the same state. */
+let indicator;
+
+function showIndicator(on) {
+  if (indicator === undefined) indicator = document.getElementById('talk-indicator');
+  if (indicator === null) return;
+  indicator.hidden = !on;
+  indicator.classList.toggle('paused', on && talkPaused);
+  indicator.classList.toggle('failed', talk.classList.contains('failed'));
 }
 
 /**
@@ -2333,9 +2347,6 @@ function setSpeaking(on) {
  * A phone that locks suspends the page, and a suspended page stops scheduling audio — so talking
  * mode goes quiet exactly when it is most useful. The Wake Lock API is the only honest fix; where
  * it does not exist, or is refused (it needs a visible, secure page), nothing here pretends.
- *
- * The lock is dropped whenever the page is hidden, by the platform rather than by choice, so it is
- * re-requested when the page comes back.
  */
 let wakeLock = null;
 
@@ -2347,48 +2358,45 @@ async function keepAwake(on) {
     try { await held?.release(); } catch { /* already gone */ }
     return;
   }
-  // A hidden page cannot hold one; `visibilitychange` asks again when it returns.
   if (document.visibilityState !== 'visible') return;
   try {
     wakeLock = await navigator.wakeLock.request('screen');
     wakeLock.addEventListener('release', () => { wakeLock = null; });
   } catch {
-    // Refused (no gesture, battery saver, or unsupported). Talking mode still works while the
-    // screen is on; it just cannot stop the screen sleeping.
     wakeLock = null;
   }
 }
 
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
-  if (talkOn) void keepAwake(true);
-  // Coming back to the tab is the cheapest moment to notice a rebuild.
+  if (talkOn && !talkPaused) void keepAwake(true);
   void probeEnvironment();
 });
 
 // Every minute is often enough to notice a rebuild and rare enough to cost nothing.
 setInterval(() => { void probeEnvironment(); }, 60_000);
 
+/**
+ * Turn talking mode on or off.
+ *
+ * On means: find the speech app, load it once, and start reading the block being written. Off
+ * means stop, clear anything queued and release the screen lock.
+ */
 async function setTalking(on) {
   talkOn = on;
   talk.setAttribute('aria-pressed', on ? 'true' : 'false');
   talk.classList.remove('failed');
+  talk.title = on ? 'Reading answers aloud — press to pause' : 'Read answers aloud';
+  showIndicator(on);
   refreshSendButton();
   void keepAwake(on);
-  // The popup is a place to make a choice, and this is the choice: leaving it open over the
-  // transcript means turning talking mode on looks like nothing happened.
   if (on && pickerOpen) closePicker();
   if (!on) {
     stopReading();
     setSpeaking(false);
-    return;
-  }
-  const url = await talkAppUrl();
-  if (!url) {
-    talkOn = false;
-    talk.setAttribute('aria-pressed', 'false');
-    window.alert('No app in this conversation offers to speak.\n\n' +
-      'An app opts in with "speech": true in its app.json and a speech.html beside it.');
+    talkPaused = false;
+    talk.classList.remove('paused');
+    showIndicator(false);
     return;
   }
   await ensureSpeechFrame();
@@ -2462,6 +2470,7 @@ async function ensureSpeechFrame() {
         setSpeaking(false);
         talk.classList.add('failed');
         talk.title = `Speech failed: ${String(data.message ?? 'unknown error')}`;
+        indicator?.classList.add('failed');
         console.warn('speech app error:', data.message);
       }
     });
@@ -3785,19 +3794,41 @@ sendMenuButton.onclick = () => {
 pickerApply.onclick = () => void applyFormat();
 
 const talkButton = document.getElementById('talk');
-talkButton.onclick = () => void setTalking(!talkOn);
+/**
+ * The floating microphone: off → on → paused → on.
+ *
+ * Pressing it while it is speaking pauses the audio where it is; pressing again resumes from that
+ * point rather than starting the answer over — the reader stopped it to do something, not to hear
+ * the paragraph again. Pausing is the app's `suspend`, so scheduled audio waits rather than being
+ * discarded, and the word highlight stops with it because it is driven by the audio clock.
+ */
+/**
+ * The floating indicator is the off switch.
+ *
+ * The header button cycles on → paused → on, which leaves no way to *stop* the mode — and a mode
+ * with no way out is one that keeps a wake lock and a loaded model for ever. The indicator only
+ * exists while the mode is on, so it is the natural place for "enough".
+ */
+document.getElementById('talk-indicator').onclick = () => { void setTalking(false); };
 
-// The send button is a microphone while talking mode is on, so pressing it turns the mode off
-// instead of sending — unless there is something to send, in which case the word is showing and
-// sending is what it does. `preventDefault` is what stops the form submitting.
-document.getElementById('send-primary').addEventListener('click', (event) => {
-  if (!talkOn) return;
-  if ((document.getElementById('text')?.value ?? '').trim() !== '') return;
-  event.preventDefault();
-  void setTalking(false);
-});
+talkButton.onclick = () => {
+  if (!talkOn) { void setTalking(true); return; }
+  if (talkPaused) {
+    talkPaused = false;
+    talk.classList.remove('paused');
+    showIndicator(true);
+    talk.title = 'Reading answers aloud — press to pause';
+    speechFrame?.contentWindow?.postMessage({ type: 'resume' }, '*');
+    return;
+  }
+  talkPaused = true;
+  talk.classList.add('paused');
+  showIndicator(true);
+  talk.title = 'Paused — press to resume reading';
+  speechFrame?.contentWindow?.postMessage({ type: 'pause' }, '*');
+  setSpeaking(false);
+};
 
-// Typing restores the word "Send", so the two never fight over what the button does.
 document.getElementById('text').addEventListener('input', refreshSendButton);
 refreshSendButton();
 
@@ -4577,13 +4608,12 @@ async function startSearch_(query) {
   if (go) go.disabled = false;
 }
 
-document.getElementById('search-toggle').onclick = () => {
-  if (searchBar_().hidden) openSearch_();
-  else closeSearch_();
-};
+// The conversation header no longer carries a search button: search belongs on the conversation
+// list, and the bar here is opened by the `?search=1` hand-off from there. Everything below stays
+// null-tolerant so the page works whether or not that button exists.
 document.getElementById('search-close').onclick = () => {
   closeSearch_();
-  document.getElementById('search-toggle').focus();
+  document.getElementById('search-toggle')?.focus();
 };
 
 // The index has no search bar of its own: it creates a conversation and opens *that*
@@ -4611,7 +4641,7 @@ document.getElementById('search-text').addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
   event.preventDefault();
   closeSearch_();
-  document.getElementById('search-toggle').focus();
+  document.getElementById('search-toggle')?.focus();
 });
 
 document.getElementById('search-bar').onsubmit = (event) => {
