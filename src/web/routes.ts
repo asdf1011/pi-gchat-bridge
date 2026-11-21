@@ -256,7 +256,12 @@ export interface WebRouteOptions {
 const clipStamps: number[] = [];
 
 export function webPath(pathname: string): string {
-  const at = pathname.indexOf("/web");
+  // A *whole* segment, not a prefix of one: `/apps/64000/webtalk/speech.html` contains "/web" at
+  // the start of "webtalk", and stripping from there turned an app's file path into
+  // "/webtalk/speech.html" — which matched nothing and 404'd. The lookahead is what tells a mount
+  // root ("/web/7/", "/pi/web/") apart from a word that merely begins with it.
+  const mount = /\/web(?=\/|$)/.exec(pathname);
+  const at = mount === null ? -1 : mount.index;
   return at > 0 ? pathname.slice(at) : pathname;
 }
 
