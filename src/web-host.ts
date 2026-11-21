@@ -40,6 +40,25 @@ const artifactsBaseUrl = process.env.BRIDGE_ARTIFACTS_BASE_URL ?? "";
  * request. Empty means artifacts are not tracked, and the key is all there is.
  */
 const artifactsDir = (process.env.BRIDGE_ARTIFACTS_DIR ?? "").trim();
+/**
+ * Where the artifact listener is, when this process should proxy to it.
+ *
+ * Set only when `BRIDGE_ARTIFACTS_BASE_URL` is empty: that is the deployment
+ * saying "serve artifacts on this origin". The separate listener still does all
+ * the work — the allow-list, the sandbox, the nonces — and this is a loopback
+ * forward, not a second implementation. What it buys is the session: the
+ * artifact host is behind its own Cloudflare Access application, and a frame
+ * cannot complete an Access login, so a cross-origin artifact is a blank pane.
+ * Same origin means the cookie the page already has.
+ *
+ * It does give up what the second hostname was for. `cloudflared.yml` says a
+ * request on the artifact origin cannot reach `/web/api/.../message`; once these
+ * routes are on this origin, a same-origin artifact could address them. The
+ * documents stay sandboxed and `default-src 'none'`, so nothing in a file can
+ * make that request — but the isolation is now a property of the sandbox rather
+ * than of the hostname, which is a weaker claim and worth knowing.
+ */
+const artifactsProxy = artifactsBaseUrl === "" ? (process.env.BRIDGE_ARTIFACTS_PROXY ?? "") : "";
 const trustedProxy = process.env.BRIDGE_TRUSTED_PROXY ?? "";
 const provider = process.env.BRIDGE_WEB_DEFAULT_PROVIDER ?? "";
 const modelId = process.env.BRIDGE_WEB_DEFAULT_MODEL ?? "";
@@ -64,12 +83,71 @@ const client = createHost({
 const seam = linkSessionHost({ host: client });
 const model = { provider, modelId };
 
-const server = http.createServer(
-  serveRoutes({
+/**
+ * Forward one `/c/...` request to the artifact listener, unchanged.
+ *
+ * The path is passed through exactly as it arrived — the listener parses it, and
+ * a proxy that rewrote keys would be a second place for the allow-list to be
+ * wrong. Only the connection is new: `httpHostHeader` in `cloudflared.yml`
+ * expects the artifact host, and nothing here inspects `Host` anyway.
+ *
+ * Streaming, not buffered, because a PDF's rendered page can be several
+ * megabytes and there is no reason to hold it in this process's heap. The
+ * upstream's own status and headers are copied verbatim: `Content-Security-Policy`
+ * is the thing that makes an artifact safe to render, and a proxy that rebuilt
+ * headers could only weaken it.
+ */
+function proxyArtifact(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  target: string,
+): Promise<void> {
+  const upstream = new URL(req.url ?? "/", target);
+  return new Promise<void>((resolve) => {
+    const forwarded = http.request(
+      {
+        hostname: upstream.hostname,
+        port: upstream.port,
+        path: upstream.pathname + upstream.search,
+        method: req.method,
+        headers: { ...req.headers, host: upstream.host },
+      },
+      (reply) => {
+        res.writeHead(reply.statusCode ?? 502, reply.headers);
+        reply.pipe(res);
+        reply.on("end", resolve);
+        reply.on("error", () => {
+          res.destroy();
+          resolve();
+        });
+      },
+    );
+    forwarded.on("error", (error) => {
+      logger.error(`[web-host] artifact proxy failed: ${error.message}`);
+      if (!res.headersSent) {
+        res.writeHead(502, { "Content-Type": "text/plain; charset=utf-8" });
+        res.end("artifacts are not reachable on this deployment\n");
+      } else {
+        res.destroy();
+      }
+      resolve();
+    });
+    req.pipe(forwarded);
+  });
+}
+
+const server = http.createServer(  serveRoutes({
     trustedProxy,
     warn: (line) => logger.warn(line),
     onError: (error) => logger.error("[web-host] request failed:", (error as Error).message),
     routes: async ({ req, res, url, who }) => {
+      // Artifacts, on this origin. Matched before anything else that could claim the
+      // path, and before the request is read: the listener decides what a key means,
+      // including which keys exist.
+      if (artifactsProxy !== "" && (url.pathname === "/c" || url.pathname.startsWith("/c/"))) {
+        await proxyArtifact(req, res, artifactsProxy);
+        return true;
+      }
       if (req.method === "GET" && url.pathname === "/healthz") {
         // This process's own liveness: the supervisor uses it to decide whether the *adapter* came
         // back, not whether the session host is healthy.
@@ -82,6 +160,7 @@ const server = http.createServer(
         model,
         ...(token ? { token } : {}),
         ...(artifactsBaseUrl ? { artifactsBaseUrl } : {}),
+        ...(artifactsProxy !== "" ? { artifactsSameOrigin: true } : {}),
         ...(artifactsDir === ""
           ? {}
           : {

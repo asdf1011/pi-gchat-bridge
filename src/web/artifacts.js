@@ -35,6 +35,13 @@
 // sandboxed there and cannot read this page's DOM, cookies or storage.
 
 let artifactsBase = '';
+/**
+ * Whether this deployment serves artifacts at all.
+ *
+ * Not `artifactsBase !== ''`: a same-origin deployment has artifacts and no base
+ * URL to name, so the two questions have to be asked separately.
+ */
+let hasArtifacts = false;
 let artifactsOpen = false;
 /** Whether this page pushed the history entry the open document lives in. */
 let artifactsEntryPushed = false;
@@ -342,7 +349,7 @@ function pageOfFrame(key) {
  * URL for both — so what is about to be sent and what was sent cannot differ.
  */
 function regionPreviewUrl(selection) {
-  if (!selection || !selection.region || !selection.file || artifactsBase === '') return '';
+  if (!selection || !selection.region || !selection.file || !hasArtifacts) return '';
   return regionArtifactUrl(selection.file, selection.region);
 }
 
@@ -733,7 +740,7 @@ function entryIdFromHash() {
 async function restoreArtifact(key) {
   if (!key) return;
   await artifactsReady;
-  if (artifactsBase === '' || !current) return;
+  if (!hasArtifacts || !current) return;
   await setArtifactsOpen(true);
   const row = [...artifactsList.children].find((li) => li.dataset.key === key);
   if (!row) {
@@ -1282,7 +1289,11 @@ const artifactsReady = (async () => {
   try {
     const environment = await (await apiFetch(rel('api/environment'))).json();
     artifactsBase = String(environment.artifactsBaseUrl || '').replace(/\/$/, '');
-    artifactsButton.hidden = artifactsBase === '';
+    // Same-origin artifacts have no base URL to name, so the empty string is not a
+    // statement that there are none: the flag says they are, and every link below is
+    // built as a path on this origin.
+    hasArtifacts = artifactsBase !== '' || environment.artifactsSameOrigin === true;
+    artifactsButton.hidden = !hasArtifacts;
     pageVersion = String(environment.pageVersion || '');
   } catch {
     artifactsButton.hidden = true;

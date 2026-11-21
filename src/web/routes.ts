@@ -207,6 +207,13 @@ export interface WebRouteOptions {
    */
   artifactsBaseUrl?: string;
   /**
+   * Artifacts are served on this origin, at `/c/...`, rather than from a host of
+   * their own. The drawer then links relatively and the request carries whatever
+   * session this origin already has — which is what a frame needs, since a frame
+   * cannot complete a Cloudflare Access login of its own.
+   */
+  artifactsSameOrigin?: boolean;
+  /**
    * Where a comment's file lives on disk, for the message the model receives.
    *
    * Absolute, because the model has tools: `a.sh` alone does not say which of the
@@ -386,6 +393,11 @@ export async function handleWebRequest(
     res.end(
       JSON.stringify({
         artifactsBaseUrl: (options.artifactsBaseUrl ?? "").replace(/\/$/, ""),
+        // Artifacts are served on *this* origin, at `/c/...`. Said separately from
+        // `artifactsBaseUrl` because the page reads an empty base as "this deployment
+        // does not host artifacts" and hides the drawer; a same-origin deployment has
+        // artifacts but no base URL to name, and the page must build relative links.
+        artifactsSameOrigin: options.artifactsSameOrigin === true,
         // The open page compares this on every reconnect and reloads itself when
         // it changes, so a rebuilt front end reaches the browser without a manual
         // refresh.
