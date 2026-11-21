@@ -516,6 +516,9 @@ export async function handleWebRequest(
       // Free-form conditions the collector typed: "car noise", "background music". Kept as a list
       // rather than a string so a later analysis can group by them.
       tags: (query.get("tags") ?? "").split("/").filter((tag) => tag !== ""),
+      // Whether the detector found speech at all. A clip submitted with `false` is a recorded
+      // miss, not a bad recording.
+      detected: query.get("detected") !== "false",
       onsetSeconds: query.get("onset") ?? "",
       endSeconds: query.get("end") ?? "",
       turnScore: query.get("turnScore") ?? "",
