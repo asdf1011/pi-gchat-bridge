@@ -160,9 +160,10 @@ export class ChatClient {
    * Messages are created with `markupSyntax: MARKUP_SYNTAX_MARKDOWN` (GA Aug 7,
    * 2026) so pi's Markdown output — bold, italic, code, bulleted/numbered
    * lists, block quotes, links — renders properly instead of being parsed as
-   * legacy Chat `*bold*` syntax. Tables are NOT in the supported Markdown
-   * subset, so outgoing text is passed through {@link toChatMarkdown} first
-   * (tables → bullet lines, headings → bold, soft breaks → hard breaks).
+   * legacy Chat `*bold*` syntax. What Chat's renderer still gets wrong is
+   * passed through {@link toChatMarkdown} first (headings → bold lines, soft
+   * breaks → hard breaks); tables render natively since Nov 16 2026 and are
+   * left untouched.
    *
    * NOTE (verified Oct 2026): Markdown also survives a text PATCH when
    * `markupSyntax` is included in the PATCH body — see {@link updateMessage}.

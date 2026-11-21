@@ -1,8 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { toChatMarkdown } from "../src/chat-markdown.js";
+import { openTable, toChatMarkdown } from "../src/chat-markdown.js";
 
-test("tables become one bullet per row, labelled from the header", () => {
+// Tables became renderable in Chat on Nov 16 2026 (GA, MARKUP_SYNTAX_MARKDOWN),
+// so the conversion to bullets is gone. What these check is that nothing is done
+// to a table: a rewritten row is no longer a row.
+
+test("a table passes through byte for byte", () => {
   const source = [
     "That completes the comparison:",
     "",
@@ -15,20 +19,18 @@ test("tables become one bullet per row, labelled from the header", () => {
   ].join("\n");
 
   const out = toChatMarkdown(source);
-  assert.ok(out.includes("- **Q8_0** — method: RTN from F16; PPL (3 chunks): **258.1 ± 34.0**; speed: 3.58 t/s"));
-  assert.ok(out.includes("- **Q4_0** — method: vendor QAD; PPL (3 chunks): 281.4 ± 37.3; speed: 4.06 t/s"));
-  assert.ok(!out.includes("|---|"));
+  for (const row of source.split("\n").slice(2, 6)) assert.ok(out.includes(row), row);
   assert.ok(out.includes("Conclusion follows."));
 });
 
-test("two-column tables read as key/value bullets without redundant labels", () => {
+test("table rows never get a hard break glued on", () => {
   const source = ["| Metric | Value |", "|---|---|", "| PPL | 258.1 |"].join("\n");
-  assert.equal(toChatMarkdown(source), "- **PPL** — 258.1");
+  assert.equal(toChatMarkdown(source), source);
 });
 
-test("pipe-less GFM tables are converted too", () => {
+test("pipe-less GFM tables are left alone too", () => {
   const source = ["a | b | c", "--- | --- | ---", "1 | 2 | 3"].join("\n");
-  assert.equal(toChatMarkdown(source), "- **1** — b: 2; c: 3");
+  assert.equal(toChatMarkdown(source), source);
 });
 
 test("a paragraph followed by a thematic break is not treated as a table", () => {
@@ -36,9 +38,27 @@ test("a paragraph followed by a thematic break is not treated as a table", () =>
   assert.equal(toChatMarkdown(source), "a | b  \n---");
 });
 
-test("a header-only table is left as literal text", () => {
+test("a prose line directly above a table is separated from it", () => {
+  // Without the blank line the header row may read as the paragraph's next line,
+  // and then there is no table at all.
+  const source = ["Comparison follows:", "| a | b |", "|---|---|", "| 1 | 2 |"].join("\n");
+  assert.equal(
+    toChatMarkdown(source),
+    ["Comparison follows:", "", "| a | b |", "|---|---|", "| 1 | 2 |"].join("\n"),
+  );
+});
+
+test("prose directly below a table is separated from it", () => {
+  const source = ["| a | b |", "|---|---|", "| 1 | 2 |", "Prose out of nowhere."].join("\n");
+  assert.equal(
+    toChatMarkdown(source),
+    ["| a | b |", "|---|---|", "| 1 | 2 |", "", "Prose out of nowhere."].join("\n"),
+  );
+});
+
+test("a header-only table is still left exactly as written", () => {
   const source = ["| a | b |", "|---|---|"].join("\n");
-  assert.equal(toChatMarkdown(source), "| a | b |  \n|---|---|");
+  assert.equal(toChatMarkdown(source), source);
 });
 
 test("headings become bold lines", () => {
@@ -85,14 +105,19 @@ test("the transform is idempotent", () => {
   assert.equal(toChatMarkdown(once), once);
 });
 
-test("the run-on table case from the bug report keeps its numbers separable", () => {
-  const source = [
-    "| body precision | method | PPL (3 chunks) | speed |",
-    "|---|---|---|---|",
-    "| Q8_0 | naive RTN from F16 | **258.1 ± 34.0** | 3.58 t/s |",
-    "| Q4_0 | naive RTN from F16 | 274.7 ± 37.0 | 4.06 t/s |",
-  ].join("\n");
-  const out = toChatMarkdown(source);
-  assert.ok(!/\d\.\d{2} t\/s\d/.test(out.replace(/\n/g, " ")) || out.includes("\n"));
-  for (const line of out.split("\n")) assert.ok(line.startsWith("- **"), line);
+test("openTable names the header pair of a table the text ends inside", () => {
+  const text = ["prose", "", "| a | b |", "|---|---|", "| 1 | 2 |"].join("\n");
+  assert.deepEqual(openTable(text), { header: ["| a | b |", "|---|---|"], start: 2 });
+});
+
+test("openTable sees nothing once the table has ended", () => {
+  const ended = ["| a | b |", "|---|---|", "| 1 | 2 |", "", "prose"].join("\n");
+  assert.equal(openTable(ended), undefined);
+  const prose = ["| a | b |", "|---|---|", "| 1 | 2 |", "prose out of nowhere"].join("\n");
+  assert.equal(openTable(prose), undefined);
+});
+
+test("openTable ignores a table inside a code block", () => {
+  const text = ["```", "| a | b |", "|---|---|", "| 1 | 2 |"].join("\n");
+  assert.equal(openTable(text), undefined);
 });

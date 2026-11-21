@@ -1,7 +1,7 @@
 import { ChatClient, MAX_MESSAGE_CHARS } from "./chat-client.js";
 import type { ChatTarget } from "./session-key.js";
 import { MARKER_DELAY_MS, PATCH_DEBOUNCE_MS, THINKING_TEXT, TOOL_STATUS_DELAY_MS } from "./constants.js";
-import { toChatMarkdown } from "./chat-markdown.js";
+import { openTable, toChatMarkdown } from "./chat-markdown.js";
 import { toolSummary } from "./shared/tool-line.js";
 import { logger } from "./logger.js";
 
@@ -49,6 +49,12 @@ function openFence(text: string): string | undefined {
  * Cuts at a line boundary where one is available (a hard slice mid-line is what
  * makes a split reply look like two unfinished sentences), and closes/reopens a
  * fenced code block across the cut so the second half isn't rendered as prose.
+ *
+ * A table gets the same treatment for a different reason: a block can be closed
+ * by ending it, but it cannot be re-opened from nothing, so a table cut in half
+ * would leave the second half as rows with no header above them — literal pipes,
+ * not a table. The header and delimiter rows are therefore repeated at the top of
+ * the next chunk (see `openTable`).
  */
 export function splitMessage(text: string, max: number = MAX_MESSAGE_CHARS): string[] {
   const chunks: string[] = [];
@@ -58,11 +64,20 @@ export function splitMessage(text: string, max: number = MAX_MESSAGE_CHARS): str
     if (cut <= 0) cut = max; // no usable newline — hard cut
     let chunk = rest.slice(0, cut);
     const fence = openFence(chunk);
+    // Both are read before the chunk is closed, and a fence wins: a table inside
+    // a code block is code, and the block is what has to be carried over.
+    const table = fence ? undefined : openTable(chunk);
     if (fence) chunk += `\n${fence}`;
     chunks.push(chunk);
     rest = rest.slice(cut);
     if (rest.startsWith("\n")) rest = rest.slice(1);
     if (fence) rest = `${fence}\n${rest}`;
+    // Only if the remainder really continues the table — a cut that lands on the
+    // table's last row has already finished it, and repeating a header there
+    // would conjure an empty table out of the next chunk's prose.
+    if (table && (rest.split("\n", 1)[0] ?? "").includes("|")) {
+      rest = `${table.header.join("\n")}\n${rest}`;
+    }
   }
   if (rest.length > 0) chunks.push(rest);
   return chunks;
@@ -234,8 +249,10 @@ export class ReplyStream {
     // longer exists and reports it as a permission problem.
     await this.patchChain.catch(() => {});
     // Show the final text (in the placeholder if one exists), then post overflow.
-    // Normalise for Chat's renderer *before* splitting so a table can't be cut
-    // in half; the client normalises again on the way out (it's idempotent).
+    // Normalise for Chat's renderer *before* splitting, so the splitter sees the text that will
+    // actually be posted (headings turned into bold, hard breaks added); `splitMessage` then keeps a
+    // fenced block or a table whole across the cut. The client normalises again on the way out (it's
+    // idempotent).
     this.streamed = final;
     const chunks = splitMessage(toChatMarkdown(final));
 

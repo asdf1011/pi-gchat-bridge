@@ -121,3 +121,16 @@ test("a reply into a thread *key* creates the thread and then stays in it", asyn
     ["spaces/S/threads/made", "spaces/S/threads/made"],
   );
 });
+
+test("splitMessage repeats a table's header so the second half is still a table", () => {
+  const rows = Array.from({ length: 8 }, (_, i) => `| row ${i} | value ${i} |`).join("\n");
+  const text = ["intro", "", "| name | value |", "|---|---|", rows].join("\n");
+  const chunks = splitMessage(text, 60);
+  assert.ok(chunks.length > 1);
+  // Every chunk that carries a row also carries the header above it.
+  for (const chunk of chunks) {
+    if (!/\| row \d+ \|/.test(chunk)) continue;
+    assert.match(chunk, /\| name \| value \|/, JSON.stringify(chunk));
+    assert.match(chunk, /\|---\|---\|/, JSON.stringify(chunk));
+  }
+});
