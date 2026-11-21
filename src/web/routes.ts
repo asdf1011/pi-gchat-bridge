@@ -513,6 +513,9 @@ export async function handleWebRequest(
       note: query.get("note") ?? "",
       expected: query.get("expected") ?? "",
       context: (query.get("context") ?? "").split("/").filter((word) => word !== ""),
+      // Free-form conditions the collector typed: "car noise", "background music". Kept as a list
+      // rather than a string so a later analysis can group by them.
+      tags: (query.get("tags") ?? "").split("/").filter((tag) => tag !== ""),
       onsetSeconds: query.get("onset") ?? "",
       endSeconds: query.get("end") ?? "",
       turnScore: query.get("turnScore") ?? "",
