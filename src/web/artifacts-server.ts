@@ -299,6 +299,36 @@ function hrefFor(key: string): string {
   return key.split("/").map((segment) => encodeURIComponent(segment)).join("/");
 }
 
+/**
+ * A key spelled relative to the conversation's own artifact directory.
+ *
+ * The stored key is relative to the artifacts *root*, which is what makes it
+ * stable across revisions and identical for the origin, the pins and a comment
+ * anchor (see `ArtifactFile.key`). That spelling leaks the deployment's layout
+ * into every URL — `conversation/73131/notes.md` — so the same id appeared twice
+ * in a link. Nothing about the key should change, so the short form is resolved
+ * here instead: prefix the conversation's directory and match the result against
+ * the derived list.
+ *
+ * Matched against the list rather than concatenated into a path, so this is an
+ * alias lookup and not a second way to reach the filesystem: a `..` in the short
+ * form simply fails to match anything. `undefined` when the conversation's
+ * directory is not a prefix of any key, which is how a deployment whose keys are
+ * already short (`notes.md`) keeps working unchanged.
+ */
+function findShortKey(
+  files: readonly ArtifactFile[],
+  conversationId: number,
+  short: string,
+): ArtifactFile | undefined {
+  const prefix = `conversation/${conversationId}/`;
+  // The short form must not escape its own conversation: resolve it the same way
+  // a key is compared, and let a literal `../` match nothing.
+  const normalised = path.posix.normalize(short);
+  if (normalised.startsWith("../") || normalised === "..") return undefined;
+  return files.find((candidate) => candidate.key === `${prefix}${normalised}`);
+}
+
 /** The conversation's artifacts, derived by the host from its own transcript. */
 async function artifactsOf(
   options: ArtifactsServerOptions,
@@ -1210,7 +1240,7 @@ async function handle(
 
   // The derived list IS the allow-list: a key that is not in it cannot be read,
   // so no amount of `..`, absolute paths or symlink games reaches anything else.
-  const file = files.find((candidate) => candidate.key === key);
+  const file = files.find((candidate) => candidate.key === key) ?? findShortKey(files, conversationId, key);
   if (!file) {
     send(res, 404, "text/plain; charset=utf-8", TEXT_CSP, `not an artifact of this conversation: ${key}`);
     return;

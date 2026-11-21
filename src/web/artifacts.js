@@ -188,6 +188,23 @@ const artifactsTitle = document.getElementById('artifacts-title');
  * nonce.
  */
 /**
+ * A key as it appears in a URL: relative to the conversation, not the artifacts root.
+ *
+ * Keys are stored relative to the artifacts root (`conversation/73131/notes.md`), which
+ * is what keeps them the same string for the origin, the revision pins and a comment
+ * anchor. In a URL that spelling repeats the conversation id — it is already in the
+ * path — so it is dropped here and re-attached server-side. The stored key does not
+ * change; the server resolves the short form back to it, and accepts either.
+ *
+ * A key outside this conversation is left alone: it would not resolve as a short form
+ * anyway, and mangling it here would only hide that from the 404 that names it.
+ */
+function shortKey(key) {
+  const prefix = 'conversation/' + current + '/';
+  return key.startsWith(prefix) ? key.slice(prefix.length) : key;
+}
+
+/**
  * Which view a file opens in.
  *
  * Markdown opens *rendered*, because that is what a person wants to read — and
@@ -197,7 +214,7 @@ const artifactsTitle = document.getElementById('artifacts-title');
  * where a line number is the obvious unit.
  */
 function artifactUrl(key, markdown, image, pdf, audio = false) {
-  const path = key.split('/').map(encodeURIComponent).join('/');
+  const path = shortKey(key).split('/').map(encodeURIComponent).join('/');
   // `pdf` is a third kind beside markdown and image: a document with pages, which the
   // server renders one page at a time. It is framed exactly like a picture — the
   // document it builds is a picture with paging around it — so the two share a branch.
@@ -227,7 +244,7 @@ function artifactUrl(key, markdown, image, pdf, audio = false) {
  * viewer gives text selection, links and zoom that a picture cannot.
  */
 function pdfRawUrl(key) {
-  return artifactsBase + '/c/' + current + '/' + key.split('/').map(encodeURIComponent).join('/') + '?raw';
+  return artifactsBase + '/c/' + current + '/' + shortKey(key).split('/').map(encodeURIComponent).join('/') + '?raw';
 }
 
 /** Where an image's own bytes live, for the new-tab button and for download links. */
@@ -257,7 +274,7 @@ function audioRawUrl(key) {
  * browser saves rather than opening a third view of what is already on screen.
  */
 function downloadArtifactUrl(key) {
-  return artifactsBase + '/c/' + current + '/' + key.split('/').map(encodeURIComponent).join('/') + '?raw&download';
+  return artifactsBase + '/c/' + current + '/' + shortKey(key).split('/').map(encodeURIComponent).join('/') + '?raw&download';
 }
 
 /**
@@ -272,7 +289,7 @@ function downloadArtifactUrl(key) {
  * pixels, so the same URL means the same rectangle in a narrow drawer and a wide one.
  */
 function regionArtifactUrl(key, region) {
-  const path = key.split('/').map(encodeURIComponent).join('/');
+  const path = shortKey(key).split('/').map(encodeURIComponent).join('/');
   // A PDF's rectangle is a rectangle of *one page*, so the page travels with it: the
   // crop is cut from `?page=N&png`, and without the page a comment on page 3 would crop
   // page 1. The page is the one on the *region*, which the document itself reported —

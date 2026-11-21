@@ -124,6 +124,36 @@ test("?render turns markdown into an escaped document", async () => {
   }
 });
 
+test("a key relative to the artifacts root is also reachable as a short path", async () => {
+  // The deployment's real layout: the root is the artifacts directory, so every key
+  // begins `conversation/<id>/` and the id is already in the URL. The short form must
+  // resolve to the same file, and the stored key must not have to change for it.
+  const root = tempDir();
+  const harness = await serve(root, ["conversation/7/notes.md"], { conversations: [7] });
+  try {
+    const file = path.join(root, "conversation", "7");
+    fs.mkdirSync(file, { recursive: true });
+    fs.writeFileSync(path.join(file, "notes.md"), "# short\n");
+
+    for (const url of [
+      `${harness.base}/c/7/notes.md`,
+      `${harness.base}/c/7/conversation/7/notes.md`,
+    ]) {
+      const response = await fetch(url);
+      assert.equal(response.status, 200, url);
+      assert.equal(await response.text(), "# short\n", url);
+    }
+
+    // The short form is an alias into *this* conversation, not a second way in:
+    // another conversation's prefix, and travel out of this one, both match nothing.
+    assert.equal((await fetch(`${harness.base}/c/7/conversation/8/notes.md`)).status, 404);
+    assert.equal((await fetch(`${harness.base}/c/7/${encodeURIComponent("../../7/notes.md")}`)).status, 404);
+  } finally {
+    await harness.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a path that is not an artifact of this conversation is refused", async () => {
   const root = tempDir();
   const harness = await serve(root, ["notes.md"]);

@@ -1685,7 +1685,9 @@ test("an image opens as itself, not as the source view", async () => {
     await h.settle();
 
     const src = artifactFrame(h.dom).getAttribute("src") ?? "";
-    assert.equal(src, "http://127.0.0.1:8082/c/7/conversation/7/shot.png");
+    // The conversation id is already in the path, so the key is spelled relative to
+    // the conversation rather than to the artifacts root it is stored under.
+    assert.equal(src, "http://127.0.0.1:8082/c/7/shot.png");
     assert.doesNotMatch(src, /view=source/, "no source view around a picture");
     // Marked on the frame so the drawer can draw a backdrop rather than a white slab.
     assert.ok(artifactFrame(h.dom).classList.contains("image"));
@@ -1697,7 +1699,7 @@ test("an image opens as itself, not as the source view", async () => {
     await h.settle();
     const call = h.opened.at(-1);
     assert.ok(call, "a tab was opened");
-    assert.equal(call![0], "http://127.0.0.1:8082/c/7/conversation/7/shot.png?raw");
+    assert.equal(call![0], "http://127.0.0.1:8082/c/7/shot.png?raw");
   } finally {
     h?.close();
   }
