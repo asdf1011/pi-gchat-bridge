@@ -223,7 +223,11 @@ export function makeReportHandler(options: {
         // Follow up rather than steer: a report is not worth interrupting an answer for, and
         // steering into a running turn is how a loop would fight the person using it.
         whenBusy: "followUp",
-        origin: "webui",
+        // The app's own name, not `webui`: this turn was not typed by anyone in the UI, and the
+        // origin is what a surface uses to decide whether an answer needs quoting back
+        // (`painter.promptFor`). Labelling it `webui` made a diagnostics report indistinguishable
+        // from a message the person typed, and would have been echoed as if it were one.
+        origin: `app:${report.appName}`,
         // The digest makes a resent report the same turn rather than a second one.
         requestId: `app-report:${report.conversationId}:${report.appName}:${digest}`,
       });
