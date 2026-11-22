@@ -488,6 +488,48 @@ export async function handleWebRequest(
   // App files, on this origin. Deliberately narrow: read-only, contained in the app directory by
   // the resolver, and served with the artifact CSP so an app cannot reach this origin's API by
   // being framed here.
+  /**
+   * A report an app posts, on the origin the page is served from.
+   *
+   * The same route exists on the artifact origin, and that is where an app's reports used to go —
+   * but an app served from this origin cannot post there: the artifact host sits behind an access
+   * policy, and a `no-cors` POST that is answered with a login redirect fails as "Failed to fetch"
+   * with nothing to read. Same-origin removes the question entirely.
+   *
+   * Nothing here starts a conversation turn — this process has no token for that — so a report
+   * lands as a file for whoever reads it. The artifact origin's route remains the one that can
+   * open a turn.
+   */
+  const appReport = /^\/apps\/(\d+)\/([^/]+)\/report$/.exec(path);
+  if (req.method === "POST" && appReport) {
+    const [, conv, app] = appReport;
+    const dir = options.appDirFor?.(Number(conv), app ?? "");
+    if (dir === undefined) { res.writeHead(404).end("not an app"); return true; }
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let tooLarge = false;
+    for await (const chunk of req) {
+      const buffer = chunk as Buffer;
+      size += buffer.length;
+      if (size > 256 * 1024) { tooLarge = true; req.destroy(); break; }
+      chunks.push(buffer);
+    }
+    if (tooLarge) { res.writeHead(413).end("report larger than 256 KiB"); return true; }
+    const body = Buffer.concat(chunks);
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const name = `${stamp}-${randomUUID().slice(0, 6)}.json`;
+    try {
+      fs.mkdirSync(nodePath.join(dir, "reports"), { recursive: true });
+      fs.writeFileSync(nodePath.join(dir, "reports", name), body);
+    } catch {
+      res.writeHead(500).end("could not store the report");
+      return true;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, file: `reports/${name}` }));
+    return true;
+  }
+
   // Audio clips an app wants kept, on the origin the page is served from — a relative POST from
   // the page, so no CORS and no second origin to keep in step.
   //
