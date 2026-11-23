@@ -144,7 +144,7 @@ test("a refused submission gives its budget back", async () => {
   }
 });
 
-test("a huge report is truncated in the turn and the full copy stays on disk", async () => {
+test("a huge report is summarised in the turn and the full copy stays on disk", async () => {
   const { dir, appDir, cleanup } = scenario({ reports: { autoSubmit: true } });
   try {
     const spy = recordingSubmit();
@@ -156,7 +156,10 @@ test("a huge report is truncated in the turn and the full copy stays on disk", a
     const arrival = report(appDir, `${"x".repeat(5000)}END`);
     await handle(arrival);
     assert.equal(spy.calls.length, 1);
-    assert.match(spy.calls[0]!.content, /truncated/);
+    // Not pasted, and not truncated either: truncation still dumped the first N characters, which
+    // for a report carrying audio is a wall of base64. The turn carries the shape and where to read.
+    assert.doesNotMatch(spy.calls[0]!.content, /xxxxx/);
+    assert.match(spy.calls[0]!.content, /not JSON|too large to paste/);
     assert.ok(spy.calls[0]!.content.length < 2000, "the turn is not a log viewer");
     // The whole thing is still readable where the message says it is.
     assert.match(spy.calls[0]!.content, new RegExp(arrival.file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));

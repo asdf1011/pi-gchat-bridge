@@ -16,6 +16,8 @@ import os from "node:os";
 import path from "node:path";
 import test, { after } from "node:test";
 
+import { ChordError } from "@earendil-works/chord";
+
 import { Ledger } from "../src/durable/ledger.js";
 import { Painter, type PaintStream, type PaintSurface } from "../src/durable/painter.js";
 import type { EntryRef } from "../src/durable/entries.js";
@@ -583,4 +585,51 @@ test("a prompt opens the watch, and the first busy frame opens the placeholder",
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(fake.streams.length, 1, "the placeholder opens on the first running frame");
   await painter.close();
+});
+
+test("a dead link is reported once, and a host's refusal is not a dead link", async () => {
+  // The painter is where the Chat adapter notices that its link is gone: it is the one thing that
+  // reads the seam without a request to fail. Left as an empty summary it is invisible — the 23 Nov
+  // outage ran for four hours on ticks that logged "cannot list conversations" and then painted
+  // nothing. Reported once, too: an outage must not become one report a minute.
+  const ledger = await Ledger.load(path.join(scratch, `l${++counter}.json`));
+  const reported: unknown[] = [];
+  const painter = new Painter({
+    surface: "gchat",
+    ledger,
+    owns: () => true,
+    conversations: async () => {
+      throw new ChordError("unavailable", "no route to session-host");
+    },
+    entriesSince: async () => [],
+    busy: async () => false,
+    surfaceClient: fakeSurface().surface,
+    unreachable: (error) => reported.push(error),
+    log: () => {},
+  });
+
+  await painter.tick();
+  await painter.tick();
+  await painter.tick();
+  assert.equal(reported.length, 1, "one broken link is one report");
+  assert.match(String(reported[0]), /no route to session-host/);
+
+  // A refusal from the host is an answer about a conversation, not an outage: the painter must not
+  // take the adapter down for it.
+  const refusals: unknown[] = [];
+  const refusing = new Painter({
+    surface: "gchat",
+    ledger,
+    owns: () => true,
+    conversations: async () => {
+      throw new ChordError("invalid", "malformed argument");
+    },
+    entriesSince: async () => [],
+    busy: async () => false,
+    surfaceClient: fakeSurface().surface,
+    unreachable: (error) => refusals.push(error),
+    log: () => {},
+  });
+  await refusing.tick();
+  assert.deepEqual(refusals, []);
 });

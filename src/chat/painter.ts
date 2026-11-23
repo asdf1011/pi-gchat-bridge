@@ -76,8 +76,13 @@ export async function startChatPainter(options: ChatPainterOptions): Promise<Cha
     // thread — the failure this whole arrangement exists to make impossible.
     // Through the seam, not the host: this is adapter code, and the fork is the point at which
     // reaching into the host's own documents stops compiling.
+    //
+    // A failed read propagates rather than answering `[]`. An empty list here used to mean "this
+    // conversation has no Chat thread", so during the 23 Nov link outage the painter skipped every
+    // conversation it owned and posted nothing — silently, once a minute. It also logged the same
+    // thing for twelve conversations at every start, which cost a resetting breaker nothing to skip.
     const addressOf = async (conversationId: number): Promise<string | undefined> => {
-      const bound = await options.seam.list().catch(() => []);
+      const bound = await options.seam.list();
       return bound.find((row) => row.conversationId === conversationId)?.name;
     };
     painter = new Painter({
@@ -87,13 +92,20 @@ export async function startChatPainter(options: ChatPainterOptions): Promise<Cha
       // conversation has no thread for this bridge to keep up.
       owns: () => true,
       conversations: async () => {
-        const bound = await options.seam.list().catch(() => []);
+        const bound = await options.seam.list();
         return bound
           .filter((row) => row.name.startsWith("spaces/"))
           .map((row) => ({
             conversationId: row.conversationId,
             ...(row.lastActivityAt === undefined ? {} : { lastActivityAt: row.lastActivityAt }),
           }));
+      },
+      // Give up on the link, rather than on this tick. With the seam unable to answer at all, every
+      // call above fails `unavailable` for as long as the link stays down, and the adapter process is
+      // the only thing that can be replaced with one whose link works (see `acceptAdapterLink`).
+      unreachable: () => {
+        logger.error("[paint] session host unreachable — exiting so the supervisor forks an adapter with a new link");
+        process.exit(1);
       },
       // The painter walks forward from its cursor, so this asks the seam the same question the
       // protocol answers: entries after an id, bounded. The `entries` helper does the grouping

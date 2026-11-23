@@ -123,6 +123,50 @@ test("a forked adapter reaches the host, and its replacement gets a fresh link",
   }
 });
 
+test("a link that dies is treated as a crash: the stranded adapter is replaced", { timeout: 120_000 }, async () => {
+  const objectHost = serveSessionHost(fakeSeam());
+  const port = await freePort();
+
+  const supervisor = forkAdapter(
+    {
+      entry: new URL("./fixtures/link-adapter.ts", import.meta.url),
+      execArgv: ["--import", "tsx"],
+      env: { FIXTURE_PORT: String(port) },
+      marker: "FIXTURE_ADAPTER_LISTENING ",
+      log: () => {},
+    },
+    (child) => acceptAdapterLink(objectHost, child, "fixture-adapter"),
+  );
+
+  try {
+    const first = JSON.parse(await eventually(port, "/state")) as { pid: number };
+
+    // Close the host's side of the link, which is what a keepalive timeout does. The child is still
+    // running and still accepting HTTP, so nothing but this wiring can notice that it can no longer
+    // reach the host — the exact state that left the web and Chat adapters serving 500s until the
+    // bridge was restarted by hand.
+    await objectHost.invalidatePrincipal((principal: unknown) => principal === "fixture-adapter");
+
+    // Not just "answers again" — it answered before, by hanging. The proof is a new pid: the host
+    // killed the stranded generation and the supervisor forked one with a fresh channel.
+    const deadline = Date.now() + 30_000;
+    let second: { pid: number } | undefined;
+    while (Date.now() < deadline) {
+      const body = await eventually(port, "/state").catch(() => undefined);
+      if (body) {
+        const parsed = JSON.parse(body) as { pid: number };
+        if (parsed.pid !== first.pid) {
+          second = parsed;
+          break;
+        }
+      }
+    }
+    assert.ok(second, "a second generation answered — the stranded one was replaced");
+  } finally {
+    supervisor.stop();
+  }
+});
+
 test("a chord host accepts more than one generation, one link each", async () => {
   // The narrower claim, without a process: two links from one host, both usable. If `accept` were
   // once-only, the second adapter generation would start and then fail every call.

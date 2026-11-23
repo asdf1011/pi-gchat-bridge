@@ -9,7 +9,13 @@
  *   2. a `supervise()` loop, so a crashed adapter comes back with backoff instead of leaving its
  *      surface down until someone restarts the bridge;
  *   3. `objectHost.accept(ipcLink(child), …)` per generation, because a dead child's channel is gone
- *      and the next one needs its own.
+ *      and the next one needs its own;
+ *   4. killing the child when its link closes without it exiting. Chord leaves an *upstream* binding
+ *      detached after a closed link, waiting for a replacement the child can never open (it cannot
+ *      re-fork itself), so the adapter would keep serving a host it cannot reach: calls made before
+ *      the close hang, later ones fail `no route to session-host`, and nothing ever repairs it. A
+ *      link death — a keepalive timeout on a starved machine, most often — is the same situation as
+ *      a crash, and deserves the same answer.
  *
  * Two details are easy to get wrong and are handled here rather than in each caller:
  *
@@ -90,8 +96,22 @@ export function forkAdapter(
 
 /** Accept one adapter generation's link on the host this process serves. */
 export function acceptAdapterLink(objectHost: Host, child: ChildProcess, principal: string): void {
-  objectHost.accept(ipcLink(child as unknown as Parameters<typeof ipcLink>[0]), {
-    principal,
-    kind: "client",
+  const link = ipcLink(child as unknown as Parameters<typeof ipcLink>[0]);
+  objectHost.accept(link, { principal, kind: "client" });
+  // The child has no way back to this host once its link is closed (see the header): kill it so the
+  // supervisor forks a generation with a fresh channel, exactly as it would after a crash.
+  link.onClose((reason) => {
+    // A child that merely died closes its channel first and is reaped a few milliseconds later.
+    // Waiting for that turn keeps the log honest — a crash says so once, from the supervisor — and
+    // stops a second SIGKILL being sent to a process that is already gone.
+    setTimeout(() => {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      logger.warn(
+        `[supervisor] ${principal} lost its link to the session host (${reason}) — restarting the adapter`,
+      );
+      // SIGKILL, not SIGTERM: the link is usually closed *because* the peer could not answer for
+      // long enough to run its own exit handlers, so asking it to exit politely may never be heard.
+      child.kill("SIGKILL");
+    }, 25).unref();
   });
 }

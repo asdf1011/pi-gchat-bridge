@@ -37,7 +37,7 @@
  *      `process.send` is parsed as link frames.
  */
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { createHost, type Host } from "@earendil-works/chord";
+import { createHost, isChordError, type Host } from "@earendil-works/chord";
 
 import type {
   AgentConfig,
@@ -548,7 +548,7 @@ export function linkSessionHost(options: LinkSessionHostOptions): SessionHost {
  */
 async function withRef<T>(
   host: Host,
-  session: () => Promise<Record<string, any>>,
+  session: Session,
   conversationId: number,
   absent: T,
   run: (ref: ConversationRef) => Promise<T>,
@@ -562,27 +562,69 @@ async function withRef<T>(
   }
 }
 
+/** The session object's resolver, and the way to drop it when the link it came over is gone. */
+type Session = (() => Promise<Record<string, any>>) & { forget(): void };
+
 /** A chord reference to one conversation object, as this module uses it. */
 type ConversationRef = {
   readonly view: { readonly value: unknown; subscribe(fn: (value: unknown) => void): () => void };
   release(): void;
 } & Record<string, any>;
 
-/** A conversation reference, or `undefined` when the host has no such conversation. */
+/**
+ * The host could not be asked — a different answer from "there is no such conversation".
+ *
+ * The distinction is not pedantry: it is the whole of one outage. On 23 Nov both adapters lost their
+ * link (a keepalive ping missed on a stalled machine), every call afterwards failed `unavailable: no
+ * route to session-host`, and because a conversation that cannot be reached was reported the same way
+ * as one that does not exist, the web adapter answered "no such conversation" for four hours while a
+ * restart would have fixed it. A failure that says what it is can be retried, shown and acted on; a
+ * failure that reads like an empty store cannot.
+ */
+export class HostUnreachableError extends Error {
+  constructor(cause: unknown) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    super(`session host unreachable: ${detail}`, { cause });
+    this.name = "HostUnreachableError";
+  }
+}
+
+/** Codes that mean "the call did not happen", as opposed to "the call happened and was refused". */
+const UNREACHABLE_CODES = new Set(["unavailable", "gone"]);
+
+/**
+ * A conversation reference, `undefined` when the host says there is no such conversation, and a
+ * `HostUnreachableError` when the host could not be asked at all.
+ *
+ * The one answer that must not be swallowed is a broken link. It propagates, because every caller
+ * already handles it the right way by accident: the request is answered with an error rather than
+ * with a value that reads like data (`undefined`, `false`, an empty list) and the adapter's own error
+ * handler logs the real reason.
+ */
 async function conversationRef(
   host: Host,
   conversationId: number,
-  session: () => Promise<Record<string, any>>,
+  session: Session,
 ): Promise<ConversationRef | undefined> {
+  let root: Record<string, any>;
   try {
-    const root = await session();
+    root = await session();
     // One extra round trip per open, not per frame: a chord object would
     // otherwise spring into existence for a conversation that does not exist.
     const exists = await host.root((ctx) => root.has({ conversation: conversationId }, ctx));
     if (!exists) return undefined;
     const ref = await host.get(ConversationContract, { conversation: conversationId });
     return ref as { view: { value: unknown; subscribe(fn: (value: unknown) => void): () => void }; release(): void } & Record<string, any>;
-  } catch {
+  } catch (error) {
+    if (isChordError(error) && UNREACHABLE_CODES.has(error.code)) {
+      // The session object is resolved once and cached (see `once`), so a promise rejected by a
+      // broken link would be handed to every later call forever — including after the link came
+      // back. Forgetting it makes the next call ask again.
+      session.forget();
+      throw new HostUnreachableError(error);
+    }
+    // Anything else is the host's answer about this conversation (`invalid`, `forbidden`): there is
+    // nothing to open, which is what `undefined` means here.
     return undefined;
   }
 }
@@ -608,11 +650,19 @@ function wireAgent(agent: AgentConfig): {
   };
 }
 
-/** Resolve once, then reuse: the session object is a singleton per client host. */
-function once<T>(factory: () => Promise<T>): () => Promise<T> {
+/**
+ * Resolve once, then reuse: the session object is a singleton per client host — with a way to forget
+ * it when the link that carried it is gone (see `HostUnreachableError`).
+ */
+function once<T>(factory: () => Promise<T>): { (): Promise<T>; forget(): void } {
   let value: Promise<T> | undefined;
-  return () => {
+  const once = () => {
     value ??= factory();
     return value;
   };
+  return Object.assign(once, {
+    forget: () => {
+      value = undefined;
+    },
+  });
 }

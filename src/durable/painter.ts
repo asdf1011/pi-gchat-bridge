@@ -45,6 +45,8 @@
  *     mode. It is the only polling left, and it never runs for a watched thread: one liveness
  *     mechanism at a time, and the subscription is the one that counts.
  */
+import { isChordError } from "@earendil-works/chord";
+
 import type { EntryRef, MessageLike } from "./entries.js";
 import type { Ledger } from "./ledger.js";
 
@@ -152,6 +154,16 @@ export interface PainterDeps {
   /** How much history one look may read before calling the position unreachable. */
   pageSize?: number;
   maxPages?: number;
+  /**
+   * The seam answered `unavailable`: the adapter cannot reach the session host at all, and no tick
+   * will ever do anything again on this link (the conversation counts stay warm, so the failure is
+   * otherwise invisible inside an empty summary).
+   *
+   * Called once per painter, not once per tick. What the caller does is the caller's business; the
+   * Chat adapter exits so that its supervisor forks a generation with a fresh link, which is the only
+   * thing on this side of a dead link that can repair it.
+   */
+  unreachable?(error: unknown): void;
   log?(message: string): void;
 }
 
@@ -197,6 +209,8 @@ export class Painter {
    */
   private opening = new Map<number, Promise<Open | undefined>>();
   private summary: PaintSummary = { painted: 0, streamed: 0, posted: 0, failed: 0, adopted: 0 };
+  /** Whether `unreachable` has already been reported: one broken link is one report, not one a minute. */
+  private reportedUnreachable = false;
   /** Serialises ticks. Two at once could both see one unposted answer and post it twice. */
   private chain: Promise<unknown> = Promise.resolve();
 
@@ -234,6 +248,20 @@ export class Painter {
     (this.deps.log ?? ((line: string) => logger.info(line)))(message);
   }
 
+  /**
+   * Report a link failure once, whichever of the many calls in a tick hit it.
+   *
+   * Only `unavailable` counts, and only the first time: a refusal from the host (`invalid`,
+   * `forbidden`) is an answer about one conversation, and an outage must not turn into a log line
+   * every minute for every conversation.
+   */
+  private noteUnreachable(error: unknown): void {
+    if (this.reportedUnreachable) return;
+    if (!isChordError(error) || error.code !== "unavailable") return;
+    this.reportedUnreachable = true;
+    this.deps.unreachable?.(error);
+  }
+
   /** One tick over every conversation this painter owns. Never throws. */
   private async tickAll(): Promise<PaintSummary> {
     const summary: PaintSummary = { painted: 0, streamed: 0, posted: 0, failed: 0, adopted: 0 };
@@ -242,6 +270,7 @@ export class Painter {
       conversations = await this.deps.conversations();
     } catch (error) {
       this.log(`[paint] cannot list conversations: ${(error as Error).message}`);
+      this.noteUnreachable(error);
       return summary;
     }
     const owned = conversations.filter((conversation) => this.deps.owns(conversation.conversationId));

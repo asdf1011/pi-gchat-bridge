@@ -165,6 +165,40 @@ test("an unbound conversation is undefined, not an error", async () => {
   assert.equal(await linked.artifacts(999_999), undefined);
 });
 
+test("a dead link is an error, not an empty store", async () => {
+  // The other half of the 23 Nov outage (the restart half is in `adapter-supervision.test.ts`).
+  //
+  // When a link is gone, chord detaches every binding, and a request made afterwards waits for the
+  // link to come back — by design, because an adapter outlives a reconnect. What this asserts is what
+  // happens when it does not come back. The failure has to arrive as *the host is unreachable*; it
+  // must never arrive as data ("no such conversation", "not busy", "submitted"), which is how the web
+  // adapter spent four hours answering 404 for conversations the store had all along.
+  //
+  // The 60 s race is chord's own readiness deadline, and it is the reason this waits rather than
+  // failing fast: a request made into a detached binding has nothing to fail it until then. That is
+  // also the argument for the exit-on-unreachable rule in `chat/painter.ts` — noticing is cheap when
+  // it happens where the work happens, and slow when it happens where the request does.
+  const host = await memoryHost();
+  const server = serveSessionHost(inProcessSessionHost({ host, roots: [] }));
+  const [down] = memoryLinkPair();
+  server.accept(down, { principal: "owner", kind: "client" });
+  down.close("ping timeout");
+
+  const client = createHost({
+    self: "client",
+    name: "client",
+    kind: "client",
+    upstream: { link: down, principal: "server" },
+  });
+  const linked = linkSessionHost({ host: client });
+
+  await assert.rejects(linked.snapshot(7), { name: "HostUnreachableError" });
+  await assert.rejects(linked.submit(7, { content: "hello" }), { name: "HostUnreachableError" });
+  // And the session object was not cached as a rejected promise: the next call fails the same way
+  // rather than from a promise that can only ever reject.
+  await assert.rejects(linked.attach(7, () => {}), { name: "HostUnreachableError" });
+}, { timeout: 240_000 });
+
 /* --- Settings and commands --------------------------------------------------
  *
  * These exist because a `/status` typed into a web conversation *is* an adapter
