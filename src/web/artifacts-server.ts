@@ -1093,8 +1093,20 @@ async function serveApp(
   send(res, 200, appFileType(file), appCsp(frameAncestorsFor(options.webOrigin)), body, headers);
 }
 
-/** The largest report the bridge will store. Big enough for a full log, small enough to be free. */
-const MAX_REPORT_BYTES = 256 * 1024;
+/**
+ * The largest report the bridge will store.
+ *
+ * 8 MiB, raised from 256 KiB. The old figure was sized for a log and nothing else; a report that
+ * carries the audio a transcription was given needs room for it, and 30 s of 16 kHz 16-bit audio is
+ * ~1.2 MiB once base64-encoded. Downsampling to fit 256 KiB was tried and was the wrong trade: it
+ * made the one artifact you would use to debug a bad transcription a lossy copy of the audio that
+ * caused it.
+ *
+ * Still a bound rather than an absence of one. The point is unchanged -- a runaway client cannot
+ * fill the disk a request at a time -- and it is refused rather than truncated, because half a
+ * report is a report that lies.
+ */
+const MAX_REPORT_BYTES = 8 * 1024 * 1024;
 
 /**
  * Store a report an app sends about itself.

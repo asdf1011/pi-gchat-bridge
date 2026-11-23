@@ -53,6 +53,8 @@ interface Harness {
   historyRequests: { limit: number; before: number }[];
   /** Every `window.open` the page attempted, as its argument list. */
   opened: unknown[][];
+  /** Every message the page posted to the speech frame, in order. */
+  spoken: { type: string; text?: string; block?: number; interrupt?: boolean }[];
   /** Console errors the page produced — an empty list is the pass condition. */
   errors: string[];
   /** Resolve pending microtasks so the page's async work completes. */
@@ -106,6 +108,8 @@ async function loadPage(
   const errors: string[] = [];
   /** Every history request, so a test can assert how it paged. */
   const historyRequests: { limit: number; before: number }[] = [];
+  /** Every message posted into the speech frame: what talking mode actually asked for. */
+  const spoken: Harness["spoken"] = [];
 
   // The stubs must exist BEFORE the page's script runs, and jsdom runs an inline
   // <script> during parsing. `beforeParse` is the only hook early enough — putting
@@ -116,6 +120,38 @@ async function loadPage(
     runScripts: "dangerously",
     pretendToBeVisual: true,
     beforeParse(win) {
+
+      // The speech frame. jsdom frames do not navigate, so the page's wait for the app's document
+      // would time out; the fake says the document is there, and records what is posted to it —
+      // which is the whole of what talking mode *does*, and the only thing worth asserting.
+      Object.defineProperty(win.HTMLIFrameElement.prototype, "src", {
+        configurable: true,
+        get(this: HTMLIFrameElement) {
+          return this.getAttribute("src") ?? "";
+        },
+        set(this: HTMLIFrameElement, value: string) {
+          this.setAttribute("src", value);
+          // jsdom gives a frame an `about:blank` document that is already "complete", so the
+          // page's own wait passes without a navigation ever happening. Only what is posted
+          // matters here, and that is the whole of what talking mode *does*.
+          const frameWindow = this.contentWindow;
+          if (frameWindow !== null) {
+            // jsdom does navigate a frame in a real document; in the outside-visible window it
+            // does not, so the wait for the app's document is satisfied here instead.
+            const done = frameWindow.document;
+            // `readyState` is the wrapper's own getter and cannot be overridden on the document,
+            // so what the page reads is a stand-in carrying the one fact its wait asks for.
+            Object.defineProperty(this, "contentDocument", {
+              configurable: true,
+              get: () => ({ ...done, readyState: "complete" }) as unknown as Document,
+            });
+            Object.defineProperty(frameWindow, "postMessage", {
+              configurable: true,
+              value: (message: { type: string }) => spoken.push(message),
+            });
+          }
+        },
+      });
 
       // jsdom has no layout, so it has no `scrollIntoView`. The page calls it on the entry a link
       // names; without this the anchor throws where a browser would scroll.
@@ -261,6 +297,10 @@ async function loadPage(
         if (url.includes("/message")) {
           return { ok: true, status: options.postStatus ?? 202, json: async () => ({ ok: true }) };
         }
+        // The speech app's address, which talking mode asks for once when it is switched on.
+        if (/\/api\/c\/\d+\/speech$/.test(url)) {
+          return { ok: true, status: 200, json: async () => ({ url: "/apps/7/webtalk/speech.html" }) };
+        }
         return { ok: true, status: 200, json: async () => ({}) };
       };
     },
@@ -295,6 +335,7 @@ async function loadPage(
     historyRequests,
     /** Every `window.open` the page attempted, as its argument list. */
     opened,
+    spoken,
     errors,
     settle,
     close() {
@@ -3244,4 +3285,148 @@ test("a repaint keeps the anchor mark and the miss note", async () => {
     h.dom.window.document.querySelector('[data-entry="42"]')?.classList.contains("at-entry"),
     "the mark survives a repaint",
   );
+});
+
+// --- Talking mode ------------------------------------------------------------
+
+/** Press the header microphone, which is the mode: on or off and nothing else. */
+async function turnTalkOn(h: Harness): Promise<void> {
+  (h.dom.window.document.getElementById("talk") as HTMLElement).dispatchEvent(
+    new h.dom.window.MouseEvent("click", { bubbles: true }),
+  );
+  await h.settle();
+}
+
+/** Let the page's `requestAnimationFrame` callbacks run: jsdom's never fire on their own. */
+async function frame(h: Harness): Promise<void> {
+  await new Promise((resolve) => h.dom.window.requestAnimationFrame(() => resolve(null)));
+  await h.settle();
+}
+
+test("turning talking mode on mid-turn reads the message already on screen", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    const source = h.sources[0]!;
+
+    // The turn is under way and has said a whole sentence before anybody asked to hear it — the
+    // frame existed for none of it, so nothing was ever sent.
+    source.emit("text", { text: "Let me check the logs. ", busy: true });
+    await h.settle();
+    assert.deepEqual(h.spoken, [], "nobody was listening yet");
+
+    await turnTalkOn(h);
+    await frame(h);
+
+    assert.deepEqual(
+      h.spoken.filter((message) => message.type === "speak").map((message) => message.text),
+      ["Let me check the logs."],
+      "the sentence already on screen is spoken when the mode is switched on",
+    );
+    // A new block, not a restart: nothing was in progress to cut off.
+    assert.equal(h.spoken[0]?.interrupt, false);
+  } finally {
+    h?.close();
+  }
+});
+
+test("turning talking mode on mid-turn carries on with the rest of the answer", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    const source = h.sources[0]!;
+    source.emit("text", { text: "First sentence. ", busy: true });
+    await h.settle();
+    await turnTalkOn(h);
+    await frame(h);
+
+    // The rest of the same block from the next frame, which must not be read from the beginning.
+    source.emit("text", { text: "First sentence. Second sentence. ", busy: true });
+    await h.settle();
+    await frame(h);
+
+    assert.deepEqual(
+      h.spoken.filter((message) => message.type === "speak").map((message) => message.text),
+      ["First sentence.", "Second sentence."],
+      "each sentence is said once",
+    );
+  } finally {
+    h?.close();
+  }
+});
+
+test("turning talking mode on mid-turn says what a quiet turn is doing", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    const source = h.sources[0]!;
+    // A tool running with no words in flight: the status line is the whole of what is on screen.
+    source.emit("text", { text: "", busy: true });
+    source.emit("tool", { name: "bash", status: "running", line: "Running: npm test" });
+    await h.settle();
+    assert.deepEqual(h.spoken, []);
+
+    await turnTalkOn(h);
+    await frame(h);
+
+    assert.deepEqual(
+      h.spoken.filter((message) => message.type === "speak").map((message) => message.text),
+      ["Running: npm test"],
+      "the status of the running tool is read when the mode is switched on",
+    );
+    assert.equal(h.spoken[0]?.interrupt, true, "and cuts anything else that was playing");
+  } finally {
+    h?.close();
+  }
+});
+
+test("a status is said once, not on every repaint", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    const source = h.sources[0]!;
+    await turnTalkOn(h);
+    source.emit("text", { text: "", busy: true });
+    source.emit("tool", { name: "bash", status: "running", line: "Running: npm test" });
+    source.emit("tool", { name: "bash", status: "running", line: "Running: npm test" });
+    await frame(h);
+
+    assert.deepEqual(
+      h.spoken.map((message) => message.text),
+      ["Running: npm test"],
+      "the same line twice is one thing to say",
+    );
+  } finally {
+    h?.close();
+  }
+});
+
+test("a status waits while a message is being written, and a new block unblocks it", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    const source = h.sources[0]!;
+    await turnTalkOn(h);
+
+    source.emit("text", { text: "Writing this. ", busy: true });
+    source.emit("tool", { name: "bash", status: "running", line: "Running: jj log" });
+    await frame(h);
+    assert.deepEqual(
+      h.spoken.map((message) => message.text),
+      ["Writing this."],
+      "a status under text being spoken is a voice interrupting itself",
+    );
+
+    // The text being written is replaced by an empty block — the next step of the turn — and the
+    // status that arrives with it is a new thing to say.
+    source.emit("text", { text: "", busy: true });
+    source.emit("tool", { name: "bash", status: "running", line: "Running: jj log" });
+    await frame(h);
+    assert.deepEqual(
+      h.spoken.map((message) => message.text),
+      ["Writing this.", "Running: jj log"],
+    );
+  } finally {
+    h?.close();
+  }
 });

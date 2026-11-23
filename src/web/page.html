@@ -2206,6 +2206,10 @@ function connectStream(id) {
     // A frame that names a tool *after* the turn has ended is stale — the two
     // arrive as separate events and either can be last — so it sets nothing.
     statusLine = d && !turnEnded ? String(d.line || '') : '';
+    // No line yet means no command: the running one has finished, and a status is a thing that
+    // happens, not a state to be announced again.
+    if (statusLine === '') spokenStatus = '';
+    else if (talkOn) requestAnimationFrame(() => speakStatus(statusLine));
     tool.textContent = '';
     paint();
   });
@@ -2415,6 +2419,35 @@ async function setTalking(on) {
   // something now, so the last answer is read. If a turn is mid-flight the streamed path will speak
   // it as sentences complete, and speaking the stored copy as well would say it twice.
   if (liveText === '') speakLatestAnswer();
+  // Unless we are mid-turn, in which case the stream is already ahead of us: the block being
+  // written is handed over in `afterSpeechFrame` because the frame was not listening until now,
+  // and the status of whatever the turn is running waits behind it — see `speakStatus`.
+}
+
+/**
+ * Where the turn is up to, said aloud, once the speech frame is listening.
+ *
+ * The streamed path runs on every frame and the frame only exists after `ensureSpeechFrame`, so
+ * switching talking mode on from the middle of a turn bought silence: the sentences in `liveText`
+ * had arrived while nothing was able to send them, and the *next* frame — a status line, or the
+ * turn ending — bought nothing either, because neither is text.
+ *
+ * So the mode reads the message already on screen at the moment it is switched on, exactly as it
+ * would have said the sentences had the mode been on for them, and the difference that changes is
+ * the shape of the text: `liveText` is the message being written and carries its own punctuation,
+ * whereas a status line is one line of a running tool and has neither.
+ */
+function afterSpeechFrame() {
+  console.log('DEBUG in afterSpeechFrame', talkOn, liveText.length);
+  if (!talkOn) return;   // switched back off while the frame was loading
+  if (liveText.trim() !== '') {
+    // The same hand-over the stream uses, done once for what the stream said before we could
+    // hear it. `talkBlock` is empty, so this is a new block rather than a restart, and the app's
+    // first sentence cuts anything left playing from the per-message Read button.
+    speakStreamingBlock(liveText);
+    return;
+  }
+  speakStatus(statusLine);
 }
 
 /**
@@ -2429,10 +2462,16 @@ function speakLatestAnswer() {
   if (target === null) return;
   const text = (target.innerText || '').trim();
   if (text === '') return;
+  // `speechBlock` numbers the per-message reads, and a turn being followed has its own counter
+  // (`talkBlockId`). Starting one here if the other is running means the following sentence of the
+  // turn is numbered lower than the block already playing, and the app resets its word count for
+  // what it takes to be a new block — so the highlight walks the wrong words. Turn the coin over.
+  talkBlockId = Math.max(talkBlockId, speechBlock) + 1;
+  speechBlock = talkBlockId;
   speechTarget = target;
   speechEntry = String(target.closest('.msg')?.dataset.entry ?? '');
   speechFrame?.contentWindow?.postMessage(
-    { type: 'speak', text, block: (speechBlock += 1), interrupt: true },
+    { type: 'speak', text, block: talkBlockId, interrupt: true },
     '*',
   );
 }
@@ -2512,6 +2551,10 @@ async function ensureSpeechFrame() {
   })();
   try { await speechFrameLoading; } finally { speechFrameLoading = undefined; }
   if (speechFrame.src !== '') speechFrame.dataset.loaded = 'true';
+  // Only ever set by `setTalking`'s load, which is the call that has something to say the moment
+  // the frame can hear it; the per-message Read button has already decided what to speak.
+  console.log('DEBUG afterSpeechFrame talkOn=', talkOn, 'src=', JSON.stringify(speechFrame.src), 'live=', JSON.stringify(liveText));
+  if (talkOn) afterSpeechFrame();
   return speechFrame;
 }
 
@@ -2590,6 +2633,8 @@ let speechBlock = 0;
 let talkBlock = '';      // the current block's text, as last seen
 let talkBlockId = 0;     // which block that is, so word indices can restart with it
 let lastLiveText = '';   // the last block seen with any text in it
+/** The status line already handed over, so a repaint does not say the same command twice. */
+let spokenStatus = '';
 
 /**
  * Hand over every sentence of the current block that is now complete.
@@ -2598,6 +2643,7 @@ let lastLiveText = '';   // the last block seen with any text in it
  * the block being spoken — which is the one on screen and the one being highlighted.
  */
 function speakStreamingBlock(text) {
+  console.log('DEBUG speakStreamingBlock', talkOn, speechFrame?.contentWindow !== undefined);
   if (!talkOn || speechFrame?.contentWindow === undefined) return;
   const body = text.trim();
   if (body === '') return;
@@ -2646,6 +2692,33 @@ function speakStreamingBlock(text) {
   }
 }
 
+/**
+ * Say what the turn is doing while it is doing it, for a reader who cannot see the row.
+ *
+ * `statusLine` was deliberately left out of the stream (`jj log -r @` recited is noise), and that
+ * is still right for a turn watched from the beginning: the answer is being spoken, and the
+ * commands behind it are shown. It is wrong for the case this exists for — switching the mode on
+ * mid-turn, or a turn that has gone quiet after a tool call — where the status is the *only* thing
+ * on screen and a silent mode reads as a broken one.
+ *
+ * Sent as its own block, like any other, so the next sentence of the message cuts it off rather
+ * than waiting for a tool line to finish being read. Only when nothing is being written, too: a
+ * status under text that is already speaking is a voice interrupting itself to read a command.
+ */
+function speakStatus(line) {
+  const text = String(line || '').trim();
+  if (!talkOn || speechFrame?.contentWindow === undefined) return;
+  if (text === '' || text === spokenStatus) return;
+  if (liveText.trim() !== '') return;
+  spokenStatus = text;
+  talkBlock = '';
+  talkBlockId += 1;
+  speechFrame.contentWindow.postMessage(
+    { type: 'speak', text, block: talkBlockId, interrupt: true },
+    '*',
+  );
+}
+
 /** Flush whatever a block ended on, which has no closing punctuation to make it "complete". */
 function speakRemainder(text) {
   if (!talkOn || speechFrame?.contentWindow === undefined) return;
@@ -2677,7 +2750,10 @@ function applyView(view) {
   // the row survived on `statusLine` alone: a "Running: …" under an answer that had
   // already finished, which only a new turn painted over.
   turnEnded = !d.busy;
-  statusLine = '';
+  // A turn that has finished has no command still running, whatever the next `tool` frame is
+  // going to say — and the mode is about to read the end of the turn, which must not be cut
+  // short by a status that is already over.
+  if (turnEnded) statusLine = '';
   // The *transition* is the trigger, not the state: `applyView` runs on every frame, and
   // `turnEnded` stays true between turns, so testing the state alone would re-read the same
   // answer on every repaint.
@@ -2685,6 +2761,7 @@ function applyView(view) {
   if (talkOn && liveText !== '') {
     requestAnimationFrame(() => speakStreamingBlock(liveText));
   }
+  if (liveText === '') spokenStatus = '';   // a new block: the next status is a new thing to say
   if (turnEnded && !wasEnded) {
     // The turn is over: whatever the last block ended on has no closing punctuation to make it
     // look complete, and nothing else is coming to finish it.
@@ -2704,6 +2781,9 @@ function applyView(view) {
       talkBlock = '';
       talkBlockId += 1;
       lastLiveText = '';
+      // A turn that ends on a tool line rather than on words: switching the mode on for a status
+      // and never hearing the answer it belonged to, because nothing after it was text.
+      if (ended === '') requestAnimationFrame(() => speakStatus(statusLine));
     });
   }
 }
