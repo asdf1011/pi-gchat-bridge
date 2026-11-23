@@ -121,9 +121,10 @@ async function loadPage(
     pretendToBeVisual: true,
     beforeParse(win) {
 
-      // The speech frame. jsdom frames do not navigate, so the page's wait for the app's document
-      // would time out; the fake says the document is there, and records what is posted to it —
-      // which is the whole of what talking mode *does*, and the only thing worth asserting.
+      // The speech frame. jsdom makes this navigation but never finishes loading the document, so
+      // the page's wait for the app — which is the guard against posting into a frame that is
+      // about to be replaced — would sit out its deadline. The fake finishes the navigation and
+      // records what is posted, which is the whole of what talking mode *does*.
       Object.defineProperty(win.HTMLIFrameElement.prototype, "src", {
         configurable: true,
         get(this: HTMLIFrameElement) {
@@ -131,20 +132,15 @@ async function loadPage(
         },
         set(this: HTMLIFrameElement, value: string) {
           this.setAttribute("src", value);
-          // jsdom gives a frame an `about:blank` document that is already "complete", so the
-          // page's own wait passes without a navigation ever happening. Only what is posted
-          // matters here, and that is the whole of what talking mode *does*.
+          // `readyState` is the wrapper's own getter and cannot be redefined on the document, so
+          // what the page reads is a stand-in carrying the one fact its wait asks for.
+          Object.defineProperty(this, "contentDocument", {
+            configurable: true,
+            get: () =>
+              ({ readyState: "complete", body: null }) as unknown as Document,
+          });
           const frameWindow = this.contentWindow;
           if (frameWindow !== null) {
-            // jsdom does navigate a frame in a real document; in the outside-visible window it
-            // does not, so the wait for the app's document is satisfied here instead.
-            const done = frameWindow.document;
-            // `readyState` is the wrapper's own getter and cannot be overridden on the document,
-            // so what the page reads is a stand-in carrying the one fact its wait asks for.
-            Object.defineProperty(this, "contentDocument", {
-              configurable: true,
-              get: () => ({ ...done, readyState: "complete" }) as unknown as Document,
-            });
             Object.defineProperty(frameWindow, "postMessage", {
               configurable: true,
               value: (message: { type: string }) => spoken.push(message),
