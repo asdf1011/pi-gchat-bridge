@@ -2438,7 +2438,6 @@ async function setTalking(on) {
  * whereas a status line is one line of a running tool and has neither.
  */
 function afterSpeechFrame() {
-  console.log('DEBUG in afterSpeechFrame', talkOn, liveText.length);
   if (!talkOn) return;   // switched back off while the frame was loading
   if (liveText.trim() !== '') {
     // The same hand-over the stream uses, done once for what the stream said before we could
@@ -2553,7 +2552,6 @@ async function ensureSpeechFrame() {
   if (speechFrame.src !== '') speechFrame.dataset.loaded = 'true';
   // Only ever set by `setTalking`'s load, which is the call that has something to say the moment
   // the frame can hear it; the per-message Read button has already decided what to speak.
-  console.log('DEBUG afterSpeechFrame talkOn=', talkOn, 'src=', JSON.stringify(speechFrame.src), 'live=', JSON.stringify(liveText));
   if (talkOn) afterSpeechFrame();
   return speechFrame;
 }
@@ -2643,7 +2641,6 @@ let spokenStatus = '';
  * the block being spoken — which is the one on screen and the one being highlighted.
  */
 function speakStreamingBlock(text) {
-  console.log('DEBUG speakStreamingBlock', talkOn, speechFrame?.contentWindow !== undefined);
   if (!talkOn || speechFrame?.contentWindow === undefined) return;
   const body = text.trim();
   if (body === '') return;
