@@ -598,38 +598,77 @@
   #conv-header #talk.speaking .talk-waves path { animation: talk-wave 1.1s ease-in-out infinite; }
   #conv-header #talk.speaking .talk-waves path + path { animation-delay: .22s; }
   #conv-header #talk.paused .talk-waves { opacity: .2; }
+  /* The header button carries the microphone too, in its own size: the floating indicator can be
+     scrolled under or hidden behind a drawer, and the header is always there. */
+  #conv-header #talk.waiting { box-shadow: 0 0 0 2px color-mix(in srgb, #17a673 45%, transparent); }
+  #conv-header #talk.hearing { background: #17a673; color: #fff; border-color: transparent;
+    box-shadow: 0 0 0 2px color-mix(in srgb, #17a673 35%, transparent); }
   #conv-header #talk.failed { background: #c0392b; color: #fff; border-color: transparent; }
 
   /* The floating indicator: where the microphone used to sit, saying what the page is doing.
-     Below the header, because the header's corner is now the button itself. */
+     Below the header, because the header's corner is now the button itself.
+
+     Deliberately larger than a header control. It is the one thing on the page that says the mode
+     is on *and* which half of it you are in — speaking, listening, hearing — and at header size a
+     reader could not tell from across the room whether the microphone was live. */
   #talk-indicator { position: fixed; top: 3.1rem; right: .9rem; z-index: 40;
     display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
     /* `padding: 0` matters: a button's default padding shrank the flex child to a sliver, which
        rendered the icon as a 4px smear rather than a speech bubble. */
     padding: 0; box-sizing: border-box;
-    width: 2.6rem; height: 2.6rem; border-radius: 50%;
-    background: color-mix(in srgb, Canvas 88%, transparent); color: var(--accent);
-    border: 1px solid #8884; backdrop-filter: blur(6px); box-shadow: 0 .12rem .5rem #0002; }
+    width: 3.9rem; height: 3.9rem; border-radius: 50%;
+    /* The colour is a token so the three states are three values of one thing, and the ring below
+       can be drawn from it rather than repeating a hex three times. */
+    --mic: var(--accent);
+    background: color-mix(in srgb, Canvas 88%, transparent); color: var(--mic);
+    border: 2px solid color-mix(in srgb, var(--mic) 55%, transparent);
+    backdrop-filter: blur(6px); box-shadow: 0 .12rem .5rem #0002;
+    transition: border-color .25s ease, color .25s ease, box-shadow .25s ease; }
   #talk-indicator[hidden] { display: none; }
-  #talk-indicator svg { flex: none; width: 1.45rem; height: 1.45rem; fill: none;
+  #talk-indicator svg { flex: none; width: 2.1rem; height: 2.1rem; fill: none;
     stroke: currentColor; stroke-width: 1.7; stroke-linejoin: round; }
   #talk-indicator .bubble-back { opacity: .45; }
   #talk-indicator .dots { fill: currentColor; stroke: none; }
   #talk-indicator .play-glyph { display: none; fill: currentColor; stroke: none; }
   #talk-indicator.paused .dots { display: none; }
   #talk-indicator.paused .play-glyph { display: inline; }
-  /* Speaking: the dots march. Paused: they stop, and the whole thing dims, because a paused mode
-     that animates is a mode the reader cannot tell apart from a working one. */
+  /* A ring that breathes while the microphone is open and waiting for a voice. Slow — about two and
+     a half seconds — because a fast pulse is an alarm, and this is a heartbeat: "I am here, talk
+     when you like." Paused, it stops entirely and the whole thing dims, because a paused mode that
+     animates is a mode the reader cannot tell apart from a working one. */
+  #talk-indicator.waiting { animation: mic-breathe 2.6s ease-in-out infinite; }
+  @keyframes mic-breathe {
+    0%, 100% { box-shadow: 0 .12rem .5rem #0002, 0 0 0 0 color-mix(in srgb, var(--mic) 45%, transparent); }
+    50% { box-shadow: 0 .12rem .5rem #0002, 0 0 0 .55rem color-mix(in srgb, var(--mic) 0%, transparent); }
+  }
+  /* Hearing the reader: a different colour, and a quicker ring, so "the microphone is picking you
+     up" is not something the reader has to infer from a transcript appearing. */
+  #talk-indicator.hearing { --mic: #17a673; animation: mic-hearing 1.1s ease-in-out infinite; }
+  @keyframes mic-hearing {
+    0%, 100% { box-shadow: 0 .12rem .5rem #0002, 0 0 0 .1rem color-mix(in srgb, var(--mic) 50%, transparent); }
+    50% { box-shadow: 0 .12rem .5rem #0002, 0 0 0 .7rem color-mix(in srgb, var(--mic) 22%, transparent); }
+  }
+  /* Speaking: the dots march, in the reading colour rather than the listening one, so the two
+     halves of the mode are never the same colour. */
   #talk-indicator.speaking .dots circle { animation: talk-dot 1.05s ease-in-out infinite; }
   #talk-indicator.speaking .dots circle:nth-child(2) { animation-delay: .16s; }
   #talk-indicator.speaking .dots circle:nth-child(3) { animation-delay: .32s; }
   @keyframes talk-dot { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
   #talk-indicator.paused { opacity: .55; }
-  #talk-indicator.failed { color: #c0392b; }
+  /* Paused, but something was said while paused and is waiting in the composer. */
+  #talk-indicator.held { opacity: 1; }
+  #talk-indicator.held::after { content: ''; position: absolute; top: .15rem; right: .15rem;
+    width: .55rem; height: .55rem; border-radius: 50%; background: #e08a1e; }
+  #talk-indicator.failed { --mic: #c0392b; animation: none; }
   @media (prefers-reduced-motion: reduce) {
     #conv-header #talk.speaking .talk-waves path,
     #talk-indicator.speaking .dots circle { animation: none; }
     #talk-indicator.speaking .dots circle { opacity: 1; }
+    /* The ring is the state, so it does not vanish with motion: it becomes a solid, thicker border
+       in the same colour. Stillness is what is being respected, not the information. */
+    #talk-indicator.waiting, #talk-indicator.hearing { animation: none; }
+    #talk-indicator.waiting { box-shadow: 0 .12rem .5rem #0002, 0 0 0 .3rem color-mix(in srgb, var(--mic) 30%, transparent); }
+    #talk-indicator.hearing { box-shadow: 0 .12rem .5rem #0002, 0 0 0 .45rem color-mix(in srgb, var(--mic) 38%, transparent); }
   }
 
   /* The voice menu, sized like the buttons it sits between. `hidden` until the speech app has
@@ -2304,6 +2343,17 @@ let artifactsOrigin = '';
 let talkOn = false;
 /** Whether the reader has paused talking mode, as opposed to turned it off. */
 let talkPaused = false;
+/**
+ * What the microphone is doing, as the speech app last reported it.
+ *
+ * `off` — the mode is on but no microphone is open yet (the app is still loading its models).
+ * `waiting` — open and listening for the reader to start talking.
+ * `hearing` — the app has detected speech and is transcribing it.
+ *
+ * The three states exist because the mode has three, and a single "on" light cannot say which one
+ * it is in: a microphone that is open and silent looks exactly like one that is not working.
+ */
+let micState = 'off';
 let speechFrame;
 let spokenWords = [];      // the ranges being highlighted, in reading order
 let highlight;
@@ -2340,8 +2390,45 @@ function setSpeaking(on) {
   indicator?.classList.toggle('speaking', on);
 }
 
+/**
+ * Record what the microphone is doing, and paint it.
+ *
+ * One function so the button, the floating indicator and the header control can never disagree
+ * about whether the page is listening, waiting, or hearing: the transcript arrives as a message
+ * from the app, and if the icon says nothing is happening while the app is transcribing, a
+ * reader has no way to tell a working mode from a broken one.
+ */
+function setMicState(state) {
+  if (state === micState) return;
+  micState = state;
+  for (const el of [talk, indicator]) {
+    if (el === undefined || el === null) continue;
+    el.classList.toggle('waiting', state === 'waiting');
+    el.classList.toggle('hearing', state === 'hearing');
+  }
+  refreshIndicatorLabel();
+}
+
 /** The floating indicator is shown while the mode is on, and carries the same state. */
 let indicator;
+
+/**
+ * The button's label and title: the action, then what is happening.
+ *
+ * A button that only ever says "Pause reading answers" leaves the reader to infer the state from
+ * an animation, which is exactly the kind of thing a screen-reader user cannot infer at all.
+ */
+function refreshIndicatorLabel() {
+  if (indicator === undefined) indicator = document.getElementById('talk-indicator');
+  if (indicator === null) return;
+  const action = talkPaused ? 'Resume' : 'Pause';
+  const doing =
+    micState === 'hearing' ? 'hearing you' :
+    micState === 'waiting' ? 'listening' :
+    talkPaused ? 'paused' : 'reading aloud';
+  indicator.setAttribute('aria-label', `${action} — ${doing}`);
+  indicator.title = `${action} — ${doing}`;
+}
 
 function showIndicator(on) {
   if (indicator === undefined) indicator = document.getElementById('talk-indicator');
@@ -2349,11 +2436,9 @@ function showIndicator(on) {
   indicator.hidden = !on;
   indicator.classList.toggle('paused', on && talkPaused);
   indicator.classList.toggle('failed', talk.classList.contains('failed'));
-  // The label is the action, not the state: a button that says "paused" leaves the reader to work
-  // out what pressing it does.
-  const label = talkPaused ? 'Resume reading answers' : 'Pause reading answers';
-  indicator.setAttribute('aria-label', label);
-  indicator.title = label;
+  indicator.classList.toggle('waiting', on && micState === 'waiting');
+  indicator.classList.toggle('hearing', on && micState === 'hearing');
+  refreshIndicatorLabel();
 }
 
 /**
@@ -2412,7 +2497,10 @@ async function setTalking(on) {
     talkPaused = false;
     talk.classList.remove('paused');
     showIndicator(false);
-    // The microphone belongs to the mode: off means off, not left open and ignored.
+    // The microphone belongs to the mode: off means off, not left open and ignored. The state is
+    // cleared here rather than waiting for the app's `listening: off`, because a dead frame never
+    // sends one and the icon would otherwise stay lit after the mode was switched off.
+    setMicState('off');
     speechFrame?.contentWindow?.postMessage({ type: 'listen', on: false }, '*');
     return;
   }
@@ -2440,13 +2528,37 @@ async function setTalking(on) {
 function submitHeard(text) {
   const said = String(text || '').trim();
   if (said === '' || !current) return;
-  // Paused means paused for reading aloud; the microphone goes with it.
-  if (!talkOn || talkPaused) return;
+  if (!talkOn) return;
+  // While paused the page keeps the microphone open but holds what it hears, rather than dropping
+  // it: the words were said to this page and are still worth having, and the draft is where a
+  // reader looks for something that had not been sent yet.
+  if (talkPaused) {
+    holdHeard(said);
+    return;
+  }
   const box = textBox;
   if (box.value.trim() === '') box.value = said;
   else box.value = box.value.replace(/\s*$/, ' ') + said;
   fitBox();
   document.getElementById('send').requestSubmit();
+}
+
+/**
+ * Keep a transcript that arrived while paused, for when the reader resumes.
+ *
+ * Not submitted and not discarded: pausing is a pause in the conversation, so what is said during
+ * it belongs to the moment the reader comes back. Put in the composer rather than a queue of its
+ * own, because the composer is already the place a message waits to be sent, and a second place to
+ * look for unsent words is one place too many.
+ */
+function holdHeard(said) {
+  const box = textBox;
+  if (box.value.trim() === '') box.value = said;
+  else box.value = box.value.replace(/\s*$/, ' ') + said;
+  fitBox();
+  // Deliberately no submit: paused means paused. The indicator says so, because text appearing in
+  // the composer while the mode is paused is otherwise unexplained.
+  indicator?.classList.add('held');
 }
 
 /**
@@ -2466,7 +2578,9 @@ function afterSpeechFrame() {
   if (!talkOn) return;   // switched back off while the frame was loading
   // The listening half of the mode. The app opens the microphone and reports what it hears; what a
   // transcript *means* is this page's decision, which is why the app never submits anything itself.
-  speechFrame?.contentWindow?.postMessage({ type: 'listen', on: true }, '*');
+  // Paused means paused: the frame finishing its load while the reader has already paused must not
+  // quietly reopen the device the pause button closed.
+  if (!talkPaused) speechFrame?.contentWindow?.postMessage({ type: 'listen', on: true }, '*');
   if (liveText.trim() !== '') {
     // The same hand-over the stream uses, done once for what the stream said before we could
     // hear it. `talkBlock` is empty, so this is a new block rather than a restart, and the app's
@@ -2566,7 +2680,33 @@ async function ensureSpeechFrame() {
         speechTarget = undefined;
         refreshSpeakAction();
       }
+      // The microphone's own state, which the app reports rather than this page assuming. `on` is
+      // sent again for every turn (`turn 3: samples …`) as diagnostics, so the state is only taken
+      // from `starting` and `off`; the turn-shaped detail lines leave it alone.
+      if (data.type === 'listening') {
+        if (data.state === 'starting') setMicState('off');
+        else if (data.state === 'off') setMicState('off');
+        // A bare `on` with no turn detail is the device being opened: that is the waiting state.
+        // Diagnostic `on`s carry a `turn N:` detail and describe a turn, not the device.
+        else if (data.state === 'on' && !/^turn \d+:/.test(String(data.detail ?? ''))) {
+          setMicState('waiting');
+        }
+        return;
+      }
+      // Speech the app detected, and is now transcribing: the reader is being heard, which is a
+      // different thing from the page talking, and wants a different colour.
+      if (data.type === 'speech-start') {
+        setMicState('hearing');
+        return;
+      }
+      if (data.type === 'speech-end') {
+        if (micState === 'hearing') setMicState('waiting');
+        return;
+      }
       if (data.type === 'heard') {
+        // The transcript has been handed over, so the microphone is back to waiting. Set before
+        // submitting: submitting resets the composer and may start a turn this page then speaks.
+        if (micState === 'hearing') setMicState('waiting');
         submitHeard(data.text);
         return;
       }
@@ -3962,7 +4102,12 @@ document.getElementById('talk-indicator').onclick = () => {
   if (talkPaused) {
     talkPaused = false;
     talk.classList.remove('paused');
+    indicator?.classList.remove('held');
     showIndicator(true);
+    // The microphone paused with the reading, so it resumes with it. Same message, same frame:
+    // the app owns the device, and a page that opened it twice would either be ignored or fight
+    // itself for the mic.
+    speechFrame?.contentWindow?.postMessage({ type: 'listen', on: true }, '*');
     speechFrame?.contentWindow?.postMessage({ type: 'resume' }, '*');
     return;
   }
@@ -3970,6 +4115,11 @@ document.getElementById('talk-indicator').onclick = () => {
   talk.classList.add('paused');
   showIndicator(true);
   speechFrame?.contentWindow?.postMessage({ type: 'pause' }, '*');
+  // Closed while paused, not left open and ignored: `pause` only stops playback, and a microphone
+  // still recording after "pause" is a mode still listening to the room. What was already heard
+  // arrives as `heard` after the app closes the device, and is held in the composer.
+  speechFrame?.contentWindow?.postMessage({ type: 'listen', on: false }, '*');
+  setMicState('off');
   setSpeaking(false);
 };
 

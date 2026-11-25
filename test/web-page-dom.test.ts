@@ -54,7 +54,7 @@ interface Harness {
   /** Every `window.open` the page attempted, as its argument list. */
   opened: unknown[][];
   /** Every message the page posted to the speech frame, in order. */
-  spoken: { type: string; text?: string; block?: number; interrupt?: boolean }[];
+  spoken: { type: string; text?: string; block?: number; interrupt?: boolean; on?: boolean }[];
   /** Console errors the page produced — an empty list is the pass condition. */
   errors: string[];
   /** Resolve pending microtasks so the page's async work completes. */
@@ -3299,6 +3299,23 @@ async function frame(h: Harness): Promise<void> {
   await h.settle();
 }
 
+/**
+ * What the page asked the app to *say*, in order.
+ *
+ * The frame listens to two things at once — sentences to speak and the microphone to open — and
+ * most tests here are about the speaking half, so the microphone messages are filtered out rather
+ * than every assertion having to name the one it cares about.
+ */
+function spoken(h: Harness): { type: string; text?: string; interrupt?: boolean }[] {
+  return h.spoken.filter((message) => message.type === "speak");
+}
+
+/** Whether the microphone was asked to open (true) or close (false), as the last such request. */
+function listening(h: Harness): boolean | undefined {
+  const requests = h.spoken.filter((message) => message.type === "listen");
+  return requests.length === 0 ? undefined : requests[requests.length - 1]!.on;
+}
+
 test("turning talking mode on mid-turn reads the message already on screen", async () => {
   let h: Harness | undefined;
   try {
@@ -3315,12 +3332,12 @@ test("turning talking mode on mid-turn reads the message already on screen", asy
     await frame(h);
 
     assert.deepEqual(
-      h.spoken.filter((message) => message.type === "speak").map((message) => message.text),
+      spoken(h).map((message) => message.text),
       ["Let me check the logs."],
       "the sentence already on screen is spoken when the mode is switched on",
     );
     // A new block, not a restart: nothing was in progress to cut off.
-    assert.equal(h.spoken[0]?.interrupt, false);
+    assert.equal(spoken(h)[0]?.interrupt, false);
   } finally {
     h?.close();
   }
@@ -3366,11 +3383,11 @@ test("turning talking mode on mid-turn says what a quiet turn is doing", async (
     await frame(h);
 
     assert.deepEqual(
-      h.spoken.filter((message) => message.type === "speak").map((message) => message.text),
+      spoken(h).map((message) => message.text),
       ["Running: npm test"],
       "the status of the running tool is read when the mode is switched on",
     );
-    assert.equal(h.spoken[0]?.interrupt, true, "and cuts anything else that was playing");
+    assert.equal(spoken(h)[0]?.interrupt, true, "and cuts anything else that was playing");
   } finally {
     h?.close();
   }
@@ -3388,7 +3405,7 @@ test("a status is said once, not on every repaint", async () => {
     await frame(h);
 
     assert.deepEqual(
-      h.spoken.map((message) => message.text),
+      spoken(h).map((message) => message.text),
       ["Running: npm test"],
       "the same line twice is one thing to say",
     );
@@ -3408,7 +3425,7 @@ test("a status waits while a message is being written, and a new block unblocks 
     source.emit("tool", { name: "bash", status: "running", line: "Running: jj log" });
     await frame(h);
     assert.deepEqual(
-      h.spoken.map((message) => message.text),
+      spoken(h).map((message) => message.text),
       ["Writing this."],
       "a status under text being spoken is a voice interrupting itself",
     );
@@ -3419,9 +3436,132 @@ test("a status waits while a message is being written, and a new block unblocks 
     source.emit("tool", { name: "bash", status: "running", line: "Running: jj log" });
     await frame(h);
     assert.deepEqual(
-      h.spoken.map((message) => message.text),
+      spoken(h).map((message) => message.text),
       ["Writing this.", "Running: jj log"],
     );
+  } finally {
+    h?.close();
+  }
+});
+
+/** Post a message as the speech app would, and let the page's handlers run. */
+async function fromSpeech(h: Harness, data: unknown): Promise<void> {
+  const frame = h.dom.window.document.getElementById("speech-host") as HTMLIFrameElement;
+  assert.ok(frame.contentWindow, "the speech frame exists once talking mode has loaded it");
+  h.dom.window.dispatchEvent(
+    new h.dom.window.MessageEvent("message", { data, source: frame.contentWindow as Window }),
+  );
+  await h.settle();
+}
+
+/** The floating indicator, which is where the microphone's state is shown. */
+function indicatorEl(h: Harness): HTMLElement {
+  return h.dom.window.document.getElementById("talk-indicator") as HTMLElement;
+}
+
+test("the microphone is opened with the mode, and closed with it", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    await turnTalkOn(h);
+    await frame(h);
+
+    assert.equal(listening(h), true, "switching the mode on opens the microphone");
+
+    await turnTalkOn(h); // off again
+    assert.equal(listening(h), false, "and switching it off closes the microphone");
+  } finally {
+    h?.close();
+  }
+});
+
+test("pausing closes the microphone, and resuming reopens it", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    await turnTalkOn(h);
+    await frame(h);
+    assert.equal(listening(h), true);
+
+    // The floating button is playback: pause.
+    indicatorEl(h).click();
+    await h.settle();
+    assert.equal(listening(h), false, "a paused mode must not still be listening to the room");
+
+    indicatorEl(h).click(); // resume
+    await h.settle();
+    assert.equal(listening(h), true, "resuming opens the microphone again");
+  } finally {
+    h?.close();
+  }
+});
+
+test("a transcript said while paused is kept in the composer, not sent and not lost", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    await turnTalkOn(h);
+    await frame(h);
+    const box = h.dom.window.document.getElementById("text") as HTMLTextAreaElement;
+    box.value = "half typed";
+    box.dispatchEvent(new h.dom.window.Event("input", { bubbles: true }));
+
+    indicatorEl(h).click(); // pause
+    await h.settle();
+    const before = h.requests.filter((request) => request.method === "POST").length;
+
+    await fromSpeech(h, { type: "heard", text: "and said aloud" });
+    await h.settle();
+
+    assert.equal(
+      h.requests.filter((request) => request.method === "POST").length,
+      before,
+      "paused means paused: nothing is submitted",
+    );
+    assert.equal(box.value, "half typed and said aloud", "but the words are not thrown away");
+    assert.ok(indicatorEl(h).classList.contains("held"), "and the indicator says something is held");
+  } finally {
+    h?.close();
+  }
+});
+
+test("a transcript said while the mode is on is submitted as a message", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    await turnTalkOn(h);
+    await frame(h);
+
+    await fromSpeech(h, { type: "heard", text: "what is the time" });
+    await h.settle();
+
+    const posted = h.requests.filter((request) => request.method === "POST" && /\/message$/.test(request.url));
+    assert.equal(posted.length, 1, "the transcript was sent");
+    assert.match(posted[0]!.body ?? "", /what is the time/);
+  } finally {
+    h?.close();
+  }
+});
+
+test("the indicator says which half of the mode is working", async () => {
+  let h: Harness | undefined;
+  try {
+    h = await loadPage({ conversations: [{ conversationId: 7, chatKey: "k", model: "m" }] });
+    await turnTalkOn(h);
+    await frame(h);
+
+    // The app opening the device with no turn detail is the waiting state.
+    await fromSpeech(h, { type: "listening", state: "on", detail: "microphone open" });
+    assert.ok(indicatorEl(h).classList.contains("waiting"), "open and waiting is its own state");
+
+    // Speech detected: the reader is being heard.
+    await fromSpeech(h, { type: "speech-start", at: 1 });
+    assert.ok(indicatorEl(h).classList.contains("hearing"), "being heard reads differently");
+    assert.ok(!indicatorEl(h).classList.contains("waiting"));
+
+    // The per-turn diagnostic also says `on`, and must not knock it out of `hearing`.
+    await fromSpeech(h, { type: "listening", state: "on", detail: "turn 2: samples 0..16 (1.00 s)" });
+    assert.ok(indicatorEl(h).classList.contains("hearing"), "a diagnostic line is not a state change");
   } finally {
     h?.close();
   }
