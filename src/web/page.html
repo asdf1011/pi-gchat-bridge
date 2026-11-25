@@ -2412,6 +2412,8 @@ async function setTalking(on) {
     talkPaused = false;
     talk.classList.remove('paused');
     showIndicator(false);
+    // The microphone belongs to the mode: off means off, not left open and ignored.
+    speechFrame?.contentWindow?.postMessage({ type: 'listen', on: false }, '*');
     return;
   }
   await ensureSpeechFrame();
@@ -2422,6 +2424,29 @@ async function setTalking(on) {
   // Unless we are mid-turn, in which case the stream is already ahead of us: the block being
   // written is handed over in `afterSpeechFrame` because the frame was not listening until now,
   // and the status of whatever the turn is running waits behind it — see `speakStatus`.
+}
+
+/**
+ * Turn what was heard into a message.
+ *
+ * Submitted through the form rather than fetched directly, so that everything the send path already
+ * does — slash commands, the draft, the echoed bubble, the disabled state — applies unchanged. The
+ * app only ever reports words; deciding they are a message is this page's job.
+ *
+ * The draft is never clobbered: if the reader has typed something, the transcript is appended to it
+ * rather than replacing it, because losing half-typed words to a passing remark is worse than an
+ * awkward concatenation.
+ */
+function submitHeard(text) {
+  const said = String(text || '').trim();
+  if (said === '' || !current) return;
+  // Paused means paused for reading aloud; the microphone goes with it.
+  if (!talkOn || talkPaused) return;
+  const box = textBox;
+  if (box.value.trim() === '') box.value = said;
+  else box.value = box.value.replace(/\s*$/, ' ') + said;
+  fitBox();
+  document.getElementById('send').requestSubmit();
 }
 
 /**
@@ -2439,6 +2464,9 @@ async function setTalking(on) {
  */
 function afterSpeechFrame() {
   if (!talkOn) return;   // switched back off while the frame was loading
+  // The listening half of the mode. The app opens the microphone and reports what it hears; what a
+  // transcript *means* is this page's decision, which is why the app never submits anything itself.
+  speechFrame?.contentWindow?.postMessage({ type: 'listen', on: true }, '*');
   if (liveText.trim() !== '') {
     // The same hand-over the stream uses, done once for what the stream said before we could
     // hear it. `talkBlock` is empty, so this is a new block rather than a restart, and the app's
@@ -2537,6 +2565,10 @@ async function ensureSpeechFrame() {
         speechEntry = undefined;
         speechTarget = undefined;
         refreshSpeakAction();
+      }
+      if (data.type === 'heard') {
+        submitHeard(data.text);
+        return;
       }
       if (data.type === 'error') {
         // A microphone that animates while nothing is audible is worse than no icon: say so.
