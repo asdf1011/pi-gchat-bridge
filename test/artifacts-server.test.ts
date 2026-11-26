@@ -8,7 +8,7 @@ import path from "node:path";
 import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
 
-import { RENDER_SCRIPT, startArtifactsServer } from "../src/web/artifacts-server.js";
+import { MAX_REPORT_BYTES, RENDER_SCRIPT, startArtifactsServer } from "../src/web/artifacts-server.js";
 
 /** The repository root, for the tests that load a client script as a file. */
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -1558,15 +1558,19 @@ test("a report larger than the cap is refused rather than truncated", async () =
 
   const harness = await serveWithApps(root, conversationDir);
   try {
+    // The boundary as the server defines it, not as this test remembers it: the cap was raised
+    // from 256 KiB to 8 MiB when reports began carrying the audio a transcription was given, and
+    // a hardcoded figure here went on asserting a limit that no longer existed.
+    const cap = MAX_REPORT_BYTES;
     const atLimit = await fetch(`${harness.base}/apps/1/bench/report`, {
       method: "POST",
-      body: "x".repeat(256 * 1024),
+      body: "x".repeat(cap),
     });
     assert.equal(atLimit.status, 204);
 
     const tooBig = await fetch(`${harness.base}/apps/1/bench/report`, {
       method: "POST",
-      body: "x".repeat(256 * 1024 + 1),
+      body: "x".repeat(cap + 1),
     });
     assert.equal(tooBig.status, 413);
 

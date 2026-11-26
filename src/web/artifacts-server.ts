@@ -1106,7 +1106,7 @@ async function serveApp(
  * fill the disk a request at a time -- and it is refused rather than truncated, because half a
  * report is a report that lies.
  */
-const MAX_REPORT_BYTES = 8 * 1024 * 1024;
+export const MAX_REPORT_BYTES = 8 * 1024 * 1024;
 
 /**
  * Store a report an app sends about itself.
