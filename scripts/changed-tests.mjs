@@ -35,7 +35,12 @@ const CACHE = path.join(ROOT, "node_modules", ".cache", "bridge-tests", "results
 // Generous on purpose: `artifact-vcs` drives real `jj` repositories, and a run that happens while
 // something else is building has been seen to take twice as long as usual. A timeout that fires on
 // that is noise, and noise in a test runner is how a real failure gets ignored.
-const TEST_TIMEOUT_MS = 60_000;
+//
+// Five minutes, not one, because this flag *overrides* a per-test `{ timeout }` rather than merely
+// defaulting it -- and one test waits out chord's own 60 s readiness deadline on purpose, declaring
+// 240 s to allow it. At 60 s that test was killed at the instant it should have succeeded, so the
+// suite carried a permanent failure that looked like a flake and cost a full minute every run.
+const TEST_TIMEOUT_MS = 300_000;
 
 const args = process.argv.slice(2);
 const flag = (name) => args.includes(name);
