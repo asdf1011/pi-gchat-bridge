@@ -189,6 +189,12 @@ test("a dead link is an error, not an empty store", async () => {
     name: "client",
     kind: "client",
     upstream: { link: down, principal: "server" },
+    // What this test is about is that the failure arrives *as* unreachable rather than as data.
+    // How long it waits first is chord's `readyTimeout`, defaulting to 60 s, and this file asserts
+    // three such failures in sequence: left at the default it spent three minutes proving something
+    // that is true in a second. Short enough to be quick, long enough that the request outlives the
+    // moment the link closed.
+    readyTimeout: 250,
   });
   const linked = linkSessionHost({ host: client });
 
@@ -197,7 +203,7 @@ test("a dead link is an error, not an empty store", async () => {
   // And the session object was not cached as a rejected promise: the next call fails the same way
   // rather than from a promise that can only ever reject.
   await assert.rejects(linked.attach(7, () => {}), { name: "HostUnreachableError" });
-}, { timeout: 240_000 });
+});
 
 /* --- Settings and commands --------------------------------------------------
  *
